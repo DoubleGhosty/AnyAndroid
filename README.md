@@ -1,0 +1,164 @@
+# AnyAndroid for Windows
+
+Couche de compatibilité qui exécute des applications Android (bytecode DEX) **comme des processus
+Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
+
+> **Avancement : ≈ 30 % vers « Android natif sur Windows »**, détail et étape en cours dans
+> [docs/STATUS.md](docs/STATUS.md).
+>
+> **Statut : prototype de recherche.** La preuve de concept de l'annexe A du cadrage fonctionne :
+> des APK de démonstration s'ouvrent dans une vraie fenêtre Windows. L'objectif prioritaire est
+> désormais de faire fonctionner les **GApps** : voir [ADR-002](docs/adr/ADR-002-objectif-gapps.md).
+> Ce n'est **pas** une alternative à Android ni à WSA : seul le sous-ensemble documenté dans la
+> [matrice des API](docs/compatibility/api-matrix.md) est pris en charge.
+
+## Ce qui fonctionne (vérifié par les tests)
+
+- **Analyse statique d'APK** (`inspect`) sans exécution de code : ZIP durci (bombes, chevauchements,
+  doublons, traversée de chemins), manifeste binaire, DEX 035 à 040, multi-DEX, bibliothèques
+  natives ELF, signature v1/v2, APK éclatés et bundles `.apks`/`.xapk`, API de la plateforme
+  utilisées avec leur statut, verdict de compatibilité.
+- **Interpréteur Dalvik** : jeu d'instructions complet (sauf `invoke-custom`/`invoke-polymorphic`),
+  exceptions, héritage et interfaces, initialisation des classes, vérification structurelle du
+  bytecode, limites de pile, d'objets et d'instructions.
+- **Runtime G1** ([ADR-003](docs/adr/ADR-003-runtime-threads-gc-jni.md)) :
+  - vrais threads Windows (`Thread`, `synchronized`, `wait`/`notify`, `sleep`, `join`, `interrupt`)
+    sous un verrou global ;
+  - ramasse-miettes mark-sweep avec poignées générationnelles et `WeakReference` ;
+  - réflexion `java.lang.reflect` ;
+  - **JNI 1.6** en convention System V, prêt pour les bibliothèques Android x86_64.
+- **Pont framework** (≈ 110 classes, ≈ 700 membres) : `java.lang`, `ArrayList`, `HashMap`,
+  `Activity`, `Intent`, `Bundle`, `Log`, `Handler`, `View`, `LinearLayout`, `TextView`, `Button`,
+  `EditText`, `Toast`… Toute API absente échoue explicitement et est consignée.
+- **Cycle de vie Android** : pile d'activités, ordre des rappels conforme, `startActivity` avec
+  extras, `finish`, bouton Retour, plantage avec trace de pile.
+- **Fenêtre Win32 native** (contrôles standard, DPI par écran, toasts, Échap/Alt+← = Retour) et
+  **mode headless scriptable** pour les tests.
+- **Analyse d'écart** (`gaps`) pour mesurer ce qui manque aux GApps sur de vrais APK.
+- **G2 atteint** ([ADR-004](docs/adr/ADR-004-libcore-aosp.md)) : des programmes Java s'exécutent
+  sur la **vraie libcore d'Android 17**, extraite d'une image système officielle (`image` : formats
+  sparse, super, ext4, EROFS compressé, APEX, DEX 041). En mode libcore (`exec --bootclasspath`), le
+  bytecode d'AOSP remplace le pont pour `java.*` ; ses méthodes natives sont implémentées pour
+  Windows (`libcore natives` mesure la couverture), avec `invoke-polymorphic`/`VarHandle`, les
+  chaînes compactes d'ART et les jeux de caractères standards. Collections, `Formatter`,
+  `java.util.concurrent`, exceptions et **fichiers** fonctionnent : un système de fichiers virtuel
+  ([ADR-005](docs/adr/ADR-005-systeme-de-fichiers-virtuel.md)) sert `/system` et `/apex` depuis
+  l'image système en lecture seule, et `/data` depuis un bac à sable.
+
+## Limites actuelles
+
+Pas de ressources compilées (`resources.arsc`, layouts XML), pas de chargeur de bibliothèques
+natives ELF (JNI est prêt, le chargement des `.so` arrive en G4), pas de Binder ni de services
+système, pas d'annotations, pas de parallélisme du code Java (verrou global), rendu limité aux
+contrôles standard, un seul processus. L'ADR-002 détaille le chemin vers les GApps.
+
+## Construire
+
+Prérequis : Windows 10/11 x64, CMake ≥ 3.21, Ninja et un compilateur C++20. Le projet est testé avec
+MinGW-w64 GCC 15 (UCRT). MSVC n'a pas encore été testé.
+
+```bash
+cmake -S . -B build -G Ninja
+```
+
+```bash
+cmake --build build
+```
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+Le build reconstruit les APK de démonstration depuis leurs sources texte (`samples/`, smali +
+manifeste) avec l'outil `apkgen` : aucun SDK Android n'est nécessaire.
+
+## Utiliser
+
+```bash
+build/apps/cli/anyandroid.exe inspect build/samples/basic-activity.apk
+```
+
+```bash
+build/apps/cli/anyandroid.exe run build/samples/two-screens.apk
+```
+
+```bash
+build/apps/cli/anyandroid.exe exec build/samples/hello-dex.apk com.anyandroid.samples.hello.Hello
+```
+
+```bash
+build/apps/cli/anyandroid.exe exec build/samples/threads-demo.apk com.anyandroid.samples.threads.Main
+```
+
+```bash
+build/apps/cli/anyandroid.exe gaps chemin/vers/vos-gapps.apks --markdown --output rapport-gapps.md
+```
+
+Libcore d'AOSP (G2) : extraire le chemin de classes d'amorçage d'une image système **hors du
+dépôt** (les fichiers extraits ne doivent pas être redistribués), puis l'utiliser :
+
+```bash
+build/apps/cli/anyandroid.exe image bootclasspath chemin/vers/system.img --output C:/aosp/libcore
+```
+
+```bash
+build/apps/cli/anyandroid.exe libcore natives --bootclasspath C:/aosp/libcore --libcore-only
+```
+
+```bash
+build/apps/cli/anyandroid.exe exec --bootclasspath C:/aosp/libcore --libcore-only build/samples/hello-dex.apk com.anyandroid.samples.hello.Hello
+```
+
+Avec l'arborescence servie depuis l'image système et un bac à sable choisi :
+
+```bash
+build/apps/cli/anyandroid.exe exec --bootclasspath C:/aosp/libcore --libcore-only --system-image C:/aosp/system.img --data-dir C:/aosp/appdata build/samples/libcore-demo.apk com.anyandroid.samples.libcore.Main
+```
+
+`run` demande une confirmation avant d'exécuter le code d'un APK (`--yes` pour l'automatiser) et
+refuse les APK jugés incompatibles (`--force` pour passer outre). `anyandroid help` liste toutes les
+options.
+
+| Code de sortie | Signification |
+|---|---|
+| 0 | succès |
+| 1 | l'application a planté ou le programme a échoué |
+| 2 | ligne de commande invalide ou fichier illisible |
+| 3 | commande prévue mais pas encore implémentée |
+| 4 | APK incompatible : lancement refusé |
+| 5 | lancement non confirmé |
+
+## Organisation du dépôt
+
+```
+apps/cli/                 CLI anyandroid (inspect, run, exec, compat, gaps, image, libcore)
+runtime/common/           octets bornés, journaux JSONL, JSON, hachages, UTF-8/16
+runtime/apk-inspector/    ZIP, inflate, AXML, manifeste, ELF, analyse du code
+runtime/image/            images Android : sparse, super, ext4, EROFS/LZ4, APEX, chemin d'amorçage
+runtime/vfs/              système de fichiers virtuel du processus Android (montages, bac à sable)
+runtime/dex-engine/       format DEX, opcodes, vérification, runtime, interpréteur, classes de base
+runtime/framework-bridge/ API Java/Android implémentées en natif (registre à statuts)
+runtime/lifecycle/        hôte d'application et cycle de vie des activités
+runtime/compat/           verdict de compatibilité, matrice des API, analyse d'écart
+backends/windows/         fenêtre Win32 ; backends/headless/ : backend scriptable
+tools/apkgen/             assembleur smali, compilateur AXML, écriture ZIP/DEX
+samples/                  APK de démonstration (sources smali, code Java équivalent en commentaire)
+tests/                    tests unitaires, de bout en bout (sorties de référence) et fuzzing
+docs/                     ADR, matrice des API, modèle de menace
+```
+
+## Documentation
+
+- [ADR-001 — Architecture du MVP](docs/adr/ADR-001-architecture-runtime.md)
+- [ADR-002 — Objectif GApps](docs/adr/ADR-002-objectif-gapps.md)
+- [ADR-003 — Threads, ramasse-miettes, réflexion et JNI](docs/adr/ADR-003-runtime-threads-gc-jni.md)
+- [ADR-004 — La libcore d'AOSP sur la VM (G2)](docs/adr/ADR-004-libcore-aosp.md)
+- [ADR-005 — Système de fichiers virtuel](docs/adr/ADR-005-systeme-de-fichiers-virtuel.md)
+- [Matrice des API](docs/compatibility/api-matrix.md) (générée par `anyandroid compat --markdown`)
+- [Modèle de menace](docs/security/threat-model.md) · [SECURITY.md](SECURITY.md) · [CONTRIBUTING.md](CONTRIBUTING.md)
+
+## Licence et marques
+
+Licence du projet **à décider** (ADR-002, décision D3 ; Apache-2.0 suggérée). Android est une
+marque de Google LLC et Windows une marque de Microsoft. AnyAndroid n'est affilié à aucune de ces
+sociétés ni certifié par elles. Le dépôt ne contient et ne distribue aucun binaire propriétaire.

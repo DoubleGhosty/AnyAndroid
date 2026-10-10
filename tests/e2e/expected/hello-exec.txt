@@ -1,0 +1,4 @@
+Bonjour depuis Dalvik, exécuté sur Windows sans machine virtuelle !
+fib(20) = 6765
+Arguments : 0
+Exception rattrapée : divide by zero

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Fixture de test : reproduit le PROFIL d'un paquet de type Google Play Services
+  (UID partagé, plusieurs processus, permissions privilégiées, composants nombreux,
+  code natif livré dans des splits par ABI) sans contenir de code Google.
+  Sert à valider `anyandroid gaps` avant de l'appliquer aux vrais APK fournis par l'utilisateur.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.anyandroid.samples.gmsprofile"
+    android:sharedUserId="com.anyandroid.uid.shared"
+    android:versionCode="250832"
+    android:versionName="25.08.32"
+    android:isSplitRequired="true">
+  <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="34"/>
+  <uses-permission android:name="android.permission.INTERNET"/>
+  <uses-permission android:name="android.permission.GET_ACCOUNTS"/>
+  <uses-permission android:name="android.permission.INSTALL_PACKAGES"/>
+  <uses-permission android:name="android.permission.READ_PRIVILEGED_PHONE_STATE"/>
+  <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"/>
+  <permission android:name="com.anyandroid.samples.gmsprofile.permission.INTERNAL"
+      android:protectionLevel="0x12"/>
+  <queries>
+    <package android:name="com.anyandroid.samples.basic"/>
+  </queries>
+  <application android:label="Profil GMS" android:persistent="true"
+      android:process="com.anyandroid.process.shared">
+    <meta-data android:name="com.google.android.gms.version" android:value="250832"/>
+    <activity android:name=".SettingsActivity" android:process=":ui" android:exported="true">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN"/>
+        <category android:name="android.intent.category.LAUNCHER"/>
+      </intent-filter>
+    </activity>
+    <service android:name=".PersistentService" android:process=":persistent" android:exported="true"
+        android:permission="com.anyandroid.samples.gmsprofile.permission.INTERNAL"/>
+    <receiver android:name=".BootReceiver"/>
+    <provider android:name=".SettingsProvider" android:authorities="com.anyandroid.samples.gmsprofile.settings"
+        android:exported="true"/>
+  </application>
+</manifest>

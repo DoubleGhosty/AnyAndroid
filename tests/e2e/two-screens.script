@@ -1,0 +1,7 @@
+# Scénario : ouverture de l'écran de détail avec un extra, retour, puis sortie.
+dump
+click "Ouvrir le détail"
+dump
+click "Retour"
+dump
+back

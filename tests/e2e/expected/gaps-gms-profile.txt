@@ -1,0 +1,97 @@
+Analyse d'écart AnyAndroid
+==========================
+> Analyse statique : aucun code des paquets n'a été exécuté.
+
+Paquets analysés
+----------------
+  com.anyandroid.samples.gmsprofile  25.08.32 (250832)  3.0 Kio, 1 DEX, 4 méthodes, ABI : —
+  com.anyandroid.samples.gmsprofile   (250832)  [split config.x86_64]  0.7 Kio, 0 DEX, 0 méthodes, ABI : x86_64
+  com.anyandroid.samples.gmsprofile   (250832)  [split config.arm64_v8a]  0.7 Kio, 0 DEX, 0 méthodes, ABI : arm64-v8a
+
+Couverture des API de la plateforme
+-----------------------------------
+  Supportée : 5 API, 5 appels (26.3 %)
+  Partielle : 0 API, 0 appels (0.0 %)
+  Stub : 0 API, 0 appels (0.0 %)
+  Non supportée : 17 API, 14 appels (73.7 %)
+  Total : 22 API distinctes, 19 appels.
+
+Besoins de la plateforme (manifestes)
+-------------------------------------
+  - com.anyandroid.samples.gmsprofile : minSdk 23, targetSdk 34, application persistante, processus principal com.anyandroid.process.shared, com.google.android.gms.version=250832
+  - UID partagé (android:sharedUserId) : com.anyandroid.uid.shared (com.anyandroid.samples.gmsprofile)
+  - plusieurs processus — com.anyandroid.samples.gmsprofile : 3 processus (com.anyandroid.process.shared, com.anyandroid.samples.gmsprofile:ui, com.anyandroid.samples.gmsprofile:persistent)
+  - permission réservée aux applications système/privilégiées : android.permission.INSTALL_PACKAGES
+  - permission réservée aux applications système/privilégiées : android.permission.READ_PRIVILEGED_PHONE_STATE
+  - permission réservée aux applications système/privilégiées : android.permission.WRITE_SECURE_SETTINGS
+  - 1 permission(s) de niveau signature déclarée(s) (ex. com.anyandroid.samples.gmsprofile.permission.INTERNAL [signature|privileged])
+  - 3 composant(s) service/récepteur/fournisseur, dont 1 fournisseur(s) de contenu
+  - dépendance détectée (chaîne constante) : com.google.android.gms
+
+Profil des capacités requises
+-----------------------------
+  Code natif (JNI) : 1 API dont 1 manquantes, 1 appels — chargeur ELF, couche bionic/POSIX, JNI
+      ex. Ljava/lang/System;->loadLibrary(Ljava/lang/String;)V
+  Binder / AIDL : 6 API dont 6 manquantes, 6 appels — IPC entre composants et entre paquets (bindService, Parcel)
+      ex. Landroid/os/Binder;-><init>()V; Landroid/os/Binder;->onTransact(ILandroid/os/Parcel;Landroid/os/Parcel;I)Z; Landroid/os/Parcel;->obtain()Landroid/os/Parcel;
+  Threads et concurrence : 4 API dont 2 manquantes, 3 appels — threads Java réels, verrous, exécuteurs
+      ex. Ljava/lang/Thread;-><init>()V; Ljava/lang/Thread;->start()V; Ljava/util/concurrent/Executors;->newCachedThreadPool()Ljava/util/concurrent/ExecutorService;
+  Réflexion : 2 API dont 0 manquantes, 2 appels — introspection et appels dynamiques
+      ex. Ljava/lang/Class;->forName(Ljava/lang/String;)Ljava/lang/Class;; Ljava/lang/Class;->getDeclaredMethod(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;
+  API internes ou cachées : 2 API dont 2 manquantes, 2 appels — API hors SDK public, sans garantie de stabilité
+      ex. Landroid/app/ActivityThread;->currentApplication()Landroid/app/Application;; Landroid/os/SystemProperties;->get(Ljava/lang/String;)Ljava/lang/String;
+  Comptes et synchronisation : 2 API dont 2 manquantes, 1 appels — AccountManager, ContentResolver, fournisseurs de contenu
+      ex. Landroid/accounts/AccountManager;->get(Landroid/content/Context;)Landroid/accounts/AccountManager;; Landroid/content/ContentResolver;
+  Services système : 2 API dont 2 manquantes, 1 appels — getSystemService, JobScheduler, alarmes, notifications, PackageManager
+      ex. Landroid/content/Context;->getSystemService(Ljava/lang/String;)Ljava/lang/Object;; Landroid/content/pm/PackageManager;
+  Méthodes JNI déclarées : 1 API dont 1 manquantes, 1 appels — méthodes Java implémentées en code natif
+      ex. Lcom/anyandroid/samples/gmsprofile/Probe;->nativeInit(J)I
+
+Paquets Java manquants les plus utilisés
+----------------------------------------
+  ✗ android.os  (7 appels, 7 API)
+  ✗ android.content  (3 appels, 4 API)
+  ✗ android.accounts  (1 appels, 1 API)
+  ✗ android.app  (1 appels, 1 API)
+  ✗ java.lang  (1 appels, 1 API)
+  ✗ java.util.concurrent  (1 appels, 2 API)
+  ✗ android.content.pm  (0 appels, 1 API)
+
+Classes manquantes les plus utilisées
+-------------------------------------
+  ✗ Landroid/os/Parcel;  (4 appels, 4 API)
+  ✗ Landroid/content/Context;  (3 appels, 3 API)
+  ✗ Landroid/os/Binder;  (2 appels, 2 API)
+  ✗ Landroid/accounts/AccountManager;  (1 appels, 1 API)
+  ✗ Landroid/app/ActivityThread;  (1 appels, 1 API)
+  ✗ Landroid/os/SystemProperties;  (1 appels, 1 API)
+  ✗ Ljava/lang/System;  (1 appels, 1 API)
+  ✗ Ljava/util/concurrent/Executors;  (1 appels, 1 API)
+  ✗ Landroid/content/ContentResolver;  (0 appels, 1 API)
+  ✗ Landroid/content/pm/PackageManager;  (0 appels, 1 API)
+  ✗ Ljava/util/concurrent/ExecutorService;  (0 appels, 1 API)
+
+API manquantes les plus appelées
+--------------------------------
+  ✗ Landroid/accounts/AccountManager;->get(Landroid/content/Context;)Landroid/accounts/AccountManager;  (1 appels)
+  ✗ Landroid/app/ActivityThread;->currentApplication()Landroid/app/Application;  (1 appels)
+  ✗ Landroid/content/Context;->getContentResolver()Landroid/content/ContentResolver;  (1 appels)
+  ✗ Landroid/content/Context;->getPackageManager()Landroid/content/pm/PackageManager;  (1 appels)
+  ✗ Landroid/content/Context;->getSystemService(Ljava/lang/String;)Ljava/lang/Object;  (1 appels)
+  ✗ Landroid/os/Binder;-><init>()V  (1 appels)
+  ✗ Landroid/os/Binder;->onTransact(ILandroid/os/Parcel;Landroid/os/Parcel;I)Z  (1 appels)
+  ✗ Landroid/os/Parcel;->obtain()Landroid/os/Parcel;  (1 appels)
+  ✗ Landroid/os/Parcel;->readInt()I  (1 appels)
+  ✗ Landroid/os/Parcel;->recycle()V  (1 appels)
+  ✗ Landroid/os/Parcel;->writeInt(I)V  (1 appels)
+  ✗ Landroid/os/SystemProperties;->get(Ljava/lang/String;)Ljava/lang/String;  (1 appels)
+  … et 5 autres
+
+Prérequis à construire, dans l'ordre suggéré
+--------------------------------------------
+  1. Couche native : chargeur ELF, traduction bionic → Windows (libc, pthread, mmap, dlopen) et JNI (bibliothèques x86_64 présentes : exécution native possible sans traduction)
+  2. Concurrence : java.util.concurrent (exécuteurs, verrous, atomiques) au-dessus des threads du runtime
+  3. IPC : Binder/AIDL en processus (Parcel, IBinder, bindService) et gestionnaire de services
+  4. Plateforme : installation « système privilégié », UID partagé et modèle multi-processus
+  5. Services : AccountManager, ContentResolver/ContentProvider, synchronisation
+  6. Framework : 17 API référencées non implémentées (voir le classement) — plaide pour l'exécution du framework AOSP lui-même plutôt qu'une réécriture API par API

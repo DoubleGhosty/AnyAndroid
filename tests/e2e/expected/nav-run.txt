@@ -1,0 +1,35 @@
+[cycle] MainActivity.onCreate
+[cycle] MainActivity.onStart
+[cycle] MainActivity.onResume
+[logcat] D/Nav: écran principal visible
+=== Écran « Navigation » ===
+LinearLayout vertical
+  TextView "Écran principal"
+  Button "Ouvrir le détail"
+> click "Ouvrir le détail"
+[cycle] MainActivity.onPause
+[cycle] DetailActivity.onCreate
+[cycle] DetailActivity.onStart
+[cycle] DetailActivity.onResume
+[cycle] MainActivity.onStop
+=== Écran « Détail » ===
+LinearLayout vertical
+  TextView "Message reçu : Bonjour de l'écran principal"
+  Button "Retour"
+> click "Retour"
+[cycle] DetailActivity.onPause
+[cycle] MainActivity.onRestart
+[cycle] MainActivity.onStart
+[cycle] MainActivity.onResume
+[logcat] D/Nav: écran principal visible
+[cycle] DetailActivity.onStop
+[cycle] DetailActivity.onDestroy
+=== Écran « Navigation » ===
+LinearLayout vertical
+  TextView "Écran principal"
+  Button "Ouvrir le détail"
+> back
+[cycle] MainActivity.onPause
+[cycle] MainActivity.onStop
+[cycle] MainActivity.onDestroy
+[fin] code 0
