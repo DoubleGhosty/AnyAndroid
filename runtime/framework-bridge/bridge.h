@@ -12,6 +12,9 @@
 namespace aa::vfs {
 class Vfs;
 }
+namespace aa::res {
+class AssetManager;
+}
 
 // Native implementation of the Android framework subset supported by the
 // prototype. Natives reach the outside world only through `Host`.
@@ -30,6 +33,9 @@ class Host {
   virtual void console(bool is_err, const std::string& utf8) = 0;  // System.out / System.err
   virtual void logcat(char level, const std::string& tag, const std::string& message) = 0;
   virtual rt::Handle application() = 0;
+  // Resources of the application (its resources.arsc, device configuration
+  // applied); nullptr when the APK has none.
+  virtual const res::AssetManager* resources() { return nullptr; }
   // True on the thread that owns the views (Android's main/UI thread).
   virtual bool on_ui_thread() const { return true; }
 };

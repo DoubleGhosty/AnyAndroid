@@ -3,7 +3,7 @@
 Couche de compatibilité qui exécute des applications Android (bytecode DEX) **comme des processus
 Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 
-> **Avancement : ≈ 35 % vers « Android natif sur Windows »**, détail et étape en cours dans
+> **Avancement : ≈ 36 % vers « Android natif sur Windows »**, détail et étape en cours dans
 > [docs/STATUS.md](docs/STATUS.md).
 >
 > **Statut : prototype de recherche.** La preuve de concept de l'annexe A du cadrage fonctionne :
@@ -30,6 +30,10 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 - **Pont framework** (≈ 110 classes, ≈ 700 membres) : `java.lang`, `ArrayList`, `HashMap`,
   `Activity`, `Intent`, `Bundle`, `Log`, `Handler`, `View`, `LinearLayout`, `TextView`, `Button`,
   `EditText`, `Toast`… Toute API absente échoue explicitement et est consignée.
+- **Ressources des applications** : `resources.arsc` de l'APK lu comme AssetManager2 (langue de
+  Windows ou `--locale`), `getString`/`getText`/`getColor`/`getDimension…`, `setText(int)`,
+  `Toast.makeText(…, int, …)`, titre `@string/` du manifeste, et **mises en page XML gonflées** par
+  `LayoutInflater` (`setContentView(R.layout.x)`, `<include>`, `<merge>`, `android:onClick`).
 - **Cycle de vie Android** : pile d'activités, ordre des rappels conforme, `startActivity` avec
   extras, `finish`, bouton Retour, plantage avec trace de pile.
 - **Fenêtre Win32 native** (contrôles standard, DPI par écran, toasts, Échap/Alt+← = Retour) et
@@ -47,7 +51,8 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 
 ## Limites actuelles
 
-Pas de ressources compilées (`resources.arsc`, layouts XML), pas de chargeur de bibliothèques
+Ressources limitées en mode pont (chaînes, couleurs, dimensions, entiers, booléens et mises en page :
+pas d'images, de styles, de thèmes ni de tableaux), pas de chargeur de bibliothèques
 natives ELF (JNI est prêt, le chargement des `.so` arrive en G4), pas de Binder ni de services
 système, pas d'annotations, pas de parallélisme du code Java (verrou global), rendu limité aux
 contrôles standard, un seul processus. L'ADR-002 détaille le chemin vers les GApps.
@@ -141,7 +146,7 @@ runtime/framework-bridge/ API Java/Android implémentées en natif (registre à 
 runtime/lifecycle/        hôte d'application et cycle de vie des activités
 runtime/compat/           verdict de compatibilité, matrice des API, analyse d'écart
 backends/windows/         fenêtre Win32 ; backends/headless/ : backend scriptable
-tools/apkgen/             assembleur smali, compilateur AXML, écriture ZIP/DEX
+tools/apkgen/             assembleur smali, compilateur AXML et res/ (resources.arsc), écriture ZIP/DEX
 samples/                  APK de démonstration (sources smali, code Java équivalent en commentaire)
 tests/                    tests unitaires, de bout en bout (sorties de référence) et fuzzing
 docs/                     ADR, matrice des API, modèle de menace

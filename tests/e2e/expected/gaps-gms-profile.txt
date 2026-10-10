@@ -10,8 +10,8 @@ Paquets analysés
 
 Couverture des API de la plateforme
 -----------------------------------
-  Supportée : 6 API, 6 appels (31.6 %)
-  Partielle : 0 API, 0 appels (0.0 %)
+  Supportée : 5 API, 5 appels (26.3 %)
+  Partielle : 1 API, 1 appels (5.3 %)
   Stub : 0 API, 0 appels (0.0 %)
   Non supportée : 16 API, 13 appels (68.4 %)
   Total : 22 API distinctes, 19 appels.

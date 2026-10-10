@@ -1,15 +1,17 @@
 #pragma once
 
 #include <deque>
-#include <thread>
 #include <functional>
+#include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "apk-inspector/manifest.h"
 #include "dex-engine/runtime.h"
 #include "framework-bridge/bridge.h"
 #include "framework-bridge/ui_model.h"
+#include "resources/asset_manager.h"
 
 // Drives an Android application inside one Windows window: activity stack,
 // lifecycle callbacks (with Android's ordering), intents between activities,
@@ -19,6 +21,8 @@ namespace aa::lifecycle {
 struct AppOptions {
   // Instruction budget per event/callback (0 = unlimited).
   uint64_t max_instructions_per_event = 0;
+  // Resources of the APK with the device configuration (nullptr: none).
+  std::shared_ptr<const res::AssetManager> resources;
 };
 
 class AppHost final : public bridge::Host, public ui::EventSink {
@@ -41,6 +45,7 @@ class AppHost final : public bridge::Host, public ui::EventSink {
   void console(bool is_err, const std::string& utf8) override;
   void logcat(char level, const std::string& tag, const std::string& message) override;
   rt::Handle application() override { return application_; }
+  const res::AssetManager* resources() override { return options_.resources.get(); }
   bool on_ui_thread() const override { return std::this_thread::get_id() == ui_thread_; }
 
   // ui::EventSink
@@ -70,6 +75,8 @@ class AppHost final : public bridge::Host, public ui::EventSink {
   void exit_app(int code);
   void process_pending();
   std::u16string default_title(const std::string& descriptor) const;
+  // A manifest label: literal, or "@0x7f......" resolved in the resources.
+  std::optional<std::u16string> label_text(const std::string& label) const;
   Record* top() { return stack_.empty() ? nullptr : &stack_.back(); }
 
   rt::Runtime& rt_;

@@ -1,0 +1,34 @@
+[cycle] MainActivity.onCreate
+[logcat] I/ResDemo: com.anyandroid.samples.res:id/greet
+[logcat] I/ResDemo: ff6200ee
+[logcat] I/ResDemo: 8
+[logcat] I/ResDemo: 3
+[cycle] MainActivity.onStart
+[cycle] MainActivity.onResume
+=== Écran « Démo des ressources » ===
+LinearLayout vertical
+  TextView "Bonjour depuis les ressources compilées !" #2130771973
+  EditText "" indice="Votre prénom" #2130771970
+  LinearLayout horizontal
+    Button "Saluer" #2130771969
+    Button "Reset" #2130771972 [désactivé]
+  TextView "" #2130771971
+  TextView "N'oubliez pas : les mises en page viennent de res/layout." #2130771968
+> type #0x7f010002 "Ada"
+> click #0x7f010001
+[toast] "Salutation affichée"
+> expect "Bonjour, Ada !" : ok
+=== Écran « Démo des ressources » ===
+LinearLayout vertical
+  TextView "Bonjour depuis les ressources compilées !" #2130771973
+  EditText "Ada" indice="Votre prénom" #2130771970
+  LinearLayout horizontal
+    Button "Saluer" #2130771969
+    Button "Reset" #2130771972 [désactivé]
+  TextView "Bonjour, Ada !" #2130771971
+  TextView "N'oubliez pas : les mises en page viennent de res/layout." #2130771968
+> back
+[cycle] MainActivity.onPause
+[cycle] MainActivity.onStop
+[cycle] MainActivity.onDestroy
+[fin] code 0

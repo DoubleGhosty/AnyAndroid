@@ -33,23 +33,23 @@ le nombre de fichiers.
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 80 %       | Outil prêt ; la mesure sur microG attend son téléchargement |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
 | G2    | Vraie libcore d'AOSP (Android 17)                           | 90 %       | NIO.2 / `sun.nio.fs` sur VFS opérationnel ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 35 %       | **En cours** (Ressources testées, pont Context & services système stubs) |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 40 %       | **En cours** (ressources et mises en page XML des applications en mode pont) |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
-| **Total** | **Android natif sur Windows**                          | **≈ 35 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
+| **Total** | **Android natif sur Windows**                          | **≈ 36 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
 
 ```
 G0 ████████░░  80 %
 G1 ██████████ 100 %
 G2 █████████░  90 %
-G3 ███▌░░░░░░  35 %
+G3 ████░░░░░░  40 %
 G4 ░░░░░░░░░░   0 %
 G5 ░░░░░░░░░░   0 %
    ───────────────
-   ███▌░░░░░░ ≈ 35 % vers « Android natif sur Windows »
+   ███▌░░░░░░ ≈ 36 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 29 suites de tests et 69 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 31 suites de tests et 75 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.
@@ -66,9 +66,17 @@ G5 ░░░░░░░░░░   0 %
 - **Vrai `framework.jar`** : `Log`, `TextUtils`, `Bundle`, `ArrayMap`, `Uri`, `Base64`, `JSONObject`,
   `Build` (identité honnête « AnyAndroid »), `Looper`/`Handler`, `SystemClock`, `Parcel` (aller-retour
   en octets d'un `Bundle` et d'un `Intent`) et `Binder` local (`transact`).
-- **Services et contexte Android** : `Context.getFilesDir()`, `getCacheDir()`, `getDataDir()`,
-  `getResources()`, `getString()`, `getText()`, et services système émulés (`LayoutInflater`, `WindowManager`,
-  `ActivityManager`, `DisplayManager`, `PowerManager`).
+- **Ressources des applications en mode pont** (`anyandroid run`) : le `resources.arsc` de l'APK est
+  chargé avec la configuration de l'appareil (langue de Windows ou `--locale`). `Resources`
+  (`getString`, `getText`, `getColor`, `getDimension…`, `getInteger`, `getBoolean`, `getIdentifier`,
+  `getResourceName`), `Context.getString(id, args…)`, `TextView.setText(int)`, `Activity.setTitle(int)`,
+  `Toast.makeText(…, int, …)` et le titre `@string/` du manifeste.
+- **Mises en page XML** : `LayoutInflater` gonfle `res/layout` dans les vues du pont
+  (`setContentView(R.layout.x)`, `inflate`, `<include>`, `<merge>`, `android:onClick`, attributs
+  courants : id, texte, indice, orientation, tailles, couleurs, poids, visibilité, activation).
+  L'APK `resources-demo` le vérifie en français et en anglais.
+- **Contexte** : `Context.getFilesDir()`, `getCacheDir()`, `getDataDir()`, `getSystemService()`
+  (seul `layout_inflater` en mode pont).
 
 ## Ce qui est en cours (G3)
 
@@ -84,12 +92,15 @@ ses mises en page.
   - styles avec héritage, thèmes et résolution d'attributs de `TypedArray` ;
   - XML compilé (mises en page) ;
   - tests unitaires complets en mémoire pour `runtime/resources` (`test_resources.cpp`) ;
+  - `apkgen build --res` compile un dossier `res/` (valeurs, mises en page, langues) en
+    `resources.arsc` et XML binaire, sans SDK Android ; `--r-txt` donne les identifiants `R` ;
   - implémentation de `sun.nio.fs` sur le VFS (`libcore_nio.cpp`) débloquant les dépendances NIO.
 - Vérifié sur le vrai `framework-res.apk` d'Android 17 avec la commande
   `anyandroid resources <apk> --get string/cancel --locale fr-FR` (résultat : « Annuler »).
 - Les natives Java correspondantes sont écrites : `AssetManager`, `ApkAssets`, `StringBlock` et
   `XmlBlock`, plus de 90 méthodes.
-- Pont `Context` et `Activity` branché sur les ressources et `LayoutInflater`.
+- En mode pont, `Context`, `Activity`, `TextView`, `Toast` et `LayoutInflater` sont branchés sur
+  les ressources de l'APK (`android_res.cpp`).
 
 ## Prochaines étapes, dans l'ordre
 

@@ -8,10 +8,17 @@ function(aa_sample name)
   cmake_parse_arguments(S "" "" "EXTRA_ARGS" ${ARGN})
   set(dir ${CMAKE_CURRENT_SOURCE_DIR}/${name})
   file(GLOB_RECURSE smali CONFIGURE_DEPENDS ${dir}/smali/*.smali)
+  # Compiled resources (resources.arsc + binary layouts) when res/ exists.
+  set(res_args "")
+  set(res_files "")
+  if(IS_DIRECTORY ${dir}/res)
+    file(GLOB_RECURSE res_files CONFIGURE_DEPENDS ${dir}/res/*.xml)
+    set(res_args --res ${dir}/res)
+  endif()
   set(out ${AA_SAMPLES_DIR}/${name}.apk)
   add_custom_command(OUTPUT ${out}
-    COMMAND apkgen build --manifest ${dir}/AndroidManifest.xml --smali ${dir}/smali ${S_EXTRA_ARGS} -o ${out}
-    DEPENDS apkgen ${dir}/AndroidManifest.xml ${smali}
+    COMMAND apkgen build --manifest ${dir}/AndroidManifest.xml --smali ${dir}/smali ${res_args} ${S_EXTRA_ARGS} -o ${out}
+    DEPENDS apkgen ${dir}/AndroidManifest.xml ${smali} ${res_files}
     COMMENT "apkgen : ${name}.apk"
     VERBATIM)
   set(outputs ${outputs} ${out} PARENT_SCOPE)
@@ -23,6 +30,7 @@ aa_sample(libcore-demo)
 aa_sample(framework-demo)
 aa_sample(basic-activity)
 aa_sample(two-screens)
+aa_sample(resources-demo)
 aa_sample(native-lib EXTRA_ARGS
   --stub-lib lib/arm64-v8a/libnative.so:aarch64
   --stub-lib lib/x86_64/libnative.so:x86_64)

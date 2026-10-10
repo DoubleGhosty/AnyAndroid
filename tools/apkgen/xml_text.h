@@ -7,12 +7,13 @@
 
 namespace aa::tool {
 
-// Text XML element (subset: elements, attributes, comments, prolog; text
-// content is ignored). Enough for AndroidManifest.xml and simple layouts.
+// Text XML element (subset: elements, attributes, comments, prolog and text
+// content). Enough for AndroidManifest.xml, layouts and values resources.
 struct XmlNode {
   std::string name;  // qualified, e.g. "manifest" or "android:foo"
   std::vector<std::pair<std::string, std::string>> attributes;  // qualified name -> decoded value
   std::vector<XmlNode> children;
+  std::string text;  // character data directly inside the element, entities decoded
   int line = 0;
 };
 

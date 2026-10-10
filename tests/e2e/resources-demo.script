@@ -1,0 +1,7 @@
+# Scénario : layout gonflé depuis res/layout, saisie, clic android:onClick, retour.
+dump
+type #0x7f010002 "Ada"
+click #0x7f010001
+expect "Bonjour, Ada !"
+dump
+back

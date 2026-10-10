@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="app_name">Resources demo</string>
+  <string name="title">Hello from compiled resources!</string>
+  <string name="name_hint">Your name</string>
+  <string name="greet">Greet</string>
+  <string name="greeting">Hello, %s!</string>
+  <string name="greeted_toast">Greeting shown</string>
+  <string name="footer">Don\'t   forget:  layouts come from res/layout.</string>
+</resources>

@@ -18,9 +18,6 @@ using S = ApiStatus;
 
 namespace {
 
-constexpr const char* kNoResources =
-    "ressources compilées (resources.arsc) non prises en charge dans cette version";
-
 struct HandlerPeer final : rt::NativePeer {
   // Generation per Runnable: removeCallbacks() invalidates queued posts.
   std::shared_ptr<std::map<Handle, uint64_t>> generations = std::make_shared<std::map<Handle, uint64_t>>();
@@ -233,55 +230,9 @@ void register_context(rt::NativeRegistry& r, Host& host) {
     std::string path = "/data/data/" + host.package_name() + suffix;
     return construct(rt, "Ljava/io/File;", "(Ljava/lang/String;)V", {uint32_t(rt.new_string_utf8(path))});
   };
-  ctx.method("getFilesDir", "()Ljava/io/File;", [&host, file_dir](Runtime& rt, NativeArgs&) -> uint64_t { return file_dir(rt, "/files"); });
-  ctx.method("getCacheDir", "()Ljava/io/File;", [&host, file_dir](Runtime& rt, NativeArgs&) -> uint64_t { return file_dir(rt, "/cache"); });
-  ctx.method("getDataDir", "()Ljava/io/File;", [&host, file_dir](Runtime& rt, NativeArgs&) -> uint64_t { return file_dir(rt, ""); });
-
-  ctx.method("getResources", "()Landroid/content/res/Resources;", [](Runtime& rt, NativeArgs&) -> uint64_t {
-    auto& cache = rt.object_cache();
-    auto it = cache.find("system_resources");
-    if (it != cache.end()) return it->second;
-
-    Handle am = construct(rt, "Landroid/content/res/AssetManager;", "()V", {});
-    Handle dm = construct(rt, "Landroid/util/DisplayMetrics;", "()V", {});
-    if (dm) rt.call_virtual(dm, "setToDefaults", "()V");
-    Handle cfg = construct(rt, "Landroid/content/res/Configuration;", "()V", {});
-    
-    Handle res = construct(rt, "Landroid/content/res/Resources;", "(Landroid/content/res/AssetManager;Landroid/util/DisplayMetrics;Landroid/content/res/Configuration;)V", {uint32_t(am), uint32_t(dm), uint32_t(cfg)});
-    cache["system_resources"] = res;
-    return res;
-  });
-
-  ctx.method("getString", "(I)Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    Handle res = rt.call_virtual(a.h(0), "getResources", "()Landroid/content/res/Resources;");
-    return rt.call_virtual(res, "getString", "(I)Ljava/lang/String;", {uint32_t(a.i32(1))});
-  });
-
-  ctx.method("getText", "(I)Ljava/lang/CharSequence;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    Handle res = rt.call_virtual(a.h(0), "getResources", "()Landroid/content/res/Resources;");
-    return rt.call_virtual(res, "getText", "(I)Ljava/lang/CharSequence;", {uint32_t(a.i32(1))});
-  });
-
-  r.define("Laa/stubs/LayoutInflater;", "Landroid/view/LayoutInflater;")
-      .ctor("(Landroid/content/Context;)V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; })
-      .method("inflate", "(ILandroid/view/ViewGroup;)Landroid/view/View;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-        Handle inflater_ctx = rt.call_virtual(a.h(0), "getContext", "()Landroid/content/Context;");
-        return construct(rt, "Landroid/widget/FrameLayout;", "(Landroid/content/Context;)V", {uint32_t(inflater_ctx)});
-      });
-  r.define("Laa/stubs/WindowManager;", "Ljava/lang/Object;", {"Landroid/view/WindowManager;"}).ctor("()V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
-  r.define("Laa/stubs/ActivityManager;", "Landroid/app/ActivityManager;").ctor("()V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
-  r.define("Laa/stubs/DisplayManager;", "Landroid/hardware/display/DisplayManager;").ctor("()V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
-  r.define("Laa/stubs/PowerManager;", "Landroid/os/PowerManager;").ctor("()V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
-
-  ctx.method("getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    std::string name = rt.string_utf8(a.h(1));
-    if (name == "layout_inflater") return construct(rt, "Laa/stubs/LayoutInflater;", "(Landroid/content/Context;)V", {uint32_t(a.h(0))});
-    if (name == "window") return construct(rt, "Laa/stubs/WindowManager;", "()V", {});
-    if (name == "activity") return construct(rt, "Laa/stubs/ActivityManager;", "()V", {});
-    if (name == "display") return construct(rt, "Laa/stubs/DisplayManager;", "()V", {});
-    if (name == "power") return construct(rt, "Laa/stubs/PowerManager;", "()V", {});
-    return kNull;
-  });
+  ctx.method("getFilesDir", "()Ljava/io/File;", [file_dir](Runtime& rt, NativeArgs&) -> uint64_t { return file_dir(rt, "/files"); });
+  ctx.method("getCacheDir", "()Ljava/io/File;", [file_dir](Runtime& rt, NativeArgs&) -> uint64_t { return file_dir(rt, "/cache"); });
+  ctx.method("getDataDir", "()Ljava/io/File;", [file_dir](Runtime& rt, NativeArgs&) -> uint64_t { return file_dir(rt, ""); });
 
   ctx.unsupported("getSharedPreferences", "(Ljava/lang/String;I)Landroid/content/SharedPreferences;",
                   "stockage persistant prévu en phase 5");
@@ -330,16 +281,6 @@ void register_activity(rt::NativeRegistry& r, Host& host) {
     host.content_changed(a.h(0));
     return 0;
   });
-  b.method("setContentView", "(I)V", [&host, ap](Runtime& rt, NativeArgs& a) -> uint64_t {
-    Handle inflater = rt.call_virtual(a.h(0), "getLayoutInflater", "()Landroid/view/LayoutInflater;");
-    Handle view = rt.call_virtual(inflater, "inflate", "(ILandroid/view/ViewGroup;)Landroid/view/View;", {uint32_t(a.i32(1)), 0});
-    if (view != kNull) {
-      peer_or_throw<ViewPeer>(rt, view, "View");
-      ap(rt, a.h(0)).content_view = view;
-      host.content_changed(a.h(0));
-    }
-    return 0;
-  });
   b.method("findViewById", "(I)Landroid/view/View;", [ap](Runtime& rt, NativeArgs& a) -> uint64_t {
     ActivityPeer& p = ap(rt, a.h(0));
     ViewPeer* root = view_peer(rt, p.content_view);
@@ -351,7 +292,6 @@ void register_activity(rt::NativeRegistry& r, Host& host) {
     host.title_changed(a.h(0));
     return 0;
   });
-  b.unsupported("setTitle", "(I)V", kNoResources);
   b.method("getTitle", "()Ljava/lang/CharSequence;", [ap](Runtime& rt, NativeArgs& a) -> uint64_t {
     return rt.new_string(ap(rt, a.h(0)).title);
   });
@@ -383,9 +323,6 @@ void register_activity(rt::NativeRegistry& r, Host& host) {
   b.stub("overridePendingTransition", "(II)V", "pas d'animations");
   b.unsupported("getWindow", "()Landroid/view/Window;", "API Window non implémentée");
   b.unsupported("getActionBar", "()Landroid/app/ActionBar;", "barre d'action non implémentée");
-  b.method("getLayoutInflater", "()Landroid/view/LayoutInflater;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    return rt.call_virtual(a.h(0), "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", {uint32_t(rt.new_string_utf8("layout_inflater"))});
-  });
   b.unsupported("getSharedPreferences", "(Ljava/lang/String;I)Landroid/content/SharedPreferences;",
                 "stockage persistant prévu en phase 5");
 }

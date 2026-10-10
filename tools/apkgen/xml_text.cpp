@@ -64,6 +64,32 @@ class Parser {
     }
   }
 
+  // Character data up to the next tag, comments skipped, CDATA kept.
+  void content(std::string& text) {
+    size_t start = pos_;
+    auto flush = [&] { text += decode_entities(s_.substr(start, pos_ - start)); };
+    while (pos_ < s_.size()) {
+      if (starts("<![CDATA[")) {
+        flush();
+        advance(9);
+        size_t end = s_.find("]]>", pos_);
+        if (end == std::string_view::npos) fail("section CDATA non terminée");
+        text += s_.substr(pos_, end - pos_);
+        advance(end - pos_ + 3);
+        start = pos_;
+      } else if (starts("<!--") || starts("<?")) {
+        flush();
+        skip_until(starts("<!--") ? "-->" : "?>");
+        start = pos_;
+      } else if (peek('<')) {
+        break;
+      } else {
+        advance();
+      }
+    }
+    flush();
+  }
+
   std::string name() {
     size_t start = pos_;
     while (pos_ < s_.size()) {
@@ -145,7 +171,7 @@ class Parser {
       advance();
     }
     while (true) {
-      skip_misc();
+      content(node.text);
       if (pos_ >= s_.size()) fail("élément <" + node.name + "> non fermé");
       if (starts("</")) {
         advance(2);

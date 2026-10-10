@@ -1,5 +1,6 @@
 add_library(aa_bridge STATIC
   android_app.cpp
+  android_res.cpp
   android_widget.cpp
   bridge.cpp
   framework_natives.cpp
