@@ -835,10 +835,17 @@ void register_references(NativeRegistry& r) {
     if (auto* p = rt.peer<ReferencePeer>(a.h(0))) p->referent = kNull;
     return 0;
   });
+  // The argument is a root of the caller's frame until the call returns,
+  // which is all the fence guarantees; libcore's bytecode version costs
+  // several instructions on every DirectByteBuffer access.
+  ref.static_method("reachabilityFence", "(Ljava/lang/Object;)V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
   for (bool weak : {true, false}) {
     auto b = r.define(weak ? "Ljava/lang/ref/WeakReference;" : "Ljava/lang/ref/SoftReference;", "Ljava/lang/ref/Reference;",
                       {}, 0x1, weak ? ApiStatus::kSupported : ApiStatus::kPartial,
                       weak ? "" : "conservée tant que le prototype n'a pas de notion de pression mémoire");
+    if (!weak) {
+      b.field("timestamp", "J");
+    }
     b.ctor("(Ljava/lang/Object;)V", make_ref(weak));
     b.ctor("(Ljava/lang/Object;Ljava/lang/ref/ReferenceQueue;)V", make_ref(weak), ApiStatus::kPartial,
            "jamais mise en file par le ramasse-miettes");

@@ -5,10 +5,10 @@
 
 | Statut | Signification | Membres |
 |---|---|---|
-| Supportée | comportement testé et documenté pour le périmètre annoncé | 786 |
+| Supportée | comportement testé et documenté pour le périmètre annoncé | 788 |
 | Partielle | chemin courant pris en charge, limites connues | 64 |
 | Stub | API reconnue mais sans effet réel | 24 |
-| Non supportée | reconnue mais refusée avec une erreur explicite | 25 |
+| Non supportée | reconnue mais refusée avec une erreur explicite | 28 |
 
 ## `android.app.Activity`
 
@@ -67,10 +67,10 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `getApplicationContext()Landroid/content/Context;` | Supportée |  |
 | `startActivity(Landroid/content/Intent;)V` | Supportée |  |
 | `getMainLooper()Landroid/os/Looper;` | Supportée |  |
-| `getFilesDir()Ljava/io/File;` | Supportée |  |
-| `getCacheDir()Ljava/io/File;` | Supportée |  |
-| `getDataDir()Ljava/io/File;` | Supportée |  |
 | `getSharedPreferences(Ljava/lang/String;I)Landroid/content/SharedPreferences;` | Non supportée | stockage persistant prévu en phase 5 |
+| `getFilesDir()Ljava/io/File;` | Non supportée | accès fichiers prévu en phase 5 |
+| `getCacheDir()Ljava/io/File;` | Non supportée | accès fichiers prévu en phase 5 |
+| `getDataDir()Ljava/io/File;` | Non supportée | accès fichiers prévu en phase 5 |
 | `checkSelfPermission(Ljava/lang/String;)I` | Non supportée | modèle de permissions non implémenté |
 | `getResources()Landroid/content/res/Resources;` | Supportée |  |
 | `getString(I)Ljava/lang/String;` | Supportée |  |
@@ -1342,6 +1342,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/Object;Ljava/lang/ref/ReferenceQueue;)V` | Partielle | jamais mise en file par le ramasse-miettes |
 | `get()Ljava/lang/Object;` | Supportée |  |
 | `clear()V` | Supportée |  |
+| `reachabilityFence(Ljava/lang/Object;)V` (statique) | Supportée |  |
 
 ## `java.lang.ref.ReferenceQueue`
 
@@ -1425,7 +1426,11 @@ Classe : **Partielle** — conservée tant que le prototype n'a pas de notion de
 
 | Membre | Statut | Note |
 |---|---|---|
+| `<init>()V` | Supportée |  |
+| `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/Throwable;Ljava/lang/String;)V` | Supportée |  |
 | `getTargetException()Ljava/lang/Throwable;` | Supportée |  |
+| `getCause()Ljava/lang/Throwable;` | Supportée |  |
 
 ## `java.lang.reflect.Member` (interface)
 

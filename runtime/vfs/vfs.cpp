@@ -155,6 +155,56 @@ class ImageMount final : public Mount {
   uint64_t cached_bytes_ = 0;
 };
 
+// --- Alias mount -------------------------------------------------------------------------
+
+// A flat, read-only directory of image files exposed under other names.
+class AliasMount final : public Mount {
+ public:
+  AliasMount(std::shared_ptr<image::FileSystem> fs, std::map<std::string, std::string> files)
+      : image_(std::move(fs), "/"), files_(std::move(files)) {}
+
+  std::optional<VStat> lstat(const std::string& rel) override {
+    if (rel == "/") return root_stat();
+    const std::string* target = find(rel);
+    if (!target) return std::nullopt;
+    return image_.lstat(*target);
+  }
+  std::string readlink(const std::string& rel) override { throw VfsError{lstat(rel) ? kEINVAL : kENOENT, rel}; }
+  std::vector<std::string> list(const std::string& rel) override {
+    if (rel != "/") throw VfsError{lstat(rel) ? kENOTDIR : kENOENT, rel};
+    std::vector<std::string> names;
+    for (const auto& [name, target] : files_) names.push_back(name);
+    return names;
+  }
+  std::unique_ptr<OpenFile> open(const std::string& rel, int32_t flags, uint32_t mode) override {
+    if (rel == "/") {
+      if ((flags & kO_ACCMODE) != kO_RDONLY) throw VfsError{kEISDIR, rel};
+      return std::make_unique<ImageFile>(std::make_shared<const std::vector<uint8_t>>(), root_stat());
+    }
+    const std::string* target = find(rel);
+    if (!target) throw VfsError{(flags & kO_CREAT) ? kEROFS : kENOENT, rel};
+    return image_.open(*target, flags, mode);
+  }
+
+ private:
+  static VStat root_stat() {
+    VStat v;
+    v.type = NodeType::kDirectory;
+    v.mode = kIfDir | 0755;
+    v.nlink = 2;
+    v.mtime = kImageTime;
+    v.ino = 1;
+    return v;
+  }
+  const std::string* find(const std::string& rel) const {
+    auto it = files_.find(rel.substr(1));
+    return it == files_.end() ? nullptr : &it->second;
+  }
+
+  ImageMount image_;
+  std::map<std::string, std::string> files_;
+};
+
 // --- APEX mount ------------------------------------------------------------------------
 
 class ApexMount final : public Mount {
@@ -607,6 +657,19 @@ std::unique_ptr<Mount> image_mount(std::shared_ptr<image::FileSystem> fs, std::s
 std::unique_ptr<Mount> apex_mount(std::shared_ptr<image::SystemImage> system) {
   return std::make_unique<ApexMount>(std::move(system));
 }
+std::unique_ptr<Mount> alias_mount(std::shared_ptr<image::FileSystem> fs, const std::map<std::string, std::string>& files) {
+  std::map<std::string, std::string> present;
+  for (const auto& [name, target] : files) {
+    if (name.empty() || name.size() > kMaxName || name.find('/') != std::string::npos) continue;
+    try {
+      auto st = fs->stat(target, false);
+      if (st && st->type == image::FileType::kRegular) present[name] = target;
+    } catch (const FormatError&) {
+      continue;  // unreadable entry: left out, as a missing one
+    }
+  }
+  return std::make_unique<AliasMount>(std::move(fs), std::move(present));
+}
 std::unique_ptr<Mount> host_mount(const std::filesystem::path& dir, bool read_only) {
   return std::make_unique<HostMount>(dir, read_only);
 }
@@ -915,6 +978,22 @@ std::shared_ptr<Vfs> make_android_vfs(const LayoutOptions& o) {
       vfs->mount("/system", image_mount(fs, "/"));
     }
     vfs->mount("/apex", apex_mount(o.system));
+    // aconfig flag storage, laid out by aconfigd at boot from each partition's
+    // etc/aconfig: /metadata/aconfig/maps/<container>.package.map and
+    // .flag.map, /metadata/aconfig/boot/<container>.val and .info (the
+    // image's default values; no overrides are applied).
+    std::string sys = as_root ? "/system" : "";
+    std::map<std::string, std::string> maps, boot;
+    for (const auto& [container, dir] : {std::pair<std::string, std::string>{"system", sys + "/etc/aconfig"},
+                                         {"system_ext", sys + "/system_ext/etc/aconfig"},
+                                         {"product", sys + "/product/etc/aconfig"}}) {
+      maps[container + ".package.map"] = dir + "/package.map";
+      maps[container + ".flag.map"] = dir + "/flag.map";
+      boot[container + ".val"] = dir + "/flag.val";
+      boot[container + ".info"] = dir + "/flag.info";
+    }
+    vfs->mount("/metadata/aconfig/maps", alias_mount(fs, maps));
+    vfs->mount("/metadata/aconfig/boot", alias_mount(fs, boot));
   } else if (!o.base_dir.empty()) {
     vfs->mount("/", host_mount(o.base_dir, true));
   } else {

@@ -226,16 +226,13 @@ void register_context(rt::NativeRegistry& r, Host& host) {
   ctx.method("getMainLooper", "()Landroid/os/Looper;", [](Runtime& rt, NativeArgs&) -> uint64_t {
     return rt.call_static("Landroid/os/Looper;", "getMainLooper", "()Landroid/os/Looper;");
   });
-  auto file_dir = [&host](Runtime& rt, const std::string& suffix) -> uint64_t {
-    std::string path = "/data/data/" + host.package_name() + suffix;
-    return construct(rt, "Ljava/io/File;", "(Ljava/lang/String;)V", {uint32_t(rt.new_string_utf8(path))});
-  };
-  ctx.method("getFilesDir", "()Ljava/io/File;", [file_dir](Runtime& rt, NativeArgs&) -> uint64_t { return file_dir(rt, "/files"); });
-  ctx.method("getCacheDir", "()Ljava/io/File;", [file_dir](Runtime& rt, NativeArgs&) -> uint64_t { return file_dir(rt, "/cache"); });
-  ctx.method("getDataDir", "()Ljava/io/File;", [file_dir](Runtime& rt, NativeArgs&) -> uint64_t { return file_dir(rt, ""); });
-
   ctx.unsupported("getSharedPreferences", "(Ljava/lang/String;I)Landroid/content/SharedPreferences;",
                   "stockage persistant prévu en phase 5");
+  // The bridge defines no java.io.File, so these getters cannot return a usable
+  // value in bridge mode; per ADR-002 they will come from framework.jar.
+  for (const char* dir : {"getFilesDir", "getCacheDir", "getDataDir"}) {
+    ctx.unsupported(dir, "()Ljava/io/File;", "accès fichiers prévu en phase 5");
+  }
   ctx.unsupported("checkSelfPermission", "(Ljava/lang/String;)I", "modèle de permissions non implémenté");
 
   r.define("Landroid/content/ContextWrapper;", "Landroid/content/Context;")

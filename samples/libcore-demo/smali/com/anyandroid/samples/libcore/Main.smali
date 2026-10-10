@@ -22,6 +22,9 @@
 #   encapsulés  : true true
 #   fichiers    : Bonjour fichier [essai.txt] true false   (FileOutputStream, BufferedReader, File)
 #   apex        : 30533808 true      (données ICU et framework.jar vus par le VFS)
+#   nio         : [alpha, bêta] true [lignes.txt, vide.txt] 12 -1 false
+#                 (java.nio.file.Files : write, readAllLines, getLastModifiedTime,
+#                  newDirectoryStream, delete ; FileChannel.read jusqu'à -1)
 
 .class public Lcom/anyandroid/samples/libcore/Main;
 .super Ljava/lang/Object;
@@ -35,7 +38,7 @@
 
 .method public static main([Ljava/lang/String;)V
     .registers 8
-    const/16 v5, 0xe
+    const/16 v5, 0xf
     new-array v6, v5, [Ljava/lang/String;
     const/4 v0, 0x0
     const-string v1, "collections"
@@ -78,6 +81,9 @@
     aput-object v1, v6, v0
     const/16 v0, 0xd
     const-string v1, "apex"
+    aput-object v1, v6, v0
+    const/16 v0, 0xe
+    const-string v1, "nio"
     aput-object v1, v6, v0
 
     const/4 v0, 0x0
@@ -172,6 +178,10 @@
     invoke-static {}, Lcom/anyandroid/samples/libcore/Main;->apex()Ljava/lang/String;
     move-result-object v0
     return-object v0
+    :s14
+    invoke-static {}, Lcom/anyandroid/samples/libcore/Main;->nio()Ljava/lang/String;
+    move-result-object v0
+    return-object v0
     :table
     .packed-switch 0x0
         :s0
@@ -188,6 +198,7 @@
         :s11
         :s12
         :s13
+        :s14
     .end packed-switch
 .end method
 
@@ -543,6 +554,136 @@
     filled-new-array {v0, v1}, [Ljava/lang/Object;
     move-result-object v0
     invoke-static {v0}, Lcom/anyandroid/samples/libcore/Main;->j([Ljava/lang/Object;)Ljava/lang/String;
+    move-result-object v0
+    return-object v0
+.end method
+
+# java.nio.file on the sandboxed /data/local/tmp (sun.nio.fs and sun.nio.ch natives):
+#
+#   Path dir = Paths.get("/data/local/tmp/nio"), f = dir.resolve("lignes.txt"), e = dir.resolve("vide.txt");
+#   Files.deleteIfExists(f); Files.deleteIfExists(e); Files.deleteIfExists(dir);  // leftovers
+#   Files.createDirectory(dir);
+#   Files.write(f, "alpha\nbêta\n".getBytes()); Files.write(e, new byte[0]);
+#   List<String> lines = Files.readAllLines(f);
+#   boolean recent = Files.getLastModifiedTime(f).toMillis() >= 978307200000L;  // after 2000
+#   List<String> names = new ArrayList<>();
+#   try (DirectoryStream<Path> ds = Files.newDirectoryStream(dir)) { for (Path p : ds) names.add(p.getFileName().toString()); }
+#   Collections.sort(names);
+#   FileChannel ch = FileChannel.open(f); ByteBuffer bb = ByteBuffer.allocate(5);
+#   int total = 0, n; while (true) { bb.clear(); n = ch.read(bb); if (n < 0) break; total += n; } ch.close();
+#   Files.delete(f); Files.delete(e); Files.delete(dir);
+#   return j(lines, recent, names, total, n, Files.exists(dir));
+.method static nio()Ljava/lang/String;
+    .registers 12
+    const-string v3, "/data/local/tmp/nio"
+    const/4 v4, 0x0
+    new-array v5, v4, [Ljava/lang/String;
+    invoke-static {v3, v5}, Ljava/nio/file/Paths;->get(Ljava/lang/String;[Ljava/lang/String;)Ljava/nio/file/Path;
+    move-result-object v0
+    const-string v3, "lignes.txt"
+    invoke-interface {v0, v3}, Ljava/nio/file/Path;->resolve(Ljava/lang/String;)Ljava/nio/file/Path;
+    move-result-object v1
+    const-string v3, "vide.txt"
+    invoke-interface {v0, v3}, Ljava/nio/file/Path;->resolve(Ljava/lang/String;)Ljava/nio/file/Path;
+    move-result-object v2
+    invoke-static {v1}, Ljava/nio/file/Files;->deleteIfExists(Ljava/nio/file/Path;)Z
+    invoke-static {v2}, Ljava/nio/file/Files;->deleteIfExists(Ljava/nio/file/Path;)Z
+    invoke-static {v0}, Ljava/nio/file/Files;->deleteIfExists(Ljava/nio/file/Path;)Z
+    new-array v3, v4, [Ljava/nio/file/attribute/FileAttribute;
+    invoke-static {v0, v3}, Ljava/nio/file/Files;->createDirectory(Ljava/nio/file/Path;[Ljava/nio/file/attribute/FileAttribute;)Ljava/nio/file/Path;
+
+    new-array v5, v4, [Ljava/nio/file/OpenOption;
+    const-string v3, "alpha\nbêta\n"
+    invoke-virtual {v3}, Ljava/lang/String;->getBytes()[B
+    move-result-object v3
+    invoke-static {v1, v3, v5}, Ljava/nio/file/Files;->write(Ljava/nio/file/Path;[B[Ljava/nio/file/OpenOption;)Ljava/nio/file/Path;
+    new-array v3, v4, [B
+    invoke-static {v2, v3, v5}, Ljava/nio/file/Files;->write(Ljava/nio/file/Path;[B[Ljava/nio/file/OpenOption;)Ljava/nio/file/Path;
+    invoke-static {v1}, Ljava/nio/file/Files;->readAllLines(Ljava/nio/file/Path;)Ljava/util/List;
+    move-result-object v6
+
+    new-array v3, v4, [Ljava/nio/file/LinkOption;
+    invoke-static {v1, v3}, Ljava/nio/file/Files;->getLastModifiedTime(Ljava/nio/file/Path;[Ljava/nio/file/LinkOption;)Ljava/nio/file/attribute/FileTime;
+    move-result-object v3
+    invoke-virtual {v3}, Ljava/nio/file/attribute/FileTime;->toMillis()J
+    move-result-wide v8
+    const-wide v10, 0xe3c7a73400L
+    cmp-long v3, v8, v10
+    const/4 v7, 0x0
+    if-ltz v3, :old
+    const/4 v7, 0x1
+    :old
+    invoke-static {v7}, Ljava/lang/Boolean;->valueOf(Z)Ljava/lang/Boolean;
+    move-result-object v7
+
+    invoke-static {v0}, Ljava/nio/file/Files;->newDirectoryStream(Ljava/nio/file/Path;)Ljava/nio/file/DirectoryStream;
+    move-result-object v3
+    new-instance v8, Ljava/util/ArrayList;
+    invoke-direct {v8}, Ljava/util/ArrayList;-><init>()V
+    invoke-interface {v3}, Ljava/nio/file/DirectoryStream;->iterator()Ljava/util/Iterator;
+    move-result-object v9
+    :list_loop
+    invoke-interface {v9}, Ljava/util/Iterator;->hasNext()Z
+    move-result v10
+    if-eqz v10, :list_done
+    invoke-interface {v9}, Ljava/util/Iterator;->next()Ljava/lang/Object;
+    move-result-object v10
+    check-cast v10, Ljava/nio/file/Path;
+    invoke-interface {v10}, Ljava/nio/file/Path;->getFileName()Ljava/nio/file/Path;
+    move-result-object v10
+    invoke-virtual {v10}, Ljava/lang/Object;->toString()Ljava/lang/String;
+    move-result-object v10
+    invoke-interface {v8, v10}, Ljava/util/List;->add(Ljava/lang/Object;)Z
+    goto :list_loop
+    :list_done
+    invoke-interface {v3}, Ljava/io/Closeable;->close()V
+    invoke-static {v8}, Ljava/util/Collections;->sort(Ljava/util/List;)V
+
+    new-array v3, v4, [Ljava/nio/file/OpenOption;
+    invoke-static {v1, v3}, Ljava/nio/channels/FileChannel;->open(Ljava/nio/file/Path;[Ljava/nio/file/OpenOption;)Ljava/nio/channels/FileChannel;
+    move-result-object v3
+    const/4 v9, 0x5
+    invoke-static {v9}, Ljava/nio/ByteBuffer;->allocate(I)Ljava/nio/ByteBuffer;
+    move-result-object v9
+    const/4 v10, 0x0
+    :read_loop
+    invoke-virtual {v9}, Ljava/nio/Buffer;->clear()Ljava/nio/Buffer;
+    invoke-virtual {v3, v9}, Ljava/nio/channels/FileChannel;->read(Ljava/nio/ByteBuffer;)I
+    move-result v11
+    if-ltz v11, :read_done
+    add-int/2addr v10, v11
+    goto :read_loop
+    :read_done
+    invoke-virtual {v3}, Ljava/nio/channels/spi/AbstractInterruptibleChannel;->close()V
+
+    invoke-static {v1}, Ljava/nio/file/Files;->delete(Ljava/nio/file/Path;)V
+    invoke-static {v2}, Ljava/nio/file/Files;->delete(Ljava/nio/file/Path;)V
+    invoke-static {v0}, Ljava/nio/file/Files;->delete(Ljava/nio/file/Path;)V
+    new-array v3, v4, [Ljava/nio/file/LinkOption;
+    invoke-static {v0, v3}, Ljava/nio/file/Files;->exists(Ljava/nio/file/Path;[Ljava/nio/file/LinkOption;)Z
+    move-result v3
+    invoke-static {v3}, Ljava/lang/Boolean;->valueOf(Z)Ljava/lang/Boolean;
+    move-result-object v3
+
+    invoke-static {v10}, Ljava/lang/Integer;->valueOf(I)Ljava/lang/Integer;
+    move-result-object v10
+    invoke-static {v11}, Ljava/lang/Integer;->valueOf(I)Ljava/lang/Integer;
+    move-result-object v11
+    const/4 v4, 0x6
+    new-array v4, v4, [Ljava/lang/Object;
+    const/4 v5, 0x0
+    aput-object v6, v4, v5
+    const/4 v5, 0x1
+    aput-object v7, v4, v5
+    const/4 v5, 0x2
+    aput-object v8, v4, v5
+    const/4 v5, 0x3
+    aput-object v10, v4, v5
+    const/4 v5, 0x4
+    aput-object v11, v4, v5
+    const/4 v5, 0x5
+    aput-object v3, v4, v5
+    invoke-static {v4}, Lcom/anyandroid/samples/libcore/Main;->j([Ljava/lang/Object;)Ljava/lang/String;
     move-result-object v0
     return-object v0
 .end method

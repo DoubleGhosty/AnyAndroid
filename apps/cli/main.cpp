@@ -367,6 +367,29 @@ void report_runtime(const rt::Runtime& rt) {
   for (const auto& api : rt.stub_apis()) log::info("runtime", "API simulée utilisée : " + api);
 }
 
+// `exec --profile`: the methods that executed the most instructions in their
+// own frames, then the most called ones.
+void report_profile(rt::Runtime& rt) {
+  std::vector<const rt::Method*> methods;
+  for (rt::Class* c : rt.loaded_classes()) {
+    for (const auto& m : c->methods) {
+      if (m->profile_calls || m->profile_instructions) methods.push_back(m.get());
+    }
+  }
+  auto print = [&](const char* title, auto key) {
+    std::sort(methods.begin(), methods.end(), [&](const rt::Method* x, const rt::Method* y) { return key(x) > key(y); });
+    err(title);
+    for (size_t i = 0; i < std::min<size_t>(methods.size(), 25); ++i) {
+      const rt::Method* m = methods[i];
+      err("  " + std::to_string(m->profile_instructions) + " instr.  " + std::to_string(m->profile_calls) + " appels  " +
+          m->pretty());
+    }
+  };
+  print("Profil : méthodes par instructions exécutées (hors appelées)",
+        [](const rt::Method* m) { return m->profile_instructions; });
+  print("Profil : méthodes par nombre d'appels", [](const rt::Method* m) { return m->profile_calls; });
+}
+
 int cmd_run(const Args& a) {
   if (a.positional.size() != 1) {
     usage();
@@ -563,6 +586,7 @@ int cmd_exec(const Args& a) {
   }
   if (exit_code >= 0) code = exit_code;
   report_runtime(runtime);
+  if (a.has("--profile")) report_profile(runtime);
   return code;
 }
 

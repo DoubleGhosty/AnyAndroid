@@ -10,7 +10,11 @@ add_library(aa_bridge STATIC
   java_reflect.cpp
   java_util.cpp
   libcore_charsets.cpp
+  libcore_crypto.cpp
   libcore_files.cpp
   libcore_natives.cpp
-  libcore_nio.cpp)
+  libcore_nio.cpp
+  libcore_zip.cpp
+  native_memory.cpp)
+target_link_libraries(aa_bridge PRIVATE aa_miniz)
 target_link_libraries(aa_bridge PUBLIC aa_dex aa_vfs aa_res)

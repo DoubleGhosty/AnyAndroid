@@ -27,7 +27,7 @@ namespace aa::vfs {
 
 // Linux errno values used by the VFS.
 enum : int32_t {
-  kEPERM = 1, kENOENT = 2, kEIO = 5, kEBADF = 9, kEACCES = 13, kEEXIST = 17, kEXDEV = 18, kENOTDIR = 20,
+  kEPERM = 1, kENOENT = 2, kEIO = 5, kEBADF = 9, kENOMEM = 12, kEACCES = 13, kEEXIST = 17, kEXDEV = 18, kENOTDIR = 20,
   kEISDIR = 21, kEINVAL = 22, kEMFILE = 24, kENOTTY = 25, kEFBIG = 27, kENOSPC = 28, kESPIPE = 29,
   kEROFS = 30, kENAMETOOLONG = 36, kENOTEMPTY = 39, kELOOP = 40, kENODATA = 61,
 };
@@ -85,6 +85,9 @@ class Mount {
 std::unique_ptr<Mount> image_mount(std::shared_ptr<image::FileSystem> fs, std::string root = "/");
 // APEX modules of a system image (/apex/<module>/...), opened on demand.
 std::unique_ptr<Mount> apex_mount(std::shared_ptr<image::SystemImage> system);
+// Read-only directory whose entries are regular files of an image under other
+// names: `files` maps an entry name to a path in `fs` (missing ones are skipped).
+std::unique_ptr<Mount> alias_mount(std::shared_ptr<image::FileSystem> fs, const std::map<std::string, std::string>& files);
 // A host directory (created if needed). Writable unless read_only.
 std::unique_ptr<Mount> host_mount(const std::filesystem::path& dir, bool read_only);
 // /dev: null, zero, random, urandom.

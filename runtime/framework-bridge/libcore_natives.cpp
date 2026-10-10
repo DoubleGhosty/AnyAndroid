@@ -21,6 +21,7 @@
 #include "common/text.h"
 #include "dex-engine/jlang.h"
 #include "framework-bridge/internal.h"
+#include "framework-bridge/native_memory.h"
 
 #include <windows.h>
 
@@ -90,32 +91,6 @@ FreeFunctions& free_functions() {
 
 }  // namespace
 
-namespace {
-
-constexpr uint64_t kAddressTag = 0x00007aa000000000ull;
-constexpr uint64_t kAddressHandleBits = 0x0000000ffffffff0ull;
-
-}  // namespace
-
-int64_t fake_address_of(rt::Runtime& rt, rt::Handle array) {
-  rt::Object* o = rt.object(array);
-  auto* a = dynamic_cast<rt::ArrayObject*>(o);
-  if (!a || !a->klass || !a->klass->component || a->klass->component->primitive == 0) {
-    rt.throw_new("Ljava/lang/IllegalArgumentException;", "addressOf : tableau primitif attendu");
-  }
-  return int64_t(kAddressTag | (uint64_t(array) << 4));
-}
-
-rt::ArrayObject& array_at_address(rt::Runtime& rt, int64_t address) {
-  uint64_t v = uint64_t(address);
-  rt::Handle h = rt::Handle((v & kAddressHandleBits) >> 4);
-  if ((v & ~kAddressHandleBits) != kAddressTag || !rt.is_valid_handle(h)) {
-    rt.throw_new("Ljava/lang/IllegalArgumentException;", "adresse native inconnue");
-  }
-  auto* a = dynamic_cast<rt::ArrayObject*>(rt.object(h));
-  if (!a) rt.throw_new("Ljava/lang/IllegalArgumentException;", "l'adresse ne désigne pas un tableau");
-  return *a;
-}
 
 int64_t register_free_function(std::function<void(int64_t)> fn) {
   FreeFunctions& f = free_functions();
@@ -252,6 +227,12 @@ void register_system(rt::NativeRegistry& r) {
     });
   }
 
+  const char* th = "Ljava/lang/Thread;";
+  r.bind(th, "currentThread", "()Ljava/lang/Thread;",
+         [](Runtime& rt, NativeArgs&) -> uint64_t { return rt.current_thread_peer(); });
+  r.bind(th, "currentCarrierThread", "()Ljava/lang/Thread;",
+         [](Runtime& rt, NativeArgs&) -> uint64_t { return rt.current_thread_peer(); });
+
   const char* fdc = "Ljava/io/FileDescriptor;";
   r.bind(fdc, "getAppend", "(I)Z", [](Runtime&, NativeArgs&) -> uint64_t { return 0; }, S::kPartial,
          "sorties standard uniquement");
@@ -285,6 +266,9 @@ void register_system(rt::NativeRegistry& r) {
 
   const char* run = "Ljava/lang/Runtime;";
   r.bind(run, "nativeExit", "(I)V", [](Runtime&, NativeArgs& a) -> uint64_t { throw rt::ExitRequest{a.i32(0)}; });
+  r.bind(run, "nativeLoad", "(Ljava/lang/String;Ljava/lang/ClassLoader;Ljava/lang/Class;)Ljava/lang/String;",
+         [](Runtime&, NativeArgs&) -> uint64_t { return kNull; }, S::kStub,
+         "chargement de bibliothèques natives .so simulé (G4)");
   r.bind(run, "gc", "()V", [](Runtime& rt, NativeArgs&) -> uint64_t {
     rt.request_gc();
     return 0;
@@ -658,9 +642,19 @@ void register_vm(rt::NativeRegistry& r) {
            }
            return string_array(rt, entries);
          });
+  r.bind("Ljava/lang/VMClassLoader;", "findLoadedClass",
+         "(Ljava/lang/ClassLoader;Ljava/lang/String;)Ljava/lang/Class;",
+         [](Runtime& rt, NativeArgs& a) -> uint64_t {
+           Handle name_h = a.h(1);
+           if (!name_h) return kNull;
+           std::string name = rt.string_utf8(name_h);
+           std::string desc = text::java_to_descriptor(name);
+           rt::Class* c = rt.lookup_class(desc);
+           return c ? rt.class_mirror(c) : kNull;
+         });
   r.bind(vm, "addressOf", "(Ljava/lang/Object;)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    return uint64_t(fake_address_of(rt, a.h(1)));
-  }, S::kPartial, "adresse factice, comprise par les natives d'AnyAndroid seulement");
+    return uint64_t(native_address_of(rt, a.h(1)));
+  }, S::kPartial, "adresse de la mémoire native émulée (native_memory.h)");
 
   // VMStack: frames of the current thread, innermost last. Frame n-1 is the
   // native method itself, n-2 the method that called it.
@@ -744,6 +738,8 @@ int64_t sysconf_value(int32_t name) {
   }
 }
 
+}  // namespace
+
 std::string strerror_text(int32_t err) {
   switch (err) {
     case 1: return "Operation not permitted";
@@ -755,19 +751,29 @@ std::string strerror_text(int32_t err) {
     case 12: return "Out of memory";
     case 13: return "Permission denied";
     case 17: return "File exists";
+    case 18: return "Cross-device link";
     case 20: return "Not a directory";
     case 21: return "Is a directory";
     case 22: return "Invalid argument";
+    case 24: return "Too many open files";
     case 25: return "Not a typewriter";
+    case 27: return "File too large";
     case 28: return "No space left on device";
+    case 29: return "Illegal seek";
     case 30: return "Read-only file system";
     case 32: return "Broken pipe";
+    case 36: return "File name too long";
     case 38: return "Function not implemented";
+    case 39: return "Directory not empty";
+    case 40: return "Too many symbolic links encountered";
+    case 61: return "No data available";
     case 110: return "Connection timed out";
     case 111: return "Connection refused";
     default: return "Unknown error " + std::to_string(err);
   }
 }
+
+namespace {
 
 void register_os(rt::NativeRegistry& r) {
   // Android 17 moved the native part to OsConstantsHolder; both fill OsConstants.
@@ -868,6 +874,8 @@ struct Location {
 };
 
 Location locate(Runtime& rt, Handle obj, int64_t offset, size_t size) {
+  // A null object: `offset` is an absolute address of the emulated native memory.
+  if (obj == kNull) return {native_span(rt, offset, size, true).data(), size};
   rt::Object& o = rt.nonnull(obj, "Unsafe");
   if (auto* arr = dynamic_cast<rt::ArrayObject*>(&o)) {
     int64_t at = offset - kArrayBase;
@@ -999,6 +1007,62 @@ void register_unsafe(rt::NativeRegistry& r) {
     r.bind(u, "unpark", "(Ljava/lang/Object;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
       if (a.h(1) == kNull) rt.throw_npe("unpark(null)");
       rt.unpark(a.h(1));
+      return 0;
+    });
+    r.bind(u, "allocateMemory", "(J)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      int64_t bytes = a.i64(1);
+      if (bytes < 0) rt.throw_new("Ljava/lang/IllegalArgumentException;", "taille négative");
+      return uint64_t(native_alloc(rt, uint64_t(bytes)));
+    }, S::kPartial, "mémoire native émulée (native_memory.h)");
+    r.bind(u, "reallocateMemory", "(JJ)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      int64_t bytes = a.i64(3);
+      if (bytes < 0) rt.throw_new("Ljava/lang/IllegalArgumentException;", "taille négative");
+      return uint64_t(native_realloc(rt, a.i64(1), uint64_t(bytes)));
+    });
+    r.bind(u, "freeMemory", "(J)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      native_free(rt, a.i64(1));
+      return 0;
+    });
+    // (Object, long) pairs: an object and an offset in it, or null and an address.
+    auto do_copy = [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      int64_t bytes = a.i64(7);
+      if (bytes < 0) rt.throw_new("Ljava/lang/IllegalArgumentException;", "taille négative");
+      if (bytes == 0) return 0;
+      uint8_t* src = locate(rt, a.h(1), a.i64(2), size_t(bytes)).p;
+      uint8_t* dst = locate(rt, a.h(4), a.i64(5), size_t(bytes)).p;
+      std::memmove(dst, src, size_t(bytes));
+      return 0;
+    };
+    auto do_set = [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      int64_t bytes = a.i64(4);
+      if (bytes < 0) rt.throw_new("Ljava/lang/IllegalArgumentException;", "taille négative");
+      if (bytes == 0) return 0;
+      std::memset(locate(rt, a.h(1), a.i64(2), size_t(bytes)).p, int(uint8_t(a.raw(6))), size_t(bytes));
+      return 0;
+    };
+    r.bind(u, "setMemory", "(Ljava/lang/Object;JJB)V", do_set);
+    r.bind(u, "setMemory0", "(Ljava/lang/Object;JJB)V", do_set);
+    r.bind(u, "copyMemory", "(Ljava/lang/Object;JLjava/lang/Object;JJ)V", do_copy);
+    r.bind(u, "copyMemory0", "(Ljava/lang/Object;JLjava/lang/Object;JJ)V", do_copy);
+    r.bind(u, "getByte", "(J)B", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      return uint32_t(int32_t(load<int8_t>(rt, kNull, a.i64(1))));
+    });
+    r.bind(u, "putByte", "(JB)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      store<uint8_t>(rt, kNull, a.i64(1), uint8_t(a.raw(3)));
+      return 0;
+    });
+    r.bind(u, "getInt", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      return load<uint32_t>(rt, kNull, a.i64(1));
+    });
+    r.bind(u, "putInt", "(JI)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      store<uint32_t>(rt, kNull, a.i64(1), a.raw(3));
+      return 0;
+    });
+    r.bind(u, "getLong", "(J)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      return load<uint64_t>(rt, kNull, a.i64(1));
+    });
+    r.bind(u, "putLong", "(JJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      store<uint64_t>(rt, kNull, a.i64(1), uint64_t(a.i64(3)));
       return 0;
     });
     r.bind(u, "allocateInstance", "(Ljava/lang/Class;)Ljava/lang/Object;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
@@ -1266,16 +1330,74 @@ void register_invoke(rt::NativeRegistry& r) {
 
 }  // namespace
 
+namespace {
+
+// java.nio.DirectByteBuffer absolute getters. libcore's bytecode spends five
+// calls per access (isAccessible, checkIndex, ix, get(long), Memory.peek*);
+// these intrinsics keep its checks and exception messages and read through
+// the emulated native memory.
+struct DirectBuffer {
+  int64_t address;
+  int32_t limit;
+  bool native_order;
+};
+
+DirectBuffer direct_buffer(Runtime& rt, Handle self) {
+  rt::Object& o = rt.nonnull(self, "DirectByteBuffer");
+  rt::Field* ref = find_field(o.klass, "memoryRef", "Ljava/nio/DirectByteBuffer$MemoryRef;");
+  rt::Field* limit = find_field(o.klass, "limit", "I");
+  rt::Field* address = find_field(o.klass, "address", "J");
+  rt::Field* order = find_field(o.klass, "nativeByteOrder", "Z");
+  if (!ref || !limit || !address || !order) rt.throw_new("Ljava/lang/InternalError;", "DirectByteBuffer : champs absents");
+  rt::Object& mem = rt.nonnull(Handle(o.fields.at(ref->slot)), "DirectByteBuffer.memoryRef");
+  rt::Field* accessible = find_field(mem.klass, "isAccessible", "Z");
+  if (!accessible) rt.throw_new("Ljava/lang/InternalError;", "MemoryRef sans isAccessible");
+  if (mem.fields.at(accessible->slot) == 0) rt.throw_new("Ljava/lang/IllegalStateException;", "buffer is inaccessible");
+  int64_t at = int64_t(uint64_t(o.fields.at(address->slot)) | (uint64_t(o.fields.at(address->slot + 1)) << 32));
+  return {at, int32_t(o.fields.at(limit->slot)), o.fields.at(order->slot) != 0};
+}
+
+template <typename T>
+uint64_t direct_get(Runtime& rt, NativeArgs& a) {
+  DirectBuffer b = direct_buffer(rt, a.h(0));
+  int32_t i = a.i32(1);
+  constexpr int32_t nb = int32_t(sizeof(T));
+  if (nb == 1 ? (i < 0 || i >= b.limit) : (i < 0 || nb > b.limit - i)) {
+    std::string msg = "index=" + std::to_string(i) + " out of bounds (limit=" + std::to_string(b.limit);
+    if (nb > 1) msg += ", nb=" + std::to_string(nb);
+    rt.throw_new("Ljava/lang/IndexOutOfBoundsException;", msg + ")");
+  }
+  T v;
+  std::memcpy(&v, native_span(rt, b.address + i, sizeof(T)).data(), sizeof(T));
+  if (!b.native_order) {
+    if constexpr (sizeof(T) == 2) v = T(__builtin_bswap16(uint16_t(v)));
+    if constexpr (sizeof(T) == 4) v = T(__builtin_bswap32(uint32_t(v)));
+  }
+  return uint32_t(int32_t(v));
+}
+
+void register_direct_buffers(rt::NativeRegistry& r) {
+  const char* dbb = "Ljava/nio/DirectByteBuffer;";
+  r.intrinsic(dbb, "get", "(I)B", direct_get<int8_t>, "accès direct à la mémoire native émulée");
+  r.intrinsic(dbb, "getShort", "(I)S", direct_get<int16_t>, "accès direct à la mémoire native émulée");
+  r.intrinsic(dbb, "getInt", "(I)I", direct_get<int32_t>, "accès direct à la mémoire native émulée");
+}
+
+}  // namespace
+
 void register_libcore_natives(rt::NativeRegistry& r) {
   register_system(r);
   register_strings(r);
   register_vm(r);
   register_os(r);
   register_unsafe(r);
+  register_direct_buffers(r);
   register_invoke(r);
   register_libcore_charsets(r);
   register_libcore_files(r);
   register_libcore_nio(r);
+  register_libcore_zip(r);
+  register_libcore_crypto(r);
   register_framework_natives(r);
 }
 

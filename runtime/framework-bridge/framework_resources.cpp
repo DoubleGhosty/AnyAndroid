@@ -12,6 +12,7 @@
 #include "common/text.h"
 #include "framework-bridge/handles.h"
 #include "framework-bridge/internal.h"
+#include "framework-bridge/native_memory.h"
 #include "resources/asset_manager.h"
 #include "vfs/vfs.h"
 
@@ -667,8 +668,8 @@ void register_themes(rt::NativeRegistry& r) {
     auto t = theme(rt, a.i64(2));
     std::shared_ptr<res::XmlParser> p = a.i64(6) ? parser(rt, a.i64(6)) : nullptr;
     std::vector<uint32_t> attrs = int_array(rt, a.h(8), "attrs");
-    auto values = int_span(array_at_address(rt, a.i64(9)), "outValues", rt);
-    auto indices = int_span(array_at_address(rt, a.i64(11)), "outIndices", rt);
+    auto values = int_span(native_array(rt, a.i64(9)), "outValues", rt);
+    auto indices = int_span(native_array(rt, a.i64(11)), "outIndices", rt);
     if (values.size() < attrs.size() * res::kStyleNumEntries || indices.size() < attrs.size() + 1) {
       rt.throw_new("Ljava/lang/IndexOutOfBoundsException;", "tableaux de TypedArray trop petits");
     }

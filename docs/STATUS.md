@@ -75,8 +75,9 @@ G5 ░░░░░░░░░░   0 %
   (`setContentView(R.layout.x)`, `inflate`, `<include>`, `<merge>`, `android:onClick`, attributs
   courants : id, texte, indice, orientation, tailles, couleurs, poids, visibilité, activation).
   L'APK `resources-demo` le vérifie en français et en anglais.
-- **Contexte** : `Context.getFilesDir()`, `getCacheDir()`, `getDataDir()`, `getSystemService()`
-  (seul `layout_inflater` en mode pont).
+- **Contexte** : `Context.getSystemService()` (seul `layout_inflater` en mode pont).
+  `getFilesDir()`, `getCacheDir()` et `getDataDir()` restent non pris en charge : le pont ne
+  définit pas `java.io.File` (ils viendront de framework.jar, ADR-002).
 
 ## Ce qui est en cours (G3)
 
