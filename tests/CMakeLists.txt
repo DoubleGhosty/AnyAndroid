@@ -1,6 +1,7 @@
 add_executable(aa_unit_tests
   unit/test_main.cpp
   unit/test_common.cpp
+  unit/test_crypto.cpp
   unit/test_apk.cpp
   unit/test_runtime.cpp
   unit/test_threads_gc.cpp
