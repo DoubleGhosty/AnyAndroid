@@ -32,24 +32,24 @@ le nombre de fichiers.
 |-------|------------------------------------------------------------|-----------:|------|
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 80 %       | Outil prêt ; la mesure sur microG attend son téléchargement |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
-| G2    | Vraie libcore d'AOSP (Android 17)                           | 85 %       | Critère de sortie atteint ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 25 %       | **En cours** |
+| G2    | Vraie libcore d'AOSP (Android 17)                           | 90 %       | NIO.2 / `sun.nio.fs` sur VFS opérationnel ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 35 %       | **En cours** (Ressources testées, pont Context & services système stubs) |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
-| **Total** | **Android natif sur Windows**                          | **≈ 30 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
+| **Total** | **Android natif sur Windows**                          | **≈ 35 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
 
 ```
 G0 ████████░░  80 %
 G1 ██████████ 100 %
-G2 ████████▌░  85 %
-G3 ██▌░░░░░░░  25 %
+G2 █████████░  90 %
+G3 ███▌░░░░░░  35 %
 G4 ░░░░░░░░░░   0 %
 G5 ░░░░░░░░░░   0 %
    ───────────────
-   ███░░░░░░░ ≈ 30 % vers « Android natif sur Windows »
+   ███▌░░░░░░ ≈ 35 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 29 tests automatiques)
+## Ce qui marche aujourd'hui (vérifié par 29 suites de tests et 69 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.
@@ -59,13 +59,16 @@ G5 ░░░░░░░░░░   0 %
 - **Lecture des images système Android** (`anyandroid image`) : formats sparse, super, ext4 et
   EROFS compressé, APEX.
 - **Vraie libcore d'Android 17** : collections, `Formatter`, concurrence, fichiers, jeux de
-  caractères et `VarHandle`.
+  caractères, `VarHandle`, et **NIO.2 (`sun.nio.fs`, `FileDispatcherImpl`) sur VFS**.
 - **Système de fichiers virtuel** ([ADR-005](adr/ADR-005-systeme-de-fichiers-virtuel.md)).
   `/system` et `/apex` sont servis depuis l'image, et `/data` et `/sdcard` sont isolés dans un bac
   à sable. Le processus émulé ne voit ni les fichiers ni le nom d'utilisateur de l'hôte.
 - **Vrai `framework.jar`** : `Log`, `TextUtils`, `Bundle`, `ArrayMap`, `Uri`, `Base64`, `JSONObject`,
   `Build` (identité honnête « AnyAndroid »), `Looper`/`Handler`, `SystemClock`, `Parcel` (aller-retour
   en octets d'un `Bundle` et d'un `Intent`) et `Binder` local (`transact`).
+- **Services et contexte Android** : `Context.getFilesDir()`, `getCacheDir()`, `getDataDir()`,
+  `getResources()`, `getString()`, `getText()`, et services système émulés (`LayoutInflater`, `WindowManager`,
+  `ActivityManager`, `DisplayManager`, `PowerManager`).
 
 ## Ce qui est en cours (G3)
 
@@ -79,28 +82,25 @@ ses mises en page.
   - choix de la meilleure variante selon la configuration : langue avec script, densité, taille
     d'écran, mode nuit… avec les règles exactes d'AOSP ;
   - styles avec héritage, thèmes et résolution d'attributs de `TypedArray` ;
-  - XML compilé (mises en page).
+  - XML compilé (mises en page) ;
+  - tests unitaires complets en mémoire pour `runtime/resources` (`test_resources.cpp`) ;
+  - implémentation de `sun.nio.fs` sur le VFS (`libcore_nio.cpp`) débloquant les dépendances NIO.
 - Vérifié sur le vrai `framework-res.apk` d'Android 17 avec la commande
   `anyandroid resources <apk> --get string/cancel --locale fr-FR` (résultat : « Annuler »).
 - Les natives Java correspondantes sont écrites : `AssetManager`, `ApkAssets`, `StringBlock` et
   `XmlBlock`, plus de 90 méthodes.
-- **Reste à faire :** `Resources.getSystem()` s'arrête encore sur `sun.nio.fs`, demandé par les
-  drapeaux aconfig. La section `resources` de la démo est écrite mais n'est pas encore exécutée par
-  le test.
+- Pont `Context` et `Activity` branché sur les ressources et `LayoutInflater`.
 
 ## Prochaines étapes, dans l'ordre
 
-1. `sun.nio.fs` (NIO sur le VFS), pour que `Resources.getSystem()` aille au bout. Puis tests
-   unitaires de `runtime/resources` sur une table construite à la main.
-2. `ActivityThread` : démarrer une application comme le fait Android (`LoadedApk`,
-   `ContextImpl`, `Instrumentation`), avec des services système émulés : PackageManager,
-   ActivityManager, WindowManager…
-3. Rendu du vrai framework : `View`, `Canvas`, `Paint`, texte. Il faut un moteur de dessin 2D
+1. `ActivityThread` : démarrer une application comme le fait Android (`LoadedApk`,
+   `ContextImpl`, `Instrumentation`), avec la hiérarchie complète des services système.
+2. Rendu du vrai framework : `View`, `Canvas`, `Paint`, texte. Moteur de dessin 2D
    sur Windows, à la place de Skia/HWUI.
-4. **Sortie de G3** : une application AOSP de l'image (par exemple Calculatrice) affichée dans
+3. **Sortie de G3** : une application AOSP de l'image (par exemple Calculatrice) affichée dans
    une fenêtre Windows.
-5. G4 : chargeur ELF et bionic, pour les applications avec du code natif.
-6. G5 : microG, puis les GApps fournies par l'utilisateur.
+4. G4 : chargeur ELF et bionic, pour les applications avec du code natif.
+5. G5 : microG, puis les GApps fournies par l'utilisateur.
 
 ## Règles que le projet s'impose
 

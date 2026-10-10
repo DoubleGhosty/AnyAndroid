@@ -9,6 +9,20 @@
 #include <vector>
 
 namespace aa::test {
+// Minimal self-contained test harness (no third-party dependency).
+
+} // namespace aa::test
+
+inline std::ostream& operator<<(std::ostream& os, const std::u16string& s) {
+  for (char16_t c : s) os << (char)c;
+  return os;
+}
+inline std::ostream& operator<<(std::ostream& os, const char16_t* s) {
+  while (*s) os << (char)*s++;
+  return os;
+}
+
+namespace aa::test {
 
 struct TestCase {
   const char* name;

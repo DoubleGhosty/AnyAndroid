@@ -3,7 +3,7 @@
 Couche de compatibilité qui exécute des applications Android (bytecode DEX) **comme des processus
 Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 
-> **Avancement : ≈ 30 % vers « Android natif sur Windows »**, détail et étape en cours dans
+> **Avancement : ≈ 35 % vers « Android natif sur Windows »**, détail et étape en cours dans
 > [docs/STATUS.md](docs/STATUS.md).
 >
 > **Statut : prototype de recherche.** La preuve de concept de l'annexe A du cadrage fonctionne :
