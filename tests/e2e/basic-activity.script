@@ -1,0 +1,8 @@
+# Scénario : trois clics sur le bouton, puis retour (fin de l'application).
+dump
+click "Cliquer"
+expect "Clics : 1"
+click "Cliquer"
+click "Cliquer"
+dump
+back

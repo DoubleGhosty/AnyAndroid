@@ -1,0 +1,12 @@
+log : 46
+textutils : a, b true
+bundle : v 3 2
+collections : 1 sept 1
+uri : exemple.fr /chemin/page 1 frag
+base64 : QW55QW5kcm9pZA==
+json : 1 2 {"a":1,"b":[true,"x"]}
+build : 37 AnyAndroid (Windows)
+looper : true
+horloge : ok
+parcel : 42 été v a.b.C 7
+binder : true true a.b.IDemo

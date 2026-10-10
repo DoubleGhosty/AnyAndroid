@@ -1,0 +1,10 @@
+/build*/
+/out/
+/.vs/
+/.vscode/
+/.cache/
+*.user
+compile_commands.json
+# Fichiers extraits d images Android (ne jamais versionner)
+/aosp/
+*.img

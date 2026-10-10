@@ -1,0 +1,24 @@
+[cycle] MainActivity.onCreate
+[logcat] I/Demo: onCreate
+[cycle] MainActivity.onStart
+[cycle] MainActivity.onResume
+=== Écran « Démo AnyAndroid » ===
+LinearLayout vertical
+  TextView "Bonjour depuis Android, sur Windows !"
+  TextView "Aucun clic pour l'instant."
+  Button "Cliquer"
+> click "Cliquer"
+> expect "Clics : 1" : ok
+> click "Cliquer"
+> click "Cliquer"
+[toast] "Trois clics !"
+=== Écran « Démo AnyAndroid » ===
+LinearLayout vertical
+  TextView "Bonjour depuis Android, sur Windows !"
+  TextView "Clics : 3"
+  Button "Cliquer"
+> back
+[cycle] MainActivity.onPause
+[cycle] MainActivity.onStop
+[cycle] MainActivity.onDestroy
+[fin] code 0
