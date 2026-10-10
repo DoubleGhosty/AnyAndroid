@@ -30,23 +30,23 @@ le nombre de fichiers.
 
 | Étape | Contenu                                                    | Avancement | État |
 |-------|------------------------------------------------------------|-----------:|------|
-| G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 80 %       | Outil prêt ; la mesure sur microG attend son téléchargement |
+| G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
 | G2    | Vraie libcore d'AOSP (Android 17)                           | 90 %       | NIO.2 / `sun.nio.fs` sur VFS opérationnel ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
 | G3    | Vrai `framework.jar` et une application AOSP affichée       | 40 %       | **En cours** (ressources et mises en page XML des applications en mode pont) |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
-| **Total** | **Android natif sur Windows**                          | **≈ 36 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
+| **Total** | **Android natif sur Windows**                          | **≈ 37 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
 
 ```
-G0 ████████░░  80 %
+G0 ██████████ 100 %
 G1 ██████████ 100 %
 G2 █████████░  90 %
 G3 ████░░░░░░  40 %
 G4 ░░░░░░░░░░   0 %
 G5 ░░░░░░░░░░   0 %
    ───────────────
-   ███▌░░░░░░ ≈ 36 % vers « Android natif sur Windows »
+   ███▋░░░░░░ ≈ 37 % vers « Android natif sur Windows »
 ```
 
 ## Ce qui marche aujourd'hui (vérifié par 31 suites de tests et 75 tests unitaires)
@@ -125,6 +125,20 @@ Ces règles viennent d'[ADR-002](adr/ADR-002-objectif-gapps.md) et du
 - Les GApps propriétaires sont fournies par l'utilisateur, jamais téléchargées depuis des miroirs.
 - Le code Android exécuté est traité comme non fiable. Les objets natifs lui sont présentés comme
   des identifiants bornés, jamais comme des pointeurs, et ses fichiers restent dans un bac à sable.
+
+## Entrées Android (hors dépôt)
+
+`tools/fetch-android-inputs.sh <dossier> [--gms] [--microg]` télécharge et vérifie (SHA-256
+publiés par Google, empreintes de l'index F-Droid de microG) la GSI x86_64 officielle d'Android 17
+(AOSP et, avec `--gms`, la variante GMS dont il extrait les GApps), extrait la libcore avec
+`anyandroid image bootclasspath`, et récupère microG. Rien de tout cela n'entre dans le dépôt.
+
+Mesures G0 sur ces APK réels :
+
+- [GApps d'Android 17](compatibility/gaps-gapps-android17.md) (Play Services 26.22, GSF, Play
+  Store 51.8) : 24 715 API distinctes, 1,68 million d'appels ; 14 processus pour GmsCore, UID
+  partagé `com.google.uid.shared`, des dizaines de permissions privilégiées, code natif x86_64 ;
+- [microG 0.3.17](compatibility/gaps-microg.md) : 14 262 API distinctes, 0,4 million d'appels.
 
 ## Compiler et tester
 
