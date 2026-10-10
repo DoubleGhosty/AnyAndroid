@@ -47,6 +47,8 @@ std::optional<std::string> system_property(const std::string& key);
 // File system of the emulated process (/dev only when none is configured).
 vfs::Vfs& libcore_vfs();
 
+void register_libcore_nio(rt::NativeRegistry& r);
+
 // Helpers of the libcore natives (libcore_natives.cpp).
 rt::Field* find_field(rt::Class* cls, std::string_view name, std::string_view type);
 int32_t fd_of(rt::Runtime& rt, rt::Handle file_descriptor);

@@ -7,7 +7,8 @@ add_executable(aa_unit_tests
   unit/test_reflect.cpp
   unit/test_jni.cpp
   unit/test_image.cpp
-  unit/test_libcore.cpp)
+  unit/test_libcore.cpp
+  unit/test_resources.cpp)
 target_include_directories(aa_unit_tests PRIVATE unit)
 target_link_libraries(aa_unit_tests PRIVATE aa_tooling aa_bridge aa_dex aa_apk aa_image aa_vfs)
 add_test(NAME unit COMMAND aa_unit_tests)

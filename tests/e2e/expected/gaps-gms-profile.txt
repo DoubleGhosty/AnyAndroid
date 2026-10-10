@@ -10,10 +10,10 @@ Paquets analysés
 
 Couverture des API de la plateforme
 -----------------------------------
-  Supportée : 5 API, 5 appels (26.3 %)
+  Supportée : 6 API, 6 appels (31.6 %)
   Partielle : 0 API, 0 appels (0.0 %)
   Stub : 0 API, 0 appels (0.0 %)
-  Non supportée : 17 API, 14 appels (73.7 %)
+  Non supportée : 16 API, 13 appels (68.4 %)
   Total : 22 API distinctes, 19 appels.
 
 Besoins de la plateforme (manifestes)
@@ -42,7 +42,7 @@ Profil des capacités requises
       ex. Landroid/app/ActivityThread;->currentApplication()Landroid/app/Application;; Landroid/os/SystemProperties;->get(Ljava/lang/String;)Ljava/lang/String;
   Comptes et synchronisation : 2 API dont 2 manquantes, 1 appels — AccountManager, ContentResolver, fournisseurs de contenu
       ex. Landroid/accounts/AccountManager;->get(Landroid/content/Context;)Landroid/accounts/AccountManager;; Landroid/content/ContentResolver;
-  Services système : 2 API dont 2 manquantes, 1 appels — getSystemService, JobScheduler, alarmes, notifications, PackageManager
+  Services système : 2 API dont 1 manquantes, 1 appels — getSystemService, JobScheduler, alarmes, notifications, PackageManager
       ex. Landroid/content/Context;->getSystemService(Ljava/lang/String;)Ljava/lang/Object;; Landroid/content/pm/PackageManager;
   Méthodes JNI déclarées : 1 API dont 1 manquantes, 1 appels — méthodes Java implémentées en code natif
       ex. Lcom/anyandroid/samples/gmsprofile/Probe;->nativeInit(J)I
@@ -50,7 +50,7 @@ Profil des capacités requises
 Paquets Java manquants les plus utilisés
 ----------------------------------------
   ✗ android.os  (7 appels, 7 API)
-  ✗ android.content  (3 appels, 4 API)
+  ✗ android.content  (2 appels, 3 API)
   ✗ android.accounts  (1 appels, 1 API)
   ✗ android.app  (1 appels, 1 API)
   ✗ java.lang  (1 appels, 1 API)
@@ -60,7 +60,7 @@ Paquets Java manquants les plus utilisés
 Classes manquantes les plus utilisées
 -------------------------------------
   ✗ Landroid/os/Parcel;  (4 appels, 4 API)
-  ✗ Landroid/content/Context;  (3 appels, 3 API)
+  ✗ Landroid/content/Context;  (2 appels, 2 API)
   ✗ Landroid/os/Binder;  (2 appels, 2 API)
   ✗ Landroid/accounts/AccountManager;  (1 appels, 1 API)
   ✗ Landroid/app/ActivityThread;  (1 appels, 1 API)
@@ -77,7 +77,6 @@ API manquantes les plus appelées
   ✗ Landroid/app/ActivityThread;->currentApplication()Landroid/app/Application;  (1 appels)
   ✗ Landroid/content/Context;->getContentResolver()Landroid/content/ContentResolver;  (1 appels)
   ✗ Landroid/content/Context;->getPackageManager()Landroid/content/pm/PackageManager;  (1 appels)
-  ✗ Landroid/content/Context;->getSystemService(Ljava/lang/String;)Ljava/lang/Object;  (1 appels)
   ✗ Landroid/os/Binder;-><init>()V  (1 appels)
   ✗ Landroid/os/Binder;->onTransact(ILandroid/os/Parcel;Landroid/os/Parcel;I)Z  (1 appels)
   ✗ Landroid/os/Parcel;->obtain()Landroid/os/Parcel;  (1 appels)
@@ -85,7 +84,8 @@ API manquantes les plus appelées
   ✗ Landroid/os/Parcel;->recycle()V  (1 appels)
   ✗ Landroid/os/Parcel;->writeInt(I)V  (1 appels)
   ✗ Landroid/os/SystemProperties;->get(Ljava/lang/String;)Ljava/lang/String;  (1 appels)
-  … et 5 autres
+  ✗ Ljava/lang/System;->loadLibrary(Ljava/lang/String;)V  (1 appels)
+  … et 4 autres
 
 Prérequis à construire, dans l'ordre suggéré
 --------------------------------------------
@@ -94,4 +94,4 @@ Prérequis à construire, dans l'ordre suggéré
   3. IPC : Binder/AIDL en processus (Parcel, IBinder, bindService) et gestionnaire de services
   4. Plateforme : installation « système privilégié », UID partagé et modèle multi-processus
   5. Services : AccountManager, ContentResolver/ContentProvider, synchronisation
-  6. Framework : 17 API référencées non implémentées (voir le classement) — plaide pour l'exécution du framework AOSP lui-même plutôt qu'une réécriture API par API
+  6. Framework : 16 API référencées non implémentées (voir le classement) — plaide pour l'exécution du framework AOSP lui-même plutôt qu'une réécriture API par API

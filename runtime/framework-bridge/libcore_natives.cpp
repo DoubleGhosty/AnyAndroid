@@ -1275,6 +1275,7 @@ void register_libcore_natives(rt::NativeRegistry& r) {
   register_invoke(r);
   register_libcore_charsets(r);
   register_libcore_files(r);
+  register_libcore_nio(r);
   register_framework_natives(r);
 }
 

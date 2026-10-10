@@ -10,5 +10,6 @@ add_library(aa_bridge STATIC
   java_util.cpp
   libcore_charsets.cpp
   libcore_files.cpp
-  libcore_natives.cpp)
+  libcore_natives.cpp
+  libcore_nio.cpp)
 target_link_libraries(aa_bridge PUBLIC aa_dex aa_vfs aa_res)
