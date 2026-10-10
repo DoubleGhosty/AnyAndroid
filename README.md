@@ -145,6 +145,7 @@ runtime/dex-engine/       format DEX, opcodes, vérification, runtime, interpré
 runtime/framework-bridge/ API Java/Android implémentées en natif (registre à statuts)
 runtime/lifecycle/        hôte d'application et cycle de vie des activités
 runtime/compat/           verdict de compatibilité, matrice des API, analyse d'écart
+runtime/third_party/      code tiers repris sans modification (miniz, voir « Composants tiers »)
 backends/windows/         fenêtre Win32 ; backends/headless/ : backend scriptable
 tools/apkgen/             assembleur smali, compilateur AXML et res/ (resources.arsc), écriture ZIP/DEX
 samples/                  APK de démonstration (sources smali, code Java équivalent en commentaire)
@@ -161,6 +162,13 @@ docs/                     ADR, matrice des API, modèle de menace
 - [ADR-005 — Système de fichiers virtuel](docs/adr/ADR-005-systeme-de-fichiers-virtuel.md)
 - [Matrice des API](docs/compatibility/api-matrix.md) (générée par `anyandroid compat --markdown`)
 - [Modèle de menace](docs/security/threat-model.md) · [SECURITY.md](SECURITY.md) · [CONTRIBUTING.md](CONTRIBUTING.md)
+
+## Composants tiers
+
+- [miniz](https://github.com/richgel999/miniz) 3.1.2 (+ 12 commits, `2948eeb`), licence MIT :
+  deflate/inflate, CRC-32 et Adler-32 des natives de `java.util.zip`. Fichiers repris sans
+  modification dans [runtime/third_party/miniz](runtime/third_party/miniz/README.md), avec leur
+  [licence](runtime/third_party/miniz/LICENSE).
 
 ## Licence et marques
 
