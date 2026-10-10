@@ -4,13 +4,15 @@
 // The zlib streams live in bounded handle tables: Java only ever holds a
 // kind-tagged handle (InflaterZStreamRef/DeflaterZStreamRef.address), and every
 // call keeps its stream alive with a shared_ptr, so a concurrent or repeated
-// end() cannot free it under the call. Byte arrays are bounds-checked in
-// 64 bits; direct buffers go through the emulated native memory.
+// end() cannot free it under the call. The number of live streams is capped.
+// Byte arrays are bounds-checked in 64 bits; direct buffers go through the
+// emulated native memory.
 #include "framework-bridge/internal.h"
 
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 
@@ -30,6 +32,14 @@ using S = rt::ApiStatus;
 
 constexpr int kWindowBits = MZ_DEFAULT_WINDOW_BITS;  // 15, as zlib's MAX_WBITS
 constexpr int kMemLevel = 8;                         // zlib's DEF_MEM_LEVEL (unused by miniz)
+constexpr int kNoFlushYet = -2;                      // zlib's last_flush after deflateInit/deflateReset
+
+// Live streams: a Deflater holds about 312 KiB of miniz state, an Inflater
+// about 40 KiB. Only end() frees them (the collector never runs libcore's
+// Cleaners), so a program that forgets end() runs out of streams
+// (OutOfMemoryError) rather than of host memory.
+constexpr size_t kMaxDeflaters = 256;   // ~78 MiB
+constexpr size_t kMaxInflaters = 1024;  // ~40 MiB
 
 // One zlib stream of an Inflater or a Deflater.
 struct ZStream {
@@ -47,11 +57,14 @@ struct ZStream {
   mz_stream strm{};
   bool deflate;
   int window_bits = kWindowBits;  // negative: raw deflate (nowrap)
+  int last_flush = kNoFlushYet;   // Deflater: flush mode of the previous deflate (zlib's last_flush)
 };
 
+// Kind tags: unique across the runtime (tests/check_handle_kinds.cmake).
 struct Tables {
-  HandleTable<ZStream> inflaters{0x0b01};
-  HandleTable<ZStream> deflaters{0x0b02};
+  HandleTable<ZStream> inflaters{0x0d01};
+  HandleTable<ZStream> deflaters{0x0d02};
+  std::mutex open_lock;  // keeps the caps exact under concurrent init()
 };
 
 Tables& tables() {
@@ -67,6 +80,22 @@ std::shared_ptr<ZStream> need(Runtime& rt, const HandleTable<ZStream>& table, in
 
 std::shared_ptr<ZStream> inflater(Runtime& rt, int64_t h) { return need(rt, tables().inflaters, h, "Inflater"); }
 std::shared_ptr<ZStream> deflater(Runtime& rt, int64_t h) { return need(rt, tables().deflaters, h, "Deflater"); }
+
+// Inflater/Deflater.init: the handle of the stream `make` creates, or
+// OutOfMemoryError when the cap is reached (checked before miniz allocates).
+template <typename Make>
+int64_t open_stream(Runtime& rt, bool deflate, Make make) {
+  Tables& t = tables();
+  HandleTable<ZStream>& table = deflate ? t.deflaters : t.inflaters;
+  size_t max = deflate ? kMaxDeflaters : kMaxInflaters;
+  std::lock_guard<std::mutex> guard(t.open_lock);
+  if (table.live() >= max) {
+    rt.throw_new("Ljava/lang/OutOfMemoryError;", std::string(deflate ? "Deflater" : "Inflater") +
+                                                     " : trop de flux zlib ouverts (" + std::to_string(max) +
+                                                     ") ; end() libère les flux inutilisés");
+  }
+  return table.add(make());
+}
 
 // --- Java memory -------------------------------------------------------------------------
 
@@ -110,6 +139,16 @@ void set_int_field(Runtime& rt, Handle obj, const char* name, int32_t v) {
   rt::Field* f = find_field(o.klass, name, "I");
   if (!f || f->is_static()) rt.throw_new("Ljava/lang/InternalError;", std::string("champ ") + name + " introuvable");
   o.fields.at(f->slot) = uint32_t(v);
+}
+
+// CRC-32 and Adler-32 of `bytes`, continuing `v`. An empty range leaves the
+// checksum unchanged, as zlib with Java's non-null array pointer: miniz would
+// return the initial value for the null pointer of an empty span.
+uint32_t crc32(uint32_t v, std::span<const uint8_t> bytes) {
+  return bytes.empty() ? v : uint32_t(mz_crc32(v, bytes.data(), bytes.size()));
+}
+uint32_t adler32(uint32_t v, std::span<const uint8_t> bytes) {
+  return bytes.empty() ? v : uint32_t(mz_adler32(v, bytes.data(), bytes.size()));
 }
 
 // --- Streams -----------------------------------------------------------------------------
@@ -191,6 +230,7 @@ int deflate_params(ZStream& z, int32_t level, int32_t strategy) {
   if (flags == d->m_flags) return MZ_OK;
   if (z.strm.total_in == 0 && z.strm.total_out == 0) {
     tdefl_init(d, nullptr, nullptr, int(flags));
+    z.last_flush = kNoFlushYet;
     return MZ_OK;
   }
   if (d->m_prev_return_status != TDEFL_STATUS_DONE) {
@@ -203,7 +243,19 @@ int deflate_params(ZStream& z, int32_t level, int32_t strategy) {
   d->m_max_probes[0] = 1 + ((flags & 0xFFF) + 2) / 3;
   d->m_max_probes[1] = 1 + (((flags & 0xFFF) >> 2) + 2) / 3;
   d->m_greedy_parsing = (flags & TDEFL_GREEDY_PARSING_FLAG) != 0;
+  // zlib's deflateParams ends with deflate(Z_BLOCK), weaker than SYNC_FLUSH
+  // and FULL_FLUSH: the next of these writes its block again.
+  z.last_flush = kNoFlushYet;
   return MZ_OK;
+}
+
+// zlib's RANK(): flush modes ordered by strength.
+int flush_rank(int flush) { return flush * 2 - (flush > 4 ? 9 : 0); }
+
+// Nothing buffered in the compressor: no output left to copy out, no input
+// left to compress, no symbol in the current block.
+bool nothing_pending(const tdefl_compressor& d) {
+  return d.m_output_flush_remaining == 0 && d.m_lookahead_size == 0 && d.m_pLZ_code_buf == d.m_lz_code_buf + 1;
 }
 
 // Deflater.deflate*'s packed result: bits 0-30 bytes read, 31-61 bytes
@@ -213,6 +265,18 @@ uint64_t do_deflate(Runtime& rt, ZStream& z, std::span<const uint8_t> in, std::s
   bool set_params = (params & 1) != 0;
   if (!set_params && (flush < MZ_NO_FLUSH || flush > MZ_FINISH)) {
     rt.throw_new("Ljava/lang/IllegalArgumentException;", "deflate : mode de vidage invalide " + std::to_string(flush));
+  }
+  if (!set_params && !out.empty()) {
+    // As zlib's deflate(): a flush no stronger than the previous one, with no
+    // new input and nothing pending, writes nothing (Z_BUF_ERROR). miniz would
+    // write one more empty block each time, and a caller that flushes until
+    // nothing comes out (okio's DeflaterSink) would never stop.
+    int previous = z.last_flush;
+    z.last_flush = flush;
+    auto* d = reinterpret_cast<const tdefl_compressor*>(z.strm.state);
+    if (in.empty() && flush != MZ_FINISH && flush_rank(flush) <= flush_rank(previous) && d && nothing_pending(*d)) {
+      return rt::ret_long(int64_t(pack(0, 0, false, false)));
+    }
   }
   uint64_t read, written;
   int ret;
@@ -250,14 +314,17 @@ void register_libcore_zip(rt::NativeRegistry& r) {
   const char* inf = "Ljava/util/zip/Inflater;";
 
   r.bind(inf, "init", "(Z)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    auto z = std::make_shared<ZStream>(false);
-    z->window_bits = a.z(0) ? -kWindowBits : kWindowBits;
-    int ret = mz_inflateInit2(&z->strm, z->window_bits);
-    if (ret == MZ_MEM_ERROR) rt.throw_new("Ljava/lang/OutOfMemoryError;", "Inflater : mémoire insuffisante");
-    if (ret != MZ_OK) rt.throw_new("Ljava/lang/InternalError;", "mz_inflateInit2 a échoué");
-    z->strm.adler = MZ_ADLER32_INIT;
-    return rt::ret_long(tables().inflaters.add(std::move(z)));
-  }, S::kSupported, "flux miniz (sans dictionnaire prédéfini)");
+    return rt::ret_long(open_stream(rt, false, [&] {
+      auto z = std::make_shared<ZStream>(false);
+      z->window_bits = a.z(0) ? -kWindowBits : kWindowBits;
+      int ret = mz_inflateInit2(&z->strm, z->window_bits);
+      if (ret == MZ_MEM_ERROR) rt.throw_new("Ljava/lang/OutOfMemoryError;", "Inflater : mémoire insuffisante");
+      if (ret != MZ_OK) rt.throw_new("Ljava/lang/InternalError;", "mz_inflateInit2 a échoué");
+      z->strm.adler = MZ_ADLER32_INIT;
+      return z;
+    }));
+  }, S::kSupported,
+     "flux miniz (sans dictionnaire prédéfini ; " + std::to_string(kMaxInflaters) + " flux vivants au plus)");
 
   r.bind(inf, "end", "(J)V", [](Runtime&, NativeArgs& a) -> uint64_t {
     tables().inflaters.remove(a.i64(0));  // a second end() is a no-op
@@ -317,13 +384,17 @@ void register_libcore_zip(rt::NativeRegistry& r) {
     int32_t level = a.i32(0), strategy = a.i32(1);
     if (level < -1 || level > 9) rt.throw_new("Ljava/lang/IllegalArgumentException;", "niveau de compression invalide");
     if (strategy < 0 || strategy > MZ_FIXED) rt.throw_new("Ljava/lang/IllegalArgumentException;", "stratégie invalide");
-    auto z = std::make_shared<ZStream>(true);
-    z->window_bits = a.z(2) ? -kWindowBits : kWindowBits;
-    int ret = mz_deflateInit2(&z->strm, zlib_level(level), MZ_DEFLATED, z->window_bits, kMemLevel, strategy);
-    if (ret == MZ_MEM_ERROR) rt.throw_new("Ljava/lang/OutOfMemoryError;", "Deflater : mémoire insuffisante");
-    if (ret != MZ_OK) rt.throw_new("Ljava/lang/IllegalArgumentException;", "mz_deflateInit2 a échoué");
-    return rt::ret_long(tables().deflaters.add(std::move(z)));
-  }, S::kSupported, "flux miniz (sans dictionnaire prédéfini ; flux valide mais octets différents de zlib)");
+    return rt::ret_long(open_stream(rt, true, [&] {
+      auto z = std::make_shared<ZStream>(true);
+      z->window_bits = a.z(2) ? -kWindowBits : kWindowBits;
+      int ret = mz_deflateInit2(&z->strm, zlib_level(level), MZ_DEFLATED, z->window_bits, kMemLevel, strategy);
+      if (ret == MZ_MEM_ERROR) rt.throw_new("Ljava/lang/OutOfMemoryError;", "Deflater : mémoire insuffisante");
+      if (ret != MZ_OK) rt.throw_new("Ljava/lang/IllegalArgumentException;", "mz_deflateInit2 a échoué");
+      return z;
+    }));
+  }, S::kSupported,
+     "flux miniz (sans dictionnaire prédéfini ; flux valide mais octets différents de zlib ; " +
+         std::to_string(kMaxDeflaters) + " flux vivants au plus)");
 
   r.bind(def, "end", "(J)V", [](Runtime&, NativeArgs& a) -> uint64_t {
     tables().deflaters.remove(a.i64(0));
@@ -334,6 +405,7 @@ void register_libcore_zip(rt::NativeRegistry& r) {
     auto z = deflater(rt, a.i64(0));
     mz_deflateReset(&z->strm);
     z->strm.adler = MZ_ADLER32_INIT;
+    z->last_flush = kNoFlushYet;
     return 0;
   });
 
@@ -381,31 +453,27 @@ void register_libcore_zip(rt::NativeRegistry& r) {
   const char* crc = "Ljava/util/zip/CRC32;";
   r.bind(crc, "update", "(II)I", [](Runtime&, NativeArgs& a) -> uint64_t {
     uint8_t b = uint8_t(a.raw(1));
-    return rt::ret_int(int32_t(mz_crc32(a.raw(0), &b, 1)));
+    return rt::ret_int(int32_t(crc32(a.raw(0), {&b, 1})));
   });
   r.bind(crc, "updateBytes0", "(I[BII)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    auto bytes = byte_range(rt, a.h(1), a.i32(2), a.i32(3), "CRC32");
-    return rt::ret_int(int32_t(mz_crc32(a.raw(0), bytes.data(), bytes.size())));
+    return rt::ret_int(int32_t(crc32(a.raw(0), byte_range(rt, a.h(1), a.i32(2), a.i32(3), "CRC32"))));
   });
   r.bind(crc, "updateByteBuffer0", "(IJII)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int64_t at = offset_address(rt, a.i64(1), a.i32(3), "CRC32");
-    auto bytes = native_range(rt, at, a.i32(4), false, "CRC32");
-    return rt::ret_int(int32_t(mz_crc32(a.raw(0), bytes.data(), bytes.size())));
+    return rt::ret_int(int32_t(crc32(a.raw(0), native_range(rt, at, a.i32(4), false, "CRC32"))));
   });
 
   const char* adl = "Ljava/util/zip/Adler32;";
   r.bind(adl, "update", "(II)I", [](Runtime&, NativeArgs& a) -> uint64_t {
     uint8_t b = uint8_t(a.raw(1));
-    return rt::ret_int(int32_t(mz_adler32(a.raw(0), &b, 1)));
+    return rt::ret_int(int32_t(adler32(a.raw(0), {&b, 1})));
   });
   r.bind(adl, "updateBytes", "(I[BII)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    auto bytes = byte_range(rt, a.h(1), a.i32(2), a.i32(3), "Adler32");
-    return rt::ret_int(int32_t(mz_adler32(a.raw(0), bytes.data(), bytes.size())));
+    return rt::ret_int(int32_t(adler32(a.raw(0), byte_range(rt, a.h(1), a.i32(2), a.i32(3), "Adler32"))));
   });
   r.bind(adl, "updateByteBuffer", "(IJII)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int64_t at = offset_address(rt, a.i64(1), a.i32(3), "Adler32");
-    auto bytes = native_range(rt, at, a.i32(4), false, "Adler32");
-    return rt::ret_int(int32_t(mz_adler32(a.raw(0), bytes.data(), bytes.size())));
+    return rt::ret_int(int32_t(adler32(a.raw(0), native_range(rt, at, a.i32(4), false, "Adler32"))));
   });
 }
 

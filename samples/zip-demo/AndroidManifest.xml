@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Programme console : java.util.zip sur la libcore d'AOSP (`anyandroid exec --bootclasspath`). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.anyandroid.samples.zip"
+    android:versionCode="1"
+    android:versionName="1.0">
+  <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="34"/>
+  <application android:label="Zip demo"/>
+</manifest>
