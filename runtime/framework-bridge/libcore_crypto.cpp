@@ -246,6 +246,24 @@ void register_libcore_crypto(rt::NativeRegistry& r) {
     ctx->digest.reset();
     return rt::ret_int(int32_t(out.size()));
   });
+
+  // NativeCrypto.<clinit>: the cipher suites of the TLS stack (none: TLS is
+  // not implemented, so the SSL natives stay unbound) and AES hardware.
+  r.bind(nc, "get_cipher_names", "(Ljava/lang/String;)[Ljava/lang/String;", [](Runtime& rt, NativeArgs&) -> uint64_t {
+    return rt::ret_obj(string_array(rt, {}));
+  }, S::kStub, "aucune suite TLS : TLS non pris en charge");
+  r.bind(nc, "EVP_has_aes_hardware", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_int(0); });
+
+  // JNI GetDirectBufferAddress: Buffer.address, an emulated native address for
+  // a direct buffer (0 otherwise, and conscrypt then copies the bytes).
+  r.bind(nc, "getDirectBufferAddress", "(Ljava/nio/Buffer;)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (a.h(0) == kNull) return 0;
+    rt::Object& o = rt.nonnull(a.h(0), "Buffer");
+    rt::Field* f = find_field(o.klass, "address", "J");
+    if (!f || f->is_static()) return 0;
+    int64_t address = long_field(o, *f);
+    return rt::ret_long(is_native_address(address) ? address : 0);
+  });
 }
 
 }  // namespace aa::bridge

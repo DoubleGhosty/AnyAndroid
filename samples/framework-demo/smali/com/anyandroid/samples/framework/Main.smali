@@ -13,6 +13,9 @@
 #   horloge     : ok                        (SystemClock)
 #   parcel      : 42 été v a.b.C 7          (Parcel : marshall/unmarshall, Bundle, Intent)
 #   binder      : true true a.b.IDemo       (Binder local transmis par Parcel, transact)
+#   digest      : AndroidOpenSSL 900150983cd24fb0d6963f7d28e17f72 ba7816bf…15ad 49a1475c…6ae8
+#                 (MessageDigest de conscrypt : MD5, SHA-256 cloné puis ByteBuffer direct,
+#                  SystemProperties.digestOf en SHA-1)
 #   resources   : Cancel android:string/cancel 200 ff008577
 #                 (Resources.getSystem() : framework-res.apk, thème Material, TypedArray)
 
@@ -22,7 +25,7 @@
 
 .method public static main([Ljava/lang/String;)V
     .registers 8
-    const/16 v5, 0xd
+    const/16 v5, 0xe
     new-array v6, v5, [Ljava/lang/String;
     const/4 v0, 0x0
     const-string v1, "log"
@@ -61,12 +64,15 @@
     const-string v1, "binder"
     aput-object v1, v6, v0
     const/16 v0, 0xc
+    const-string v1, "digest"
+    aput-object v1, v6, v0
+    const/16 v0, 0xd
     const-string v1, "resources"
     aput-object v1, v6, v0
 
-    # The resources section (12) is not run yet: Resources.getSystem() still
+    # The resources section (13) is not run yet: Resources.getSystem() still
     # needs sun.nio.fs (aconfig flags); see docs/STATUS.md.
-    const/16 v5, 0xc
+    const/16 v5, 0xd
     const/4 v0, 0x0
     :loop
     if-ge v0, v5, :done
@@ -152,6 +158,10 @@
     move-result-object v0
     return-object v0
     :s12
+    invoke-static {}, Lcom/anyandroid/samples/framework/Main;->digest()Ljava/lang/String;
+    move-result-object v0
+    return-object v0
+    :s13
     invoke-static {}, Lcom/anyandroid/samples/framework/Main;->resources()Ljava/lang/String;
     move-result-object v0
     return-object v0
@@ -170,6 +180,7 @@
         :s10
         :s11
         :s12
+        :s13
     .end packed-switch
 .end method
 
@@ -491,6 +502,64 @@
     invoke-virtual {v4}, Landroid/os/Parcel;->recycle()V
     invoke-virtual {v5}, Landroid/os/Parcel;->recycle()V
     filled-new-array {v3, v6, v7}, [Ljava/lang/Object;
+    move-result-object v0
+    invoke-static {v0}, Lcom/anyandroid/samples/framework/Main;->j([Ljava/lang/Object;)Ljava/lang/String;
+    move-result-object v0
+    return-object v0
+.end method
+
+# conscrypt's message digests (provider AndroidOpenSSL): MD5 of "abc" (RFC 1321),
+# SHA-256 of "ab" cloned then completed by "c" in a direct ByteBuffer (FIPS 180-4
+# "abc"), and SystemProperties.digestOf, the SHA-1 of "ro.build.version.sdk=37\n".
+.method static digest()Ljava/lang/String;
+    .registers 8
+    const-string v0, "MD5"
+    invoke-static {v0}, Ljava/security/MessageDigest;->getInstance(Ljava/lang/String;)Ljava/security/MessageDigest;
+    move-result-object v0
+    invoke-virtual {v0}, Ljava/security/MessageDigest;->getProvider()Ljava/security/Provider;
+    move-result-object v1
+    invoke-virtual {v1}, Ljava/security/Provider;->getName()Ljava/lang/String;
+    move-result-object v1
+    const-string v2, "abc"
+    invoke-virtual {v2}, Ljava/lang/String;->getBytes()[B
+    move-result-object v2
+    invoke-virtual {v0, v2}, Ljava/security/MessageDigest;->digest([B)[B
+    move-result-object v2
+    invoke-static {v2}, Llibcore/util/HexEncoding;->encodeToString([B)Ljava/lang/String;
+    move-result-object v2
+    invoke-virtual {v2}, Ljava/lang/String;->toLowerCase()Ljava/lang/String;
+    move-result-object v2
+    const-string v3, "SHA-256"
+    invoke-static {v3}, Ljava/security/MessageDigest;->getInstance(Ljava/lang/String;)Ljava/security/MessageDigest;
+    move-result-object v3
+    const-string v4, "ab"
+    invoke-virtual {v4}, Ljava/lang/String;->getBytes()[B
+    move-result-object v4
+    invoke-virtual {v3, v4}, Ljava/security/MessageDigest;->update([B)V
+    invoke-virtual {v3}, Ljava/security/MessageDigest;->clone()Ljava/lang/Object;
+    move-result-object v3
+    check-cast v3, Ljava/security/MessageDigest;
+    const/4 v4, 0x1
+    invoke-static {v4}, Ljava/nio/ByteBuffer;->allocateDirect(I)Ljava/nio/ByteBuffer;
+    move-result-object v4
+    const/16 v5, 0x63
+    invoke-virtual {v4, v5}, Ljava/nio/ByteBuffer;->put(B)Ljava/nio/ByteBuffer;
+    invoke-virtual {v4}, Ljava/nio/ByteBuffer;->flip()Ljava/nio/Buffer;
+    invoke-virtual {v3, v4}, Ljava/security/MessageDigest;->update(Ljava/nio/ByteBuffer;)V
+    invoke-virtual {v3}, Ljava/security/MessageDigest;->digest()[B
+    move-result-object v3
+    invoke-static {v3}, Llibcore/util/HexEncoding;->encodeToString([B)Ljava/lang/String;
+    move-result-object v3
+    invoke-virtual {v3}, Ljava/lang/String;->toLowerCase()Ljava/lang/String;
+    move-result-object v3
+    const/4 v4, 0x1
+    new-array v4, v4, [Ljava/lang/String;
+    const-string v5, "ro.build.version.sdk"
+    const/4 v6, 0x0
+    aput-object v5, v4, v6
+    invoke-static {v4}, Landroid/os/SystemProperties;->digestOf([Ljava/lang/String;)Ljava/lang/String;
+    move-result-object v4
+    filled-new-array {v1, v2, v3, v4}, [Ljava/lang/Object;
     move-result-object v0
     invoke-static {v0}, Lcom/anyandroid/samples/framework/Main;->j([Ljava/lang/Object;)Ljava/lang/String;
     move-result-object v0
