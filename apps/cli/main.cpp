@@ -69,9 +69,10 @@ void usage() {
       "      Analyse statique : manifeste, DEX, bibliothèques natives, API utilisées, verdict.\n"
       "      Aucun code de l'APK n'est exécuté.\n"
       "  run <fichier.apk> [--yes] [--force] [--activity <classe>] [--headless] [--script <fichier>]\n"
-      "                    [--do \"<commandes>\"] [--max-instructions <n>]\n"
+      "                    [--do \"<commandes>\"] [--max-instructions <n>] [--locale <bcp47>]\n"
       "      Lance l'activité principale dans une fenêtre Windows (ou sans fenêtre avec --headless).\n"
       "      Une confirmation est demandée avant d'exécuter le code d'un APK (sauf --yes).\n"
+      "      Les ressources (resources.arsc) suivent la langue de Windows, ou --locale.\n"
       "  exec [--bootclasspath <dossier>] <fichier.apk|.dex> <classe> [arguments...]\n"
       "      Exécute la méthode statique main(String[]) d'une classe (programme console).\n"
       "      --bootclasspath : utilise la libcore d'AOSP extraite par `image bootclasspath` (G2) ;\n"
@@ -175,6 +176,42 @@ std::unique_ptr<apk::LoadedApk> load(const std::string& path) {
     err("APK illisible : " + std::string(e.what()));
     return nullptr;
   }
+}
+
+// A phone-like configuration (AnyAndroid's default window).
+res::ResConfig device_config(const std::string& locale, uint16_t density) {
+  res::ResConfig config;
+  config.set_bcp47_locale(locale);
+  config.density = density;
+  config.sdk_version = 37;
+  config.screen_width_dp = 411;
+  config.screen_height_dp = 914;
+  config.smallest_screen_width_dp = 411;
+  config.orientation = 1;
+  config.touchscreen = 3;
+  config.screen_layout = 0x42;  // normal, left to right
+  config.ui_mode = 0x11;        // normal, not night
+  return config;
+}
+
+// Language of the Windows user ("fr-FR"), as Android would take it from the
+// device settings.
+std::string user_locale() {
+  wchar_t name[LOCALE_NAME_MAX_LENGTH] = {};
+  if (GetUserDefaultLocaleName(name, LOCALE_NAME_MAX_LENGTH) <= 0) return "en-US";
+  return text::from_wide(name);
+}
+
+// Resources of an APK for `run`: the bridge widgets use dp as Windows units,
+// the backends scale them to the monitor (hence mdpi).
+std::shared_ptr<res::AssetManager> app_resources(const apk::LoadedApk& apk, const std::string& locale) {
+  if (!apk.has_resources_arsc) return nullptr;
+  auto bytes = read_file(apk.path, 1ull << 30);
+  auto assets = res::ApkAssets::load_apk(path_utf8(apk.path), std::move(bytes), 0);
+  auto am = std::make_shared<res::AssetManager>();
+  am->set_apk_assets({assets});
+  am->set_configurations({device_config(locale, res::ResConfig::kDensityMedium)});
+  return am;
 }
 
 // Registry with every native class, for static evaluation only.
@@ -375,6 +412,11 @@ int cmd_run(const Args& a) {
   }
   lifecycle::AppOptions ao;
   if (a.has("--max-instructions")) ao.max_instructions_per_event = std::stoull(a.get("--max-instructions"));
+  try {
+    ao.resources = app_resources(*apk, a.has("--locale") ? a.get("--locale") : user_locale());
+  } catch (const std::exception& e) {
+    log::warn("ressources", std::string("resources.arsc illisible, ressources indisponibles : ") + e.what());
+  }
 
   std::unique_ptr<ui::Backend> backend;
   if (a.has("--headless")) {
@@ -756,19 +798,7 @@ int cmd_resources(const Args& a) {
     }
     res::AssetManager am;
     am.set_apk_assets(apks);
-    // A phone-like configuration (AnyAndroid's default window).
-    res::ResConfig config;
-    config.set_bcp47_locale(a.get("--locale", "en-US"));
-    config.density = uint16_t(std::stoi(a.get("--density", "420")));
-    config.sdk_version = 37;
-    config.screen_width_dp = 411;
-    config.screen_height_dp = 914;
-    config.smallest_screen_width_dp = 411;
-    config.orientation = 1;
-    config.touchscreen = 3;
-    config.screen_layout = 0x42;  // normal, left to right
-    config.ui_mode = 0x11;        // normal, not night
-    am.set_configurations({config});
+    am.set_configurations({device_config(a.get("--locale", "en-US"), uint16_t(std::stoi(a.get("--density", "420"))))});
 
     for (const auto& apk : apks) {
       out(apk->path() + "\n");

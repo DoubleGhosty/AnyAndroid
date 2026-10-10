@@ -8,7 +8,8 @@ add_executable(aa_unit_tests
   unit/test_jni.cpp
   unit/test_image.cpp
   unit/test_libcore.cpp
-  unit/test_resources.cpp)
+  unit/test_resources.cpp
+  unit/test_res_compiler.cpp)
 target_include_directories(aa_unit_tests PRIVATE unit)
 target_link_libraries(aa_unit_tests PRIVATE aa_tooling aa_bridge aa_dex aa_apk aa_image aa_vfs)
 add_test(NAME unit COMMAND aa_unit_tests)
@@ -26,7 +27,8 @@ endif()
 # --- End-to-end tests on the demo APKs ---------------------------------------
 set(S ${AA_SAMPLES_DIR})
 set(E ${CMAKE_CURRENT_SOURCE_DIR}/e2e)
-set(CLI $<TARGET_FILE:anyandroid>)
+# Cross builds run the CLI through their emulator (for example Wine).
+set(CLI ${CMAKE_CROSSCOMPILING_EMULATOR} $<TARGET_FILE:anyandroid>)
 
 # aa_e2e(<nom> CODE <n> [GOLDEN <fichier>] [MATCH <regex>] ARGS <arguments...>)
 function(aa_e2e name)
@@ -50,6 +52,11 @@ aa_e2e(basic-run CODE 0 GOLDEN basic-run.txt
   ARGS run ${S}/basic-activity.apk --yes --headless --script ${E}/basic-activity.script --max-instructions 5000000)
 aa_e2e(nav-run CODE 0 GOLDEN nav-run.txt
   ARGS run ${S}/two-screens.apk --yes --headless --script ${E}/two-screens.script --max-instructions 5000000)
+# Compiled resources: layout inflated from res/layout, strings of the chosen locale.
+aa_e2e(resources-run CODE 0 GOLDEN resources-run.txt
+  ARGS run ${S}/resources-demo.apk --yes --headless --locale fr-FR --script ${E}/resources-demo.script --max-instructions 5000000)
+aa_e2e(resources-run-default-locale CODE 0 MATCH "Écran « Resources demo »[^\n]*\nLinearLayout vertical\n  TextView \"Hello from compiled resources!\""
+  ARGS run ${S}/resources-demo.apk --yes --headless --locale de-DE --do dump --max-instructions 5000000)
 aa_e2e(basic-inspect CODE 0 MATCH "Verdict : COMPATIBLE"
   ARGS inspect ${S}/basic-activity.apk)
 aa_e2e(basic-inspect-json CODE 0 MATCH "\"verdict\": \"compatible\""

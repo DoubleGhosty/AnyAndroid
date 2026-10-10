@@ -16,6 +16,7 @@
 #include "common/file_io.h"
 #include "common/text.h"
 #include "dex_writer.h"
+#include "res_compiler.h"
 #include "smali.h"
 #include "xml_text.h"
 #include "zip_writer.h"
@@ -35,12 +36,14 @@ void usage() {
       "\n"
       "  apkgen build --manifest <AndroidManifest.xml> --smali <dossier> [--smali <dossier>...]\n"
       "               [--stub-lib <lib/abi/libx.so>:<aarch64|arm|x86|x86_64>] [--asset <fichier>=<chemin>]\n"
-      "               -o <sortie.apk>\n"
+      "               [--res <dossier res>] [--r-txt <R.txt>] -o <sortie.apk>\n"
       "  apkgen dex --smali <dossier> [...] -o <classes.dex>\n"
       "  apkgen corrupt <truncated|bad-crc|traversal|duplicate|bomb|bad-manifest|bad-dex> <entrée.apk> -o <sortie.apk>\n"
       "  apkgen bundle -o <sortie.apks> <base.apk> [<split.apk>...]\n"
       "\n"
-      "  --smali est facultatif pour un APK de configuration (split) sans code.\n");
+      "  --smali est facultatif pour un APK de configuration (split) sans code.\n"
+      "  --res compile values*/ et layout*/ en resources.arsc et XML binaire ; --r-txt écrit\n"
+      "  les identifiants attribués (format R.txt) pour les reporter dans le smali.\n");
 }
 
 std::vector<uint8_t> bytes_of(const std::string& s) { return std::vector<uint8_t>(s.begin(), s.end()); }
@@ -86,7 +89,7 @@ std::vector<uint8_t> stub_elf(const std::string& machine) {
 }
 
 int cmd_build(const std::vector<std::string>& args, bool dex_only) {
-  std::string manifest, output;
+  std::string manifest, output, res_dir, r_txt;
   std::vector<std::string> smali_dirs, stub_libs, assets;
   for (size_t i = 0; i < args.size(); ++i) {
     auto next = [&]() -> const std::string& {
@@ -97,6 +100,8 @@ int cmd_build(const std::vector<std::string>& args, bool dex_only) {
     else if (args[i] == "--smali") smali_dirs.push_back(next());
     else if (args[i] == "--stub-lib") stub_libs.push_back(next());
     else if (args[i] == "--asset") assets.push_back(next());
+    else if (args[i] == "--res") res_dir = next();
+    else if (args[i] == "--r-txt") r_txt = next();
     else if (args[i] == "-o") output = next();
     else throw std::runtime_error("option inconnue : " + args[i]);
   }
@@ -112,8 +117,28 @@ int cmd_build(const std::vector<std::string>& args, bool dex_only) {
   }
   tool::XmlNode root = tool::parse_xml_text(read_text_file(path_from_utf8(manifest)));
   tool::ZipWriter zip;
-  zip.add("AndroidManifest.xml", tool::compile_axml(root));
-  if (!dex.empty()) zip.add("classes.dex", dex);  // split APKs carry no code
+  if (res_dir.empty()) {
+    if (!r_txt.empty()) throw std::runtime_error("--r-txt demande --res");
+    zip.add("AndroidManifest.xml", tool::compile_axml(root));
+    if (!dex.empty()) zip.add("classes.dex", dex);  // split APKs carry no code
+  } else {
+    std::string package;
+    for (const auto& [k, v] : root.attributes) {
+      if (k == "package") package = v;
+    }
+    if (package.empty()) throw std::runtime_error("--res : attribut package absent du manifeste");
+    tool::ResCompiler res(package);
+    res.add_directory(res_dir);
+    res.finalize();
+    tool::AxmlOptions options;
+    options.resolve = [&res](std::string_view ref) { return res.resolve(ref); };
+    zip.add("AndroidManifest.xml", tool::compile_axml(root, options));
+    if (!dex.empty()) zip.add("classes.dex", dex);
+    // Stored uncompressed, as aapt does, so that it can be mapped.
+    zip.add("resources.arsc", res.write_arsc(), false);
+    for (const auto& [path, data] : res.compile_files()) zip.add(path, data);
+    if (!r_txt.empty()) write_text_file(path_from_utf8(r_txt), res.r_txt());
+  }
   for (const auto& a : assets) {
     size_t eq = a.find('=');
     if (eq == std::string::npos) throw std::runtime_error("--asset attend <fichier>=<chemin dans l'APK>");

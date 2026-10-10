@@ -36,6 +36,7 @@ void register_java_util(rt::NativeRegistry& r, Host& host);
 void register_java_reflect(rt::NativeRegistry& r, Host& host);
 void register_android_app(rt::NativeRegistry& r, Host& host);
 void register_android_widget(rt::NativeRegistry& r, Host& host);
+void register_android_res(rt::NativeRegistry& r, Host& host);
 void register_libcore_charsets(rt::NativeRegistry& r);
 void register_libcore_files(rt::NativeRegistry& r);
 void register_framework_natives(rt::NativeRegistry& r);

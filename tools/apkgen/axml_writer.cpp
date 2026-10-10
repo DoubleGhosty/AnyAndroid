@@ -1,6 +1,9 @@
 #include "axml_writer.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <map>
 #include <stdexcept>
 
@@ -43,8 +46,24 @@ bool is_integer(const std::string& v) {
   return std::all_of(v.begin() + long(i), v.end(), [](char c) { return c >= '0' && c <= '9'; });
 }
 
+// Enum values of the framework attributes AnyAndroid's layouts use.
+std::optional<uint32_t> enum_value(const std::string& attr, const std::string& v) {
+  if (attr == "layout_width" || attr == "layout_height") {
+    if (v == "match_parent" || v == "fill_parent") return 0xFFFFFFFFu;
+    if (v == "wrap_content") return 0xFFFFFFFEu;
+  } else if (attr == "orientation") {
+    if (v == "horizontal") return 0;
+    if (v == "vertical") return 1;
+  } else if (attr == "visibility") {
+    if (v == "visible") return 0;
+    if (v == "invisible") return 1;
+    if (v == "gone") return 2;
+  }
+  return std::nullopt;
+}
+
 Attr make_attr(const std::map<std::string, std::string>& ns_by_prefix, const std::string& qname,
-               const std::string& value) {
+               const std::string& value, const AxmlOptions& options) {
   Attr a;
   size_t colon = qname.find(':');
   if (colon != std::string::npos) {
@@ -59,16 +78,41 @@ Attr make_attr(const std::map<std::string, std::string>& ns_by_prefix, const std
   a.value = value;
   bool android = a.ns_uri == apk::kAndroidNs;
   if (android) a.res_id = apk::android_attr_id(a.name);
-  if (android && (value == "true" || value == "false")) {
+  if (!android) {
+    // aapt also resolves references of attributes without namespace
+    // (<include layout="@layout/x"/>).
+    auto id = !value.empty() && value[0] == '@' && options.resolve ? options.resolve(value) : std::nullopt;
+    if (id) {
+      a.typed = {apk::kResReference, *id};
+    } else {
+      a.is_string = true;
+    }
+  } else if (value == "true" || value == "false") {
     a.typed = {apk::kResIntBoolean, value == "true" ? 0xFFFFFFFFu : 0u};
-  } else if (android && is_integer(value)) {
+  } else if (auto e = enum_value(a.name, value)) {
+    a.typed = {apk::kResIntDec, *e};
+  } else if (a.name == "layout_weight") {
+    float f = std::strtof(value.c_str(), nullptr);
+    uint32_t bits;
+    std::memcpy(&bits, &f, 4);
+    a.typed = {apk::kResFloat, bits};
+  } else if (is_integer(value)) {
     a.typed = {apk::kResIntDec, uint32_t(std::stol(value))};
-  } else if (android && value.size() > 2 && value[0] == '0' && (value[1] == 'x' || value[1] == 'X')) {
+  } else if (value.size() > 2 && value[0] == '0' && (value[1] == 'x' || value[1] == 'X')) {
     a.typed = {apk::kResIntHex, uint32_t(std::stoul(value, nullptr, 16))};
-  } else if (android && value == "@null") {
+  } else if (auto c = parse_color(value)) {
+    a.typed = {c->first, c->second};
+  } else if (auto d = parse_dimension(value)) {
+    a.typed = {d->first, d->second};
+  } else if (value == "@null") {
     a.typed = {apk::kResReference, 0};
-  } else if (android && !value.empty() && (value[0] == '@' || value[0] == '?')) {
-    throw std::runtime_error("références de ressources non prises en charge par apkgen : " + value);
+  } else if (!value.empty() && value[0] == '@') {
+    if (!options.resolve) throw std::runtime_error("références de ressources non prises en charge ici : " + value);
+    auto id = options.resolve(value);
+    if (!id) throw std::runtime_error("ressource inconnue : " + value);
+    a.typed = {apk::kResReference, *id};
+  } else if (!value.empty() && value[0] == '?') {
+    throw std::runtime_error("attributs de thème (?attr) non pris en charge par apkgen : " + value);
   } else {
     a.is_string = true;
   }
@@ -76,6 +120,7 @@ Attr make_attr(const std::map<std::string, std::string>& ns_by_prefix, const std
 }
 
 struct Builder {
+  const AxmlOptions& options;
   Pool pool;
   ByteWriter body;
   std::map<std::string, std::string> ns_by_prefix;
@@ -98,7 +143,7 @@ struct Builder {
     std::vector<Attr> out;
     for (const auto& [k, v] : n.attributes) {
       if (text::starts_with(k, "xmlns")) continue;
-      out.push_back(make_attr(ns_by_prefix, k, v));
+      out.push_back(make_attr(ns_by_prefix, k, v, options));
     }
     std::stable_sort(out.begin(), out.end(), [](const Attr& x, const Attr& y) {
       if ((x.res_id != 0) != (y.res_id != 0)) return x.res_id != 0;
@@ -173,6 +218,48 @@ struct Builder {
 
 }  // namespace
 
+std::optional<std::pair<uint8_t, uint32_t>> parse_color(std::string_view v) {
+  if (v.size() < 2 || v[0] != '#') return std::nullopt;
+  uint32_t x = 0;
+  for (char c : v.substr(1)) {
+    int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+    if (d < 0) return std::nullopt;
+    x = (x << 4) | uint32_t(d);
+  }
+  auto nibbles = [](uint32_t n) { return (n << 4) | n; };
+  switch (v.size() - 1) {
+    case 3:  // #RGB
+      return std::pair{apk::kResColorRgb4,
+                       0xFF000000u | nibbles((x >> 8) & 0xF) << 16 | nibbles((x >> 4) & 0xF) << 8 | nibbles(x & 0xF)};
+    case 4:  // #ARGB
+      return std::pair{apk::kResColorArgb4, nibbles(x >> 12) << 24 | nibbles((x >> 8) & 0xF) << 16 |
+                                                nibbles((x >> 4) & 0xF) << 8 | nibbles(x & 0xF)};
+    case 6: return std::pair{apk::kResColorRgb8, 0xFF000000u | x};
+    case 8: return std::pair{apk::kResColorArgb8, x};
+    default: return std::nullopt;
+  }
+}
+
+std::optional<std::pair<uint8_t, uint32_t>> parse_dimension(std::string_view v) {
+  static constexpr std::pair<const char*, uint32_t> kUnits[] = {
+      {"px", 0}, {"dip", 1}, {"dp", 1}, {"sp", 2}, {"pt", 3}, {"in", 4}, {"mm", 5}};
+  for (const auto& [suffix, unit] : kUnits) {
+    std::string_view s(suffix);
+    if (v.size() <= s.size() || v.substr(v.size() - s.size()) != s) continue;
+    std::string number(v.substr(0, v.size() - s.size()));
+    char* end = nullptr;
+    double d = std::strtod(number.c_str(), &end);
+    if (end != number.c_str() + number.size() || !std::isfinite(d) || std::fabs(d) >= 8388608.0) return std::nullopt;
+    // Res_value complex: 24-bit mantissa, radix (23p0, 16p7, 8p15, 0p23), unit.
+    double a = std::fabs(d);
+    uint32_t radix = a == std::floor(a) ? 0 : a < 1 ? 3 : a < 256 ? 2 : a < 65536 ? 1 : 0;
+    static constexpr int kShift[] = {0, 7, 15, 23};
+    int64_t mantissa = std::llround(d * double(1 << kShift[radix]));
+    return std::pair{apk::kResDimension, (uint32_t(mantissa) & 0xFFFFFFu) << 8 | radix << 4 | unit};
+  }
+  return std::nullopt;
+}
+
 std::vector<uint8_t> write_string_pool(const std::vector<std::string>& strings, bool utf8) {
   ByteWriter data;
   std::vector<uint32_t> offsets;
@@ -218,7 +305,7 @@ std::vector<uint8_t> write_string_pool(const std::vector<std::string>& strings, 
 }
 
 std::vector<uint8_t> compile_axml(const XmlNode& root, const AxmlOptions& options) {
-  Builder b;
+  Builder b{options};
   b.collect_namespaces(root);
   std::map<uint32_t, std::string> res;
   b.collect_res_names(root, res);

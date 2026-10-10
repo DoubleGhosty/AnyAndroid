@@ -367,12 +367,23 @@ void AppHost::on_close() {
 
 void AppHost::on_tasks() { process_pending(); }
 
+std::optional<std::u16string> AppHost::label_text(const std::string& label) const {
+  if (label.empty()) return std::nullopt;
+  if (label[0] != '@') return text::utf8_to_utf16(label);
+  const res::AssetManager* am = options_.resources.get();
+  if (!am || !text::starts_with(label, "@0x")) return std::nullopt;
+  auto v = am->get_resource(uint32_t(std::stoul(label.substr(3), nullptr, 16)), false);
+  if (!v || !am->resolve_reference(*v) || v->type != res::kTypeString) return std::nullopt;
+  auto pool = am->string_pool(v->cookie);
+  return pool ? pool->string16(v->data) : std::nullopt;
+}
+
 std::u16string AppHost::default_title(const std::string& descriptor) const {
   std::string java_name = text::descriptor_to_java(descriptor);
   if (const apk::Component* c = manifest_.find_activity(java_name)) {
-    if (!c->label.empty() && c->label[0] != '@') return text::utf8_to_utf16(c->label);
+    if (auto t = label_text(c->label)) return *t;
   }
-  if (!manifest_.app_label.empty() && manifest_.app_label[0] != '@') return text::utf8_to_utf16(manifest_.app_label);
+  if (auto t = label_text(manifest_.app_label)) return *t;
   return text::utf8_to_utf16(simple_name(java_name));
 }
 

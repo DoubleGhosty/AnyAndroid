@@ -5,41 +5,10 @@
 
 | Statut | Signification | Membres |
 |---|---|---|
-| Supportée | comportement testé et documenté pour le périmètre annoncé | 770 |
-| Partielle | chemin courant pris en charge, limites connues | 56 |
+| Supportée | comportement testé et documenté pour le périmètre annoncé | 786 |
+| Partielle | chemin courant pris en charge, limites connues | 64 |
 | Stub | API reconnue mais sans effet réel | 24 |
 | Non supportée | reconnue mais refusée avec une erreur explicite | 25 |
-
-## `aa.stubs.ActivityManager`
-
-| Membre | Statut | Note |
-|---|---|---|
-| `<init>()V` | Supportée |  |
-
-## `aa.stubs.DisplayManager`
-
-| Membre | Statut | Note |
-|---|---|---|
-| `<init>()V` | Supportée |  |
-
-## `aa.stubs.LayoutInflater`
-
-| Membre | Statut | Note |
-|---|---|---|
-| `<init>(Landroid/content/Context;)V` | Supportée |  |
-| `inflate(ILandroid/view/ViewGroup;)Landroid/view/View;` | Supportée |  |
-
-## `aa.stubs.PowerManager`
-
-| Membre | Statut | Note |
-|---|---|---|
-| `<init>()V` | Supportée |  |
-
-## `aa.stubs.WindowManager`
-
-| Membre | Statut | Note |
-|---|---|---|
-| `<init>()V` | Supportée |  |
 
 ## `android.app.Activity`
 
@@ -58,10 +27,8 @@
 | `onSaveInstanceState(Landroid/os/Bundle;)V` | Partielle | état non restauré (pas de recréation d'activité) |
 | `onBackPressed()V` | Supportée |  |
 | `setContentView(Landroid/view/View;)V` | Supportée |  |
-| `setContentView(I)V` | Supportée |  |
 | `findViewById(I)Landroid/view/View;` | Supportée |  |
 | `setTitle(Ljava/lang/CharSequence;)V` | Supportée |  |
-| `setTitle(I)V` | Non supportée | ressources compilées (resources.arsc) non prises en charge dans cette version |
 | `getTitle()Ljava/lang/CharSequence;` | Supportée |  |
 | `finish()V` | Supportée |  |
 | `isFinishing()Z` | Supportée |  |
@@ -75,8 +42,10 @@
 | `overridePendingTransition(II)V` | Stub | pas d'animations |
 | `getWindow()Landroid/view/Window;` | Non supportée | API Window non implémentée |
 | `getActionBar()Landroid/app/ActionBar;` | Non supportée | barre d'action non implémentée |
-| `getLayoutInflater()Landroid/view/LayoutInflater;` | Supportée |  |
 | `getSharedPreferences(Ljava/lang/String;I)Landroid/content/SharedPreferences;` | Non supportée | stockage persistant prévu en phase 5 |
+| `setContentView(I)V` | Supportée |  |
+| `getLayoutInflater()Landroid/view/LayoutInflater;` | Supportée |  |
+| `setTitle(I)V` | Supportée |  |
 
 ## `android.app.Application`
 
@@ -101,12 +70,14 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `getFilesDir()Ljava/io/File;` | Supportée |  |
 | `getCacheDir()Ljava/io/File;` | Supportée |  |
 | `getDataDir()Ljava/io/File;` | Supportée |  |
-| `getResources()Landroid/content/res/Resources;` | Supportée |  |
-| `getString(I)Ljava/lang/String;` | Supportée |  |
-| `getText(I)Ljava/lang/CharSequence;` | Supportée |  |
-| `getSystemService(Ljava/lang/String;)Ljava/lang/Object;` | Supportée |  |
 | `getSharedPreferences(Ljava/lang/String;I)Landroid/content/SharedPreferences;` | Non supportée | stockage persistant prévu en phase 5 |
 | `checkSelfPermission(Ljava/lang/String;)I` | Non supportée | modèle de permissions non implémenté |
+| `getResources()Landroid/content/res/Resources;` | Supportée |  |
+| `getString(I)Ljava/lang/String;` | Supportée |  |
+| `getString(I[Ljava/lang/Object;)Ljava/lang/String;` | Supportée |  |
+| `getText(I)Ljava/lang/CharSequence;` | Partielle | texte sans styles |
+| `getColor(I)I` | Supportée |  |
+| `getSystemService(Ljava/lang/String;)Ljava/lang/Object;` | Partielle | seul layout_inflater est disponible en mode pont |
 
 ## `android.content.ContextWrapper`
 
@@ -143,6 +114,34 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `addFlags(I)Landroid/content/Intent;` | Partielle | drapeaux mémorisés mais sans effet |
 | `setFlags(I)Landroid/content/Intent;` | Partielle | drapeaux mémorisés mais sans effet |
 | `getFlags()I` | Supportée |  |
+
+## `android.content.res.Resources$NotFoundException`
+
+_Aucun membre propre (type déclaré pour la résolution des classes)._
+
+## `android.content.res.Resources`
+
+| Membre | Statut | Note |
+|---|---|---|
+| `getText(I)Ljava/lang/CharSequence;` | Partielle | texte sans styles (balises <b>, <i>... ignorées) |
+| `getText(ILjava/lang/CharSequence;)Ljava/lang/CharSequence;` | Supportée |  |
+| `getString(I)Ljava/lang/String;` | Supportée |  |
+| `getString(I[Ljava/lang/Object;)Ljava/lang/String;` | Supportée |  |
+| `getColor(I)I` | Supportée |  |
+| `getColor(ILandroid/content/res/Resources$Theme;)I` | Partielle | thème ignoré |
+| `getInteger(I)I` | Supportée |  |
+| `getBoolean(I)Z` | Supportée |  |
+| `getDimension(I)F` | Supportée |  |
+| `getDimensionPixelOffset(I)I` | Supportée |  |
+| `getDimensionPixelSize(I)I` | Supportée |  |
+| `getIdentifier(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I` | Supportée |  |
+| `getResourceName(I)Ljava/lang/String;` | Supportée |  |
+| `getResourcePackageName(I)Ljava/lang/String;` | Supportée |  |
+| `getResourceTypeName(I)Ljava/lang/String;` | Supportée |  |
+| `getResourceEntryName(I)Ljava/lang/String;` | Supportée |  |
+| `getLayout(I)Landroid/content/res/XmlResourceParser;` | Non supportée | XmlPullParser non disponible en mode pont |
+| `getDrawable(I)Landroid/graphics/drawable/Drawable;` | Non supportée | images (drawables) non prises en charge en mode pont |
+| `getStringArray(I)[Ljava/lang/String;` | Non supportée | tableaux de ressources non pris en charge en mode pont |
 
 ## `android.os.BaseBundle`
 
@@ -247,6 +246,26 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | Membre | Statut | Note |
 |---|---|---|
 | `setTheme(I)V` | Stub | thèmes non pris en charge |
+
+## `android.view.InflateException`
+
+_Aucun membre propre (type déclaré pour la résolution des classes)._
+
+## `android.view.LayoutInflater`
+
+| Membre | Statut | Note |
+|---|---|---|
+| `from(Landroid/content/Context;)Landroid/view/LayoutInflater;` (statique) | Supportée |  |
+| `getContext()Landroid/content/Context;` | Supportée |  |
+| `cloneInContext(Landroid/content/Context;)Landroid/view/LayoutInflater;` | Supportée |  |
+| `inflate(ILandroid/view/ViewGroup;)Landroid/view/View;` | Partielle | vues du pont, attributs courants (texte, id, couleurs, tailles, poids, visibilité, onClick) |
+| `inflate(ILandroid/view/ViewGroup;Z)Landroid/view/View;` | Partielle | vues du pont, attributs courants (texte, id, couleurs, tailles, poids, visibilité, onClick) |
+
+## `android.view.View$DeclaredOnClickListener`
+
+| Membre | Statut | Note |
+|---|---|---|
+| `onClick(Landroid/view/View;)V` | Supportée |  |
 
 ## `android.view.View$OnClickListener` (interface)
 
@@ -355,6 +374,7 @@ Classe : **Partielle** — enfants empilés verticalement au lieu d'être superp
 | Membre | Statut | Note |
 |---|---|---|
 | `<init>(Landroid/content/Context;)V` | Partielle | enfants empilés verticalement |
+| `<init>(Landroid/content/Context;Landroid/util/AttributeSet;)V` | Partielle | attributs XML ignorés, enfants empilés verticalement |
 
 ## `android.widget.LinearLayout$LayoutParams`
 
@@ -381,6 +401,7 @@ Classe : **Partielle** — pas de défilement
 | Membre | Statut | Note |
 |---|---|---|
 | `<init>(Landroid/content/Context;)V` | Partielle | pas de défilement |
+| `<init>(Landroid/content/Context;Landroid/util/AttributeSet;)V` | Partielle | attributs XML ignorés, pas de défilement |
 
 ## `android.widget.TextView`
 
@@ -389,7 +410,6 @@ Classe : **Partielle** — pas de défilement
 | `<init>(Landroid/content/Context;)V` | Supportée |  |
 | `<init>(Landroid/content/Context;Landroid/util/AttributeSet;)V` | Partielle | attributs XML ignorés |
 | `setText(Ljava/lang/CharSequence;)V` | Supportée |  |
-| `setText(I)V` | Non supportée | ressources compilées (resources.arsc) non prises en charge dans cette version |
 | `getText()Ljava/lang/CharSequence;` | Supportée |  |
 | `append(Ljava/lang/CharSequence;)V` | Supportée |  |
 | `length()I` | Supportée |  |
@@ -402,6 +422,8 @@ Classe : **Partielle** — pas de défilement
 | `setSingleLine()V` | Stub | mise en forme ignorée |
 | `setMaxLines(I)V` | Stub | mise en forme ignorée |
 | `setInputType(I)V` | Stub | type de saisie ignoré |
+| `setText(I)V` | Supportée |  |
+| `setHint(I)V` | Supportée |  |
 
 ## `android.widget.Toast`
 
@@ -409,11 +431,11 @@ Classe : **Partielle** — pas de défilement
 |---|---|---|
 | `<init>(Landroid/content/Context;)V` | Supportée |  |
 | `makeText(Landroid/content/Context;Ljava/lang/CharSequence;I)Landroid/widget/Toast;` (statique) | Supportée |  |
-| `makeText(Landroid/content/Context;II)Landroid/widget/Toast;` (statique) | Non supportée | ressources compilées (resources.arsc) non prises en charge dans cette version |
 | `show()V` | Supportée |  |
 | `setText(Ljava/lang/CharSequence;)V` | Supportée |  |
 | `setDuration(I)V` | Supportée |  |
 | `cancel()V` | Stub | le toast disparaît de lui-même |
+| `makeText(Landroid/content/Context;II)Landroid/widget/Toast;` (statique) | Supportée |  |
 
 ## `java.io.IOException`
 

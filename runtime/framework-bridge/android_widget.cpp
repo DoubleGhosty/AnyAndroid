@@ -17,9 +17,6 @@ using S = ApiStatus;
 
 namespace {
 
-constexpr const char* kNoResources =
-    "ressources compilées (resources.arsc) non prises en charge dans cette version";
-
 struct LayoutParamsPeer final : rt::NativePeer {
   int width = -2;
   int height = -2;
@@ -291,19 +288,23 @@ void register_view(rt::NativeRegistry& r, Host& host) {
   ll.stub("setGravity", "(I)V", "gravité ignorée");
   ll.stub("setWeightSum", "(F)V", "somme des poids calculée automatiquement");
 
-  auto fl = r.define("Landroid/widget/FrameLayout;", "Landroid/view/ViewGroup;", {}, 0x1, S::kPartial,
-                     "enfants empilés verticalement au lieu d'être superposés");
-  fl.ctor("(Landroid/content/Context;)V", [](Runtime&, NativeArgs& a) -> uint64_t {
-    make_view(a, ui::NodeKind::kGroup, "FrameLayout", a.h(1));
-    static_cast<ViewPeer*>(a.self().peer.get())->node->orientation = ui::Orientation::kVertical;
-    return 0;
-  }, S::kPartial, "enfants empilés verticalement");
+  // Both stack their children vertically (no overlap, no scrolling).
+  auto stacked = [](const char* type_name) {
+    return [type_name](Runtime&, NativeArgs& a) -> uint64_t {
+      make_view(a, ui::NodeKind::kGroup, type_name, a.h(1));
+      static_cast<ViewPeer*>(a.self().peer.get())->node->orientation = ui::Orientation::kVertical;
+      return 0;
+    };
+  };
+  r.define("Landroid/widget/FrameLayout;", "Landroid/view/ViewGroup;", {}, 0x1, S::kPartial,
+           "enfants empilés verticalement au lieu d'être superposés")
+      .ctor("(Landroid/content/Context;)V", stacked("FrameLayout"), S::kPartial, "enfants empilés verticalement")
+      .ctor("(Landroid/content/Context;Landroid/util/AttributeSet;)V", stacked("FrameLayout"), S::kPartial,
+            "attributs XML ignorés, enfants empilés verticalement");
   r.define("Landroid/widget/ScrollView;", "Landroid/widget/FrameLayout;", {}, 0x1, S::kPartial, "pas de défilement")
-      .ctor("(Landroid/content/Context;)V", [](Runtime&, NativeArgs& a) -> uint64_t {
-        make_view(a, ui::NodeKind::kGroup, "ScrollView", a.h(1));
-        static_cast<ViewPeer*>(a.self().peer.get())->node->orientation = ui::Orientation::kVertical;
-        return 0;
-      }, S::kPartial, "pas de défilement");
+      .ctor("(Landroid/content/Context;)V", stacked("ScrollView"), S::kPartial, "pas de défilement")
+      .ctor("(Landroid/content/Context;Landroid/util/AttributeSet;)V", stacked("ScrollView"), S::kPartial,
+            "attributs XML ignorés, pas de défilement");
 }
 
 void register_text(rt::NativeRegistry& r, Host& host) {
@@ -339,7 +340,6 @@ void register_text(rt::NativeRegistry& r, Host& host) {
     changed(host, n);
     return 0;
   });
-  tv.unsupported("setText", "(I)V", kNoResources);
   tv.method("getText", "()Ljava/lang/CharSequence;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     return rt.new_string(node_of(rt, a.h(0)).text);
   });
@@ -412,8 +412,6 @@ void register_text(rt::NativeRegistry& r, Host& host) {
                         rt.object(h)->peer = std::move(p);
                         return h;
                       });
-  toast.unsupported("makeText", "(Landroid/content/Context;II)Landroid/widget/Toast;", kNoResources);
-  toast.spec().methods.back().access |= 0x8;
   toast.method("show", "()V", [&host, tst](Runtime& rt, NativeArgs& a) -> uint64_t {
     if (!host.on_ui_thread()) {
       rt.throw_new("Ljava/lang/RuntimeException;", "Can't toast on a thread that has not called Looper.prepare()");

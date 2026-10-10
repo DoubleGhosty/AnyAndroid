@@ -2,6 +2,7 @@
 add_library(aa_tooling STATIC
   axml_writer.cpp
   dex_writer.cpp
+  res_compiler.cpp
   smali.cpp
   xml_text.cpp
   zip_writer.cpp)
