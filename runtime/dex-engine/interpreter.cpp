@@ -192,6 +192,7 @@ uint64_t Runtime::execute(Method* m, const uint32_t* args, uint32_t nargs) {
         const Insn& in = insns[i];
         t->frames[fi].pc = in.pc;
         stats_.instructions++;
+        m->profile_instructions++;
         if (options_.max_instructions && ++t->budget_used > options_.max_instructions) {
           throw_new("Ljava/lang/Error;", "[AnyAndroid] budget d'instructions dépassé (boucle infinie ?)");
         }

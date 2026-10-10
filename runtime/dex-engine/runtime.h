@@ -158,6 +158,10 @@ struct Method {
   ApiStatus status = ApiStatus::kSupported;
   std::string note;
   bool reported = false;  // stub/partial usage already logged
+  // Profile (`exec --profile`): calls and instructions executed in this
+  // method's own frames (callees excluded).
+  uint64_t profile_calls = 0;
+  uint64_t profile_instructions = 0;
   // JNI implementation registered with RegisterNatives (System V ABI).
   void* jni_fn = nullptr;
 

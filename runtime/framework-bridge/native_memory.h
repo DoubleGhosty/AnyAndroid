@@ -1,0 +1,46 @@
+#pragma once
+
+#include <cstdint>
+#include <span>
+#include <string>
+#include <vector>
+
+#include "dex-engine/runtime.h"
+
+// Emulated native memory. Whatever Java code holds as a "native address"
+// (Unsafe.allocateMemory, VMRuntime.addressOf, DirectByteBuffer.address,
+// the C strings and buffers that NIO passes to its natives, Os.mmap) is a
+// tagged value naming a region and an offset, never a host pointer:
+//
+//   bits 60-63  0x5 (tag; the value stays positive)
+//   bits 52-59  generation of the region slot (stale addresses are rejected)
+//   bits 32-51  region id
+//   bits  0-31  offset in the region
+//
+// Java code may do pointer arithmetic (address + offset) within a region;
+// every access is checked against the region's bounds. A forged, stale or
+// out-of-range address raises a Java exception instead of reaching memory.
+namespace aa::bridge {
+
+// Region of `size` zeroed bytes owned by native code (Unsafe.allocateMemory).
+int64_t native_alloc(rt::Runtime& rt, uint64_t size);
+// Frees a region; `address` must be its base (offset 0).
+void native_free(rt::Runtime& rt, int64_t address);
+// Unsafe.reallocateMemory: a new region holding the old bytes; 0 frees.
+int64_t native_realloc(rt::Runtime& rt, int64_t address, uint64_t size);
+// Region over the elements of a primitive Java array (VMRuntime.addressOf).
+// The same array always gets the same address while it is alive.
+int64_t native_address_of(rt::Runtime& rt, rt::Handle array);
+// Region holding a copy of `data` (read-only mappings such as Os.mmap of a file).
+int64_t native_wrap(rt::Runtime& rt, std::vector<uint8_t> data, bool writable);
+
+bool is_native_address(int64_t address);
+// `size` bytes at `address`; throws (IllegalArgumentException for an unknown
+// address, IndexOutOfBoundsException past the end of its region).
+std::span<uint8_t> native_span(rt::Runtime& rt, int64_t address, uint64_t size, bool write = false);
+// Bytes from `address` up to the first NUL (at most `max`, within the region).
+std::string native_cstring(rt::Runtime& rt, int64_t address, size_t max = 4096);
+// The Java array behind a VMRuntime.addressOf value (offset 0 only).
+rt::ArrayObject& native_array(rt::Runtime& rt, int64_t address);
+
+}  // namespace aa::bridge

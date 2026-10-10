@@ -2,10 +2,12 @@
 
 #include <functional>
 #include <optional>
+#include <span>
 #include <string>
 
 #include "dex-engine/runtime.h"
 #include "framework-bridge/bridge.h"
+#include "vfs/vfs.h"
 
 namespace aa::bridge {
 
@@ -47,7 +49,20 @@ std::optional<std::string> system_property(const std::string& key);
 // File system of the emulated process (/dev only when none is configured).
 vfs::Vfs& libcore_vfs();
 
+// Descriptor I/O of the emulated process (libcore_files.cpp): 0-2 are the
+// host's standard streams, the other descriptors go through the Vfs. Errors
+// are thrown as vfs::VfsError, for the caller to report the way its Java API
+// expects (ErrnoException, UnixException, IOException).
+size_t read_fd(int32_t fd, std::span<uint8_t> out);
+size_t write_fd(int32_t fd, std::span<const uint8_t> data);
+vfs::VStat fstat_fd(int32_t fd);
+// Private copy of `length` bytes of a file from `offset`, in emulated native
+// memory (mmap without MAP_SHARED); ENOMEM beyond 2 GiB, checked first.
+int64_t map_fd_copy(rt::Runtime& rt, int32_t fd, uint64_t offset, uint64_t length, bool writable);
+
 void register_libcore_nio(rt::NativeRegistry& r);
+void register_libcore_zip(rt::NativeRegistry& r);
+void register_libcore_crypto(rt::NativeRegistry& r);
 
 // Helpers of the libcore natives (libcore_natives.cpp).
 rt::Field* find_field(rt::Class* cls, std::string_view name, std::string_view type);
@@ -56,15 +71,12 @@ int32_t fd_of(rt::Runtime& rt, rt::Handle file_descriptor);
 rt::Handle construct(rt::Runtime& rt, std::string_view cls, std::string_view sig, std::vector<uint32_t> args);
 // Throws android.system.ErrnoException(function, err).
 [[noreturn]] void throw_errno(rt::Runtime& rt, const char* function, int32_t err);
+// strerror(3) text of a Linux errno value, as bionic words it.
+std::string strerror_text(int32_t err);
 rt::Handle string_array(rt::Runtime& rt, const std::vector<std::string>& items);
 // Native "free functions" of libcore.util.NativeAllocationRegistry: the
 // getNativeFinalizer() natives return these bounded ids instead of C function
 // pointers, and applyFreeFunction(id, ptr) calls the matching function.
 int64_t register_free_function(std::function<void(int64_t)> fn);
-// VMRuntime.addressOf: primitive arrays are given tagged fake addresses
-// (never real pointers, which Java code could forge to write anywhere);
-// natives taking such an address decode it back to the array, checked.
-int64_t fake_address_of(rt::Runtime& rt, rt::Handle array);
-rt::ArrayObject& array_at_address(rt::Runtime& rt, int64_t address);
 
 }  // namespace aa::bridge

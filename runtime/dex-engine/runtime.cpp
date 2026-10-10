@@ -824,6 +824,7 @@ uint64_t Runtime::invoke(Method* m, const uint32_t* args, uint32_t nargs) {
     throw_new("Ljava/lang/StackOverflowError;", "profondeur d'appel supérieure à " + std::to_string(options_.max_depth));
   }
   stats_.invocations++;
+  m->profile_calls++;
   // ACC_SYNCHRONIZED is honoured by the VM; javac/d8 "declared synchronized"
   // methods already contain explicit monitor instructions.
   std::unique_ptr<MonitorGuard> sync;

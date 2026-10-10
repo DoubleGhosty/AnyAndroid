@@ -73,6 +73,10 @@ void register_log_clock_trace(rt::NativeRegistry& r) {
   });
   r.bind(log, "logger_entry_max_payload_native", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return 4068; });
 
+  const char* stats = "Landroid/util/StatsLog;";
+  r.bind(stats, "writeImpl", "([BII)V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; }, S::kStub,
+         "écriture des métriques StatsLog ignorée");
+
   const char* clock = "Landroid/os/SystemClock;";
   r.bind(clock, "uptimeMillis", "()J", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_long(monotonic_nanos() / 1000000); });
   r.bind(clock, "uptimeNanos", "()J", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_long(monotonic_nanos()); });

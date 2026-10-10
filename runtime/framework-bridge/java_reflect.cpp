@@ -184,12 +184,20 @@ std::vector<uint32_t> build_args(Runtime& rt, const rt::Method* m, Handle receiv
   return words;
 }
 
+// InvocationTargetException keeps its cause in two places: the throwable's
+// cause (bridge mode) and libcore's `target` field (read by its bytecode).
+void set_invocation_target(Runtime& rt, Handle ite, Handle target) {
+  if (auto* p = rt.peer<rt::ThrowablePeer>(ite)) p->cause = target;
+  rt::Object* o = rt.object(ite);
+  if (rt::Field* f = o ? find_field(o->klass, "target", "Ljava/lang/Throwable;") : nullptr) o->fields.at(f->slot) = target;
+}
+
 uint64_t invoke_wrapped(Runtime& rt, rt::Method* m, std::vector<uint32_t>& words) {
   try {
     return rt.invoke(m, words.data(), uint32_t(words.size()));
   } catch (const rt::JavaThrow& t) {
     Handle ite = rt.make_throwable(rt.find_class("Ljava/lang/reflect/InvocationTargetException;"), u"", false);
-    if (auto* p = rt.peer<rt::ThrowablePeer>(ite)) p->cause = t.exception;
+    set_invocation_target(rt, ite, t.exception);
     throw rt::JavaThrow{ite};
   }
 }
@@ -398,7 +406,25 @@ void register_members(rt::NativeRegistry& r) {
   r.define("Ljava/lang/NoSuchFieldException;", "Ljava/lang/ReflectiveOperationException;");
   r.define("Ljava/lang/IllegalAccessException;", "Ljava/lang/ReflectiveOperationException;");
   r.define("Ljava/lang/reflect/InvocationTargetException;", "Ljava/lang/ReflectiveOperationException;")
+      .field("target", "Ljava/lang/Throwable;", 0x2)
+      .ctor("()V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; })
+      .ctor("(Ljava/lang/Throwable;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+        set_invocation_target(rt, a.h(0), a.h(1));
+        return 0;
+      })
+      .ctor("(Ljava/lang/Throwable;Ljava/lang/String;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+        set_invocation_target(rt, a.h(0), a.h(1));
+        if (auto* p = rt.peer<rt::ThrowablePeer>(a.h(0))) {
+          p->message = a.str(2);
+          p->has_message = true;
+        }
+        return 0;
+      })
       .method("getTargetException", "()Ljava/lang/Throwable;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+        auto* p = rt.peer<rt::ThrowablePeer>(a.h(0));
+        return p ? p->cause : kNull;
+      })
+      .method("getCause", "()Ljava/lang/Throwable;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
         auto* p = rt.peer<rt::ThrowablePeer>(a.h(0));
         return p ? p->cause : kNull;
       });

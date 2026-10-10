@@ -7,8 +7,11 @@
 #include <cstdio>
 #include <cstring>
 #include <io.h>
+#include <new>
+#include <vector>
 
 #include "framework-bridge/internal.h"
+#include "framework-bridge/native_memory.h"
 #include "vfs/vfs.h"
 
 namespace aa::bridge {
@@ -21,6 +24,59 @@ vfs::Vfs& libcore_vfs() {
     cfg.vfs->mount("/dev", vfs::dev_mount());
   }
   return *cfg.vfs;
+}
+
+namespace {
+
+FILE* std_stream(int32_t fd) { return fd == 1 ? stdout : fd == 2 ? stderr : nullptr; }
+
+}  // namespace
+
+size_t read_fd(int32_t fd, std::span<uint8_t> out) {
+  if (fd == 0) return std::fread(out.data(), 1, out.size(), stdin);  // console programs (blocks this thread)
+  if (fd == 1 || fd == 2) throw vfs::VfsError{vfs::kEBADF, "read"};
+  return libcore_vfs().read(fd, out);
+}
+
+size_t write_fd(int32_t fd, std::span<const uint8_t> data) {
+  if (FILE* out = std_stream(fd)) {
+    size_t n = std::fwrite(data.data(), 1, data.size(), out);
+    std::fflush(out);
+    return n;
+  }
+  if (fd == 0) throw vfs::VfsError{vfs::kEBADF, "write"};
+  return libcore_vfs().write(fd, data);
+}
+
+vfs::VStat fstat_fd(int32_t fd) {
+  if (fd >= 0 && fd <= 2) {  // the host's standard streams, seen as a terminal
+    vfs::VStat st;
+    st.type = vfs::NodeType::kCharDevice;
+    st.mode = 020620;
+    st.ino = uint64_t(fd) + 1;
+    return st;
+  }
+  return libcore_vfs().fstat(fd);
+}
+
+int64_t map_fd_copy(rt::Runtime& rt, int32_t fd, uint64_t offset, uint64_t length, bool writable) {
+  constexpr uint64_t kMaxMapping = uint64_t(2) << 30;
+  if (length > kMaxMapping) throw vfs::VfsError{vfs::kENOMEM, "mmap"};  // before any allocation
+  if (fd >= 0 && fd <= 2) throw vfs::VfsError{vfs::kEACCES, "mmap"};    // not a regular file
+  libcore_vfs().fstat(fd);  // EBADF before allocating
+  std::vector<uint8_t> data;
+  try {
+    data.assign(size_t(length), 0);
+  } catch (const std::bad_alloc&) {
+    throw vfs::VfsError{vfs::kENOMEM, "mmap"};
+  }
+  size_t done = 0;
+  while (done < data.size()) {
+    size_t n = libcore_vfs().pread(fd, std::span<uint8_t>(data).subspan(done), offset + done);
+    if (n == 0) break;  // past the end of the file the mapping reads as zeros
+    done += n;
+  }
+  return native_wrap(rt, std::move(data), writable);
 }
 
 namespace {
@@ -105,24 +161,6 @@ Handle struct_statvfs(Runtime& rt, bool writable) {
   return construct(rt, "Landroid/system/StructStatVfs;", "(JJJJJJJJJJJ)V", a);
 }
 
-FILE* std_stream(int32_t fd) { return fd == 1 ? stdout : fd == 2 ? stderr : nullptr; }
-
-size_t read_fd(Runtime& rt, int32_t fd, std::span<uint8_t> out) {
-  if (fd == 0) return std::fread(out.data(), 1, out.size(), stdin);  // console programs (blocks this thread)
-  if (fd == 1 || fd == 2) throw_errno(rt, "read", vfs::kEBADF);
-  return guarded(rt, "read", [&] { return the_vfs().read(fd, out); });
-}
-
-size_t write_fd(Runtime& rt, int32_t fd, std::span<const uint8_t> data) {
-  if (FILE* out = std_stream(fd)) {
-    size_t n = std::fwrite(data.data(), 1, data.size(), out);
-    std::fflush(out);
-    return n;
-  }
-  if (fd == 0) throw_errno(rt, "write", vfs::kEBADF);
-  return guarded(rt, "write", [&] { return the_vfs().write(fd, data); });
-}
-
 void register_linux(rt::NativeRegistry& r) {
   // IoBridge.closeAndSignalBlockedThreads(): wakes threads blocked in I/O on
   // the descriptor. Virtual files never block, so there is nobody to wake.
@@ -148,22 +186,23 @@ void register_linux(rt::NativeRegistry& r) {
     int32_t fd = fd_of(rt, a.h(1));
     auto buf = byte_range(rt, a.h(2), a.i32(3), a.i32(4));
     if (buf.empty()) return 0;
-    return rt::ret_int(int32_t(read_fd(rt, fd, buf)));  // 0 at the end, as read(2); IoBridge maps it to -1
+    // 0 at the end, as read(2); IoBridge maps it to -1.
+    return rt::ret_int(int32_t(guarded(rt, "read", [&] { return read_fd(fd, buf); })));
   }, S::kPartial, "système de fichiers virtuel ; tampons byte[] uniquement");
   r.bind(lx, "readNoThrow", "(Ljava/io/FileDescriptor;[BII)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(1));
     auto buf = byte_range(rt, a.h(2), a.i32(3), a.i32(4));
     try {
-      return rt::ret_int(int32_t(read_fd(rt, fd, buf)));
-    } catch (const rt::JavaThrow&) {
+      return rt::ret_int(int32_t(read_fd(fd, buf)));
+    } catch (const vfs::VfsError&) {
       return rt::ret_int(-1);
     }
   });
   r.bind(lx, "writeBytes", "(Ljava/io/FileDescriptor;Ljava/lang/Object;II)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(1));
     auto buf = byte_range(rt, a.h(2), a.i32(3), a.i32(4));
-    return rt::ret_int(int32_t(write_fd(rt, fd, buf)));
-  }, S::kPartial, "sorties standard et système de fichiers virtuel ; tampons byte[] uniquement");
+    return rt::ret_int(int32_t(guarded(rt, "write", [&] { return write_fd(fd, buf); })));
+  },S::kPartial, "sorties standard et système de fichiers virtuel ; tampons byte[] uniquement");
   r.bind(lx, "preadBytes", "(Ljava/io/FileDescriptor;Ljava/lang/Object;IIJ)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(1));
     auto buf = byte_range(rt, a.h(2), a.i32(3), a.i32(4));
@@ -185,15 +224,7 @@ void register_linux(rt::NativeRegistry& r) {
   });
   r.bind(lx, "fstat", "(Ljava/io/FileDescriptor;)Landroid/system/StructStat;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(1));
-    vfs::VStat st;
-    if (fd >= 0 && fd <= 2) {
-      st.type = vfs::NodeType::kCharDevice;
-      st.mode = 020620;
-      st.ino = uint64_t(fd) + 1;
-    } else {
-      st = guarded(rt, "fstat", [&] { return the_vfs().fstat(fd); });
-    }
-    return struct_stat(rt, st);
+    return struct_stat(rt, guarded(rt, "fstat", [&] { return fstat_fd(fd); }));
   });
   for (bool follow : {true, false}) {
     r.bind(lx, follow ? "stat" : "lstat", "(Ljava/lang/String;)Landroid/system/StructStat;",
@@ -249,6 +280,23 @@ void register_linux(rt::NativeRegistry& r) {
       the_vfs().stat(p);
       return p;
     }));
+  });
+  // mmap: a private copy of the file range in emulated native memory. Writes
+  // are not carried back to the file (MAP_SHARED is not emulated).
+  r.bind(lx, "mmap", "(JJIILjava/io/FileDescriptor;J)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int64_t byte_count = a.i64(3);
+    int32_t prot = a.i32(5);
+    int32_t fd = fd_of(rt, a.h(7));
+    int64_t offset = a.i64(8);
+    if (byte_count <= 0 || offset < 0) throw_errno(rt, "mmap", vfs::kEINVAL);
+    constexpr int32_t kProtWrite = 0x2;
+    return rt::ret_long(guarded(rt, "mmap", [&] {
+      return map_fd_copy(rt, fd, uint64_t(offset), uint64_t(byte_count), (prot & kProtWrite) != 0);
+    }));
+  },S::kPartial, "copie privée du fichier (MAP_SHARED non émulé)");
+  r.bind(lx, "munmap", "(JJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    native_free(rt, a.i64(1));
+    return 0;
   });
   for (const char* name : {"fsync", "fdatasync"}) {
     r.bind(lx, name, "(Ljava/io/FileDescriptor;)V", [name](Runtime& rt, NativeArgs& a) -> uint64_t {
@@ -485,12 +533,119 @@ void register_unix_file_system(rt::NativeRegistry& r) {
   }, S::kPartial, "capacité fixe");
 }
 
+// libcore.io.Memory: peek/poke on native addresses (emulated native memory,
+// see native_memory.h) and bulk copies between arrays.
+template <typename T>
+T peek(Runtime& rt, int64_t address, bool swap) {
+  T v;
+  std::memcpy(&v, native_span(rt, address, sizeof(T)).data(), sizeof(T));
+  if (swap) {
+    if constexpr (sizeof(T) == 2) v = T(__builtin_bswap16(uint16_t(v)));
+    if constexpr (sizeof(T) == 4) v = T(__builtin_bswap32(uint32_t(v)));
+    if constexpr (sizeof(T) == 8) v = T(__builtin_bswap64(uint64_t(v)));
+  }
+  return v;
+}
+
+template <typename T>
+void poke(Runtime& rt, int64_t address, T v, bool swap) {
+  if (swap) {
+    if constexpr (sizeof(T) == 2) v = T(__builtin_bswap16(uint16_t(v)));
+    if constexpr (sizeof(T) == 4) v = T(__builtin_bswap32(uint32_t(v)));
+    if constexpr (sizeof(T) == 8) v = T(__builtin_bswap64(uint64_t(v)));
+  }
+  std::memcpy(native_span(rt, address, sizeof(T), true).data(), &v, sizeof(T));
+}
+
+// Bytes [offset, offset + count) of a primitive array, bounds-checked.
+std::span<uint8_t> array_bytes(Runtime& rt, Handle array, int64_t offset, int64_t count) {
+  rt::ArrayObject& arr = rt.array(array, "tableau");
+  if (offset < 0 || count < 0 || uint64_t(offset) + uint64_t(count) > arr.data.size()) {
+    rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "Memory : plage hors du tableau");
+  }
+  return std::span<uint8_t>(arr.data).subspan(size_t(offset), size_t(count));
+}
+
+void register_libcore_memory(rt::NativeRegistry& r) {
+  const char* mem = "Llibcore/io/Memory;";
+  r.bind(mem, "peekByte", "(J)B", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return uint32_t(int32_t(peek<int8_t>(rt, a.i64(0), false)));
+  });
+  r.bind(mem, "pokeByte", "(JB)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    poke<uint8_t>(rt, a.i64(0), uint8_t(a.raw(2)), false);
+    return 0;
+  });
+  r.bind(mem, "peekByteArray", "(J[BII)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t count = a.i32(4);
+    auto dst = array_bytes(rt, a.h(2), a.i32(3), count);
+    if (count > 0) std::memcpy(dst.data(), native_span(rt, a.i64(0), uint64_t(count)).data(), size_t(count));
+    return 0;
+  });
+  r.bind(mem, "pokeByteArray", "(J[BII)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t count = a.i32(4);
+    auto src = array_bytes(rt, a.h(2), a.i32(3), count);
+    if (count > 0) std::memcpy(native_span(rt, a.i64(0), uint64_t(count), true).data(), src.data(), size_t(count));
+    return 0;
+  });
+  r.bind(mem, "peekShortNative", "(J)S", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return uint32_t(int32_t(peek<int16_t>(rt, a.i64(0), false)));
+  });
+  r.bind(mem, "pokeShortNative", "(JS)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    poke<uint16_t>(rt, a.i64(0), uint16_t(a.raw(2)), false);
+    return 0;
+  });
+  r.bind(mem, "peekIntNative", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return peek<uint32_t>(rt, a.i64(0), false);
+  });
+  r.bind(mem, "pokeIntNative", "(JI)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    poke<uint32_t>(rt, a.i64(0), a.raw(2), false);
+    return 0;
+  });
+  r.bind(mem, "peekLongNative", "(J)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return peek<uint64_t>(rt, a.i64(0), false);
+  });
+  r.bind(mem, "pokeLongNative", "(JJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    poke<uint64_t>(rt, a.i64(0), uint64_t(a.i64(2)), false);
+    return 0;
+  });
+  r.bind(mem, "peekShort", "(JZ)S", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return uint32_t(int32_t(peek<int16_t>(rt, a.i64(0), a.z(2))));
+  });
+  r.bind(mem, "pokeShort", "(JSZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    poke<uint16_t>(rt, a.i64(0), uint16_t(a.raw(2)), a.z(3));
+    return 0;
+  });
+  r.bind(mem, "peekInt", "(JZ)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return peek<uint32_t>(rt, a.i64(0), a.z(2));
+  });
+  r.bind(mem, "pokeInt", "(JIZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    poke<uint32_t>(rt, a.i64(0), a.raw(2), a.z(3));
+    return 0;
+  });
+  r.bind(mem, "peekLong", "(JZ)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return peek<uint64_t>(rt, a.i64(0), a.z(2));
+  });
+  r.bind(mem, "pokeLong", "(JJZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    poke<uint64_t>(rt, a.i64(0), uint64_t(a.i64(2)), a.z(4));
+    return 0;
+  });
+  // memmove(Object dst, int dstOffset, Object src, int srcOffset, long byteCount): arrays.
+  r.bind(mem, "memmove", "(Ljava/lang/Object;ILjava/lang/Object;IJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int64_t count = a.i64(4);
+    auto dst = array_bytes(rt, a.h(0), a.i32(1), count);
+    auto src = array_bytes(rt, a.h(2), a.i32(3), count);
+    if (count > 0) std::memmove(dst.data(), src.data(), size_t(count));
+    return 0;
+  });
+}
+
 }  // namespace
 
 void register_libcore_files(rt::NativeRegistry& r) {
   register_linux(r);
   register_unix_file_system(r);
   register_file_input_stream(r);
+  register_libcore_memory(r);
 }
 
 }  // namespace aa::bridge

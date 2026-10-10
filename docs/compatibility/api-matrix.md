@@ -5,41 +5,10 @@
 
 | Statut | Signification | Membres |
 |---|---|---|
-| Supportée | comportement testé et documenté pour le périmètre annoncé | 770 |
+| Supportée | comportement testé et documenté pour le périmètre annoncé | 760 |
 | Partielle | chemin courant pris en charge, limites connues | 56 |
 | Stub | API reconnue mais sans effet réel | 24 |
-| Non supportée | reconnue mais refusée avec une erreur explicite | 25 |
-
-## `aa.stubs.ActivityManager`
-
-| Membre | Statut | Note |
-|---|---|---|
-| `<init>()V` | Supportée |  |
-
-## `aa.stubs.DisplayManager`
-
-| Membre | Statut | Note |
-|---|---|---|
-| `<init>()V` | Supportée |  |
-
-## `aa.stubs.LayoutInflater`
-
-| Membre | Statut | Note |
-|---|---|---|
-| `<init>(Landroid/content/Context;)V` | Supportée |  |
-| `inflate(ILandroid/view/ViewGroup;)Landroid/view/View;` | Supportée |  |
-
-## `aa.stubs.PowerManager`
-
-| Membre | Statut | Note |
-|---|---|---|
-| `<init>()V` | Supportée |  |
-
-## `aa.stubs.WindowManager`
-
-| Membre | Statut | Note |
-|---|---|---|
-| `<init>()V` | Supportée |  |
+| Non supportée | reconnue mais refusée avec une erreur explicite | 34 |
 
 ## `android.app.Activity`
 
@@ -58,7 +27,7 @@
 | `onSaveInstanceState(Landroid/os/Bundle;)V` | Partielle | état non restauré (pas de recréation d'activité) |
 | `onBackPressed()V` | Supportée |  |
 | `setContentView(Landroid/view/View;)V` | Supportée |  |
-| `setContentView(I)V` | Supportée |  |
+| `setContentView(I)V` | Non supportée | layouts XML : ressources compilées (resources.arsc) non prises en charge dans cette version |
 | `findViewById(I)Landroid/view/View;` | Supportée |  |
 | `setTitle(Ljava/lang/CharSequence;)V` | Supportée |  |
 | `setTitle(I)V` | Non supportée | ressources compilées (resources.arsc) non prises en charge dans cette version |
@@ -75,7 +44,7 @@
 | `overridePendingTransition(II)V` | Stub | pas d'animations |
 | `getWindow()Landroid/view/Window;` | Non supportée | API Window non implémentée |
 | `getActionBar()Landroid/app/ActionBar;` | Non supportée | barre d'action non implémentée |
-| `getLayoutInflater()Landroid/view/LayoutInflater;` | Supportée |  |
+| `getLayoutInflater()Landroid/view/LayoutInflater;` | Non supportée | inflation de layouts : ressources compilées (resources.arsc) non prises en charge dans cette version |
 | `getSharedPreferences(Ljava/lang/String;I)Landroid/content/SharedPreferences;` | Non supportée | stockage persistant prévu en phase 5 |
 
 ## `android.app.Application`
@@ -98,14 +67,14 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `getApplicationContext()Landroid/content/Context;` | Supportée |  |
 | `startActivity(Landroid/content/Intent;)V` | Supportée |  |
 | `getMainLooper()Landroid/os/Looper;` | Supportée |  |
-| `getFilesDir()Ljava/io/File;` | Supportée |  |
-| `getCacheDir()Ljava/io/File;` | Supportée |  |
-| `getDataDir()Ljava/io/File;` | Supportée |  |
-| `getResources()Landroid/content/res/Resources;` | Supportée |  |
-| `getString(I)Ljava/lang/String;` | Supportée |  |
-| `getText(I)Ljava/lang/CharSequence;` | Supportée |  |
-| `getSystemService(Ljava/lang/String;)Ljava/lang/Object;` | Supportée |  |
+| `getString(I)Ljava/lang/String;` | Non supportée | ressources compilées (resources.arsc) non prises en charge dans cette version |
+| `getText(I)Ljava/lang/CharSequence;` | Non supportée | ressources compilées (resources.arsc) non prises en charge dans cette version |
+| `getResources()Landroid/content/res/Resources;` | Non supportée | ressources compilées (resources.arsc) non prises en charge dans cette version |
+| `getSystemService(Ljava/lang/String;)Ljava/lang/Object;` | Non supportée | services système non disponibles |
 | `getSharedPreferences(Ljava/lang/String;I)Landroid/content/SharedPreferences;` | Non supportée | stockage persistant prévu en phase 5 |
+| `getFilesDir()Ljava/io/File;` | Non supportée | accès fichiers prévu en phase 5 |
+| `getCacheDir()Ljava/io/File;` | Non supportée | accès fichiers prévu en phase 5 |
+| `getDataDir()Ljava/io/File;` | Non supportée | accès fichiers prévu en phase 5 |
 | `checkSelfPermission(Ljava/lang/String;)I` | Non supportée | modèle de permissions non implémenté |
 
 ## `android.content.ContextWrapper`
@@ -1320,6 +1289,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/Object;Ljava/lang/ref/ReferenceQueue;)V` | Partielle | jamais mise en file par le ramasse-miettes |
 | `get()Ljava/lang/Object;` | Supportée |  |
 | `clear()V` | Supportée |  |
+| `reachabilityFence(Ljava/lang/Object;)V` (statique) | Supportée |  |
 
 ## `java.lang.ref.ReferenceQueue`
 
@@ -1403,7 +1373,11 @@ Classe : **Partielle** — conservée tant que le prototype n'a pas de notion de
 
 | Membre | Statut | Note |
 |---|---|---|
+| `<init>()V` | Supportée |  |
+| `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/Throwable;Ljava/lang/String;)V` | Supportée |  |
 | `getTargetException()Ljava/lang/Throwable;` | Supportée |  |
+| `getCause()Ljava/lang/Throwable;` | Supportée |  |
 
 ## `java.lang.reflect.Member` (interface)
 

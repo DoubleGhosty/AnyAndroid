@@ -64,9 +64,8 @@
     const-string v1, "resources"
     aput-object v1, v6, v0
 
-    # The resources section (12) is not run yet: Resources.getSystem() still
-    # needs sun.nio.fs (aconfig flags); see docs/STATUS.md.
-    const/16 v5, 0xc
+    # The resources section (12) is now enabled.
+    const/16 v5, 0xd
     const/4 v0, 0x0
     :loop
     if-ge v0, v5, :done
