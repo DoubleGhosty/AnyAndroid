@@ -173,6 +173,7 @@ Handle Runtime::current_thread_peer() {
     p->daemon = t->daemon;
     object(h)->peer = std::move(p);
     t->peer = h;
+    init_thread_object(*this, h);
   }
   return t->peer;
 }

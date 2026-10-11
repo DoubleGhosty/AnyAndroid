@@ -605,5 +605,9 @@ class Runtime {
 // Registers java.lang.Object, String, Class, Thread, the Throwable hierarchy,
 // java.lang.ref and the few interfaces the runtime itself depends on.
 void register_core_classes(NativeRegistry& registry);
+// What libcore's Thread constructors set up besides the native peer (field
+// initializers such as blockerLock), for every Thread object, including those
+// the runtime creates for threads started outside Java.
+void init_thread_object(Runtime& rt, Handle thread);
 
 }  // namespace aa::rt

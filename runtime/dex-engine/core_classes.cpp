@@ -657,6 +657,10 @@ void register_thread(NativeRegistry& r) {
   r.define("Ljava/lang/IllegalMonitorStateException;", "Ljava/lang/RuntimeException;");
 
   auto t = r.define("Ljava/lang/Thread;", "Ljava/lang/Object;", {"Ljava/lang/Runnable;"});
+  // Read and written by libcore's Thread.blockedOn (interruptible channels: FileChannel...);
+  // blockerLock is set for every Thread object (init_thread_object).
+  t.field("blocker", "Lsun/nio/ch/Interruptible;");
+  t.field("blockerLock", "Ljava/lang/Object;");
   // Read and written directly by libcore's ThreadLocal / InheritableThreadLocal.
   t.field("threadLocals", "Ljava/lang/ThreadLocal$ThreadLocalMap;");
   t.field("inheritableThreadLocals", "Ljava/lang/ThreadLocal$ThreadLocalMap;");
@@ -670,6 +674,7 @@ void register_thread(NativeRegistry& r) {
     p->name = std::move(name);
     if (auto* cur = rt.peer<ThreadPeer>(rt.current_thread_peer())) p->daemon = cur->daemon;
     a.self().peer = std::move(p);
+    init_thread_object(rt, a.h(0));
     return 0;
   };
   t.ctor("()V", [init](Runtime& rt, NativeArgs& a) { return init(rt, a, kNull, u""); });
@@ -853,6 +858,12 @@ void register_references(NativeRegistry& r) {
 }
 
 }  // namespace
+
+void init_thread_object(Runtime& rt, Handle thread) {
+  Field* f = rt.find_class("Ljava/lang/Thread;")->declared_field("blockerLock", "Ljava/lang/Object;");
+  Object& o = rt.nonnull(thread, "Thread");
+  if (f && o.fields.at(f->slot) == kNull) o.fields.at(f->slot) = rt.alloc(rt.find_class("Ljava/lang/Object;"));
+}
 
 void register_core_classes(NativeRegistry& r) {
   register_object(r);
