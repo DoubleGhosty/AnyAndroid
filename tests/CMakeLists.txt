@@ -31,10 +31,21 @@ set(E ${CMAKE_CURRENT_SOURCE_DIR}/e2e)
 set(CLI ${CMAKE_CROSSCOMPILING_EMULATOR} $<TARGET_FILE:anyandroid>)
 
 # aa_e2e(<nom> CODE <n> [GOLDEN <fichier>] [MATCH <regex>] ARGS <arguments...>)
+# The `exec --bootclasspath` tests get their own data directory (--data-dir:
+# /data and /sdcard of the emulated process), emptied before each run, so that
+# they stay independent under `ctest -j` and a failed run leaves nothing behind.
 function(aa_e2e name)
   cmake_parse_arguments(T "" "CODE;GOLDEN;MATCH" "ARGS" ${ARGN})
-  string(REPLACE ";" "|" cmd "${CLI};${T_ARGS}")
-  set(defs -DCMD=${cmd} -DEXPECT_CODE=${T_CODE} -DACTUAL=${CMAKE_CURRENT_BINARY_DIR}/e2e-${name}.txt)
+  set(args ${T_ARGS})
+  set(defs "")
+  list(GET args 0 command)
+  if(command STREQUAL "exec" AND "--bootclasspath" IN_LIST args)
+    set(data ${CMAKE_CURRENT_BINARY_DIR}/e2e-data/${name})
+    list(INSERT args 1 --data-dir ${data})
+    list(APPEND defs -DFRESH_DIR=${data})
+  endif()
+  string(REPLACE ";" "|" cmd "${CLI};${args}")
+  list(APPEND defs -DCMD=${cmd} -DEXPECT_CODE=${T_CODE} -DACTUAL=${CMAKE_CURRENT_BINARY_DIR}/e2e-${name}.txt)
   if(T_GOLDEN)
     list(APPEND defs -DGOLDEN=${E}/expected/${T_GOLDEN})
   endif()
