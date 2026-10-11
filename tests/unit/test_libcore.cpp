@@ -468,6 +468,37 @@ uint64_t native_call(rt::Runtime& rt, const char* cls, const char* name, const c
 
 }  // namespace
 
+// Android 17 frees themes through NativeAllocationRegistry (ResourcesImpl.ThemeImpl):
+// the free "function" is a bounded id, and the value passed to it is checked
+// like any other handle.
+TEST(framework_theme_free_function) {
+  LibcoreVm vm;
+  rt::Runtime& rt = *vm.rt;
+  const char* am = "Landroid/content/res/AssetManager;";
+  auto words = [](uint64_t v) { return std::vector<uint32_t>{uint32_t(v), uint32_t(v >> 32)}; };
+  uint64_t manager = native_call(rt, am, "nativeCreate", "()J", {});
+  uint64_t theme = native_call(rt, am, "nativeThemeCreate", "(J)J", words(manager));
+  auto changing = [&](uint64_t t) { return native_call(rt, am, "nativeThemeGetChangingConfigurations", "(J)I", words(t)); };
+  CHECK_EQ(changing(theme), uint64_t(0));
+  uint64_t free_fn = native_call(rt, am, "nativeGetThemeFreeFunction", "()J", {});
+  CHECK(free_fn != 0);
+  CHECK_EQ(native_call(rt, am, "nativeGetThemeFreeFunction", "()J", {}), free_fn);
+  auto apply = [&](uint64_t ptr) {
+    std::vector<uint32_t> args = words(free_fn);
+    for (uint32_t w : words(ptr)) args.push_back(w);
+    native_call(rt, "Llibcore/util/NativeAllocationRegistry;", "applyFreeFunction", "(JJ)V", args);
+  };
+  apply(manager);  // another kind of handle: ignored
+  apply(theme);
+  CHECK_THROWS(changing(theme), rt::JavaThrow);  // freed
+  apply(theme);                                  // stale: ignored
+  apply(0x4141414141414141);                     // forged: ignored
+  uint64_t other = native_call(rt, am, "nativeThemeCreate", "(J)J", words(manager));  // the manager is untouched
+  CHECK_EQ(changing(other), uint64_t(0));
+  apply(other);
+  native_call(rt, am, "nativeDestroy", "(J)V", words(manager));
+}
+
 TEST(libcore_charset_converters) {
   LibcoreVm vm;
   rt::Runtime& rt = *vm.rt;

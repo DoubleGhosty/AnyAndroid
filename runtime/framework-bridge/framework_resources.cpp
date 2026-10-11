@@ -623,6 +623,11 @@ void register_themes(rt::NativeRegistry& r) {
     tables().themes.remove(a.i64(0));
     return 0;
   });
+  // Android 17 frees themes through NativeAllocationRegistry (ResourcesImpl.ThemeImpl)
+  // instead of nativeThemeDestroy. The "function" is a bounded id, registered once;
+  // a forged or stale theme handle passed to it is ignored by the table.
+  static const int64_t theme_free = register_free_function([](int64_t h) { tables().themes.remove(h); });
+  r.bind(c, "nativeGetThemeFreeFunction", "()J", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_long(theme_free); });
   r.bind(c, "nativeThemeApplyStyle", "(JJIZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     theme(rt, a.i64(2))->theme->apply_style(uint32_t(a.i32(4)), a.z(5));
     return 0;
