@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "common/log.h"
 #include "common/text.h"
@@ -109,6 +110,45 @@ ThrowablePeer& throwable_peer(Runtime& rt, Handle h) {
   auto* p = dynamic_cast<ThrowablePeer*>(o.peer.get());
   if (!p) rt.throw_new("Ljava/lang/InternalError;", "état natif de Throwable invalide");
   return *p;
+}
+
+// A shallow copy of a reference array (Object.clone).
+Handle clone_array(Runtime& rt, Handle src, const char* descriptor) {
+  uint32_t n = rt.array(src, "array").length;
+  Handle copy = rt.new_array(descriptor, int32_t(n));
+  std::memcpy(rt.array(copy, "array").data.data(), rt.array(src, "array").data.data(), size_t(n) * 4);
+  return copy;
+}
+
+// The throwable's StackTraceElement[], built from the captured frames
+// ("pkg.Class.method(pc 0x0012)" or "...(Native Method)": no file or line
+// numbers, -2 marking native methods as in StackTraceElement).
+Handle our_stack_trace(Runtime& rt, Handle self) {
+  if (Handle known = throwable_peer(rt, self).stack_trace) return known;
+  Class* element = rt.lookup_class("Ljava/lang/StackTraceElement;");
+  Method* ctor =
+      element ? element->declared_method("<init>", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V") : nullptr;
+  if (!ctor) rt.throw_unsupported("Ljava/lang/Throwable;->getStackTrace()[Ljava/lang/StackTraceElement;", "sans la libcore");
+  rt.ensure_initialized(element);
+  std::vector<std::string> lines = throwable_peer(rt, self).stack;
+  GlobalRef arr(rt, rt.new_array("[Ljava/lang/StackTraceElement;", int32_t(lines.size())));
+  for (size_t i = 0; i < lines.size(); ++i) {
+    const std::string& line = lines[i];
+    size_t paren = line.find('(');
+    size_t dot = line.rfind('.', paren);
+    std::string cls = dot == std::string::npos ? std::string() : line.substr(0, dot);
+    std::string method = line.substr(dot == std::string::npos ? 0 : dot + 1, paren - (dot == std::string::npos ? 0 : dot + 1));
+    bool native = line.find("(Native Method)") != std::string::npos;
+    GlobalRef e(rt, rt.alloc(element));
+    GlobalRef c(rt, rt.new_string_utf8(cls));
+    Handle m = rt.new_string_utf8(method);
+    uint32_t args[5] = {e.get(), c.get(), m, kNull, uint32_t(native ? -2 : -1)};
+    rt.invoke(ctor, args, 5);
+    Handle h = e.get();
+    std::memcpy(&rt.array(arr.get(), "stackTrace").data[i * 4], &h, 4);
+  }
+  throwable_peer(rt, self).stack_trace = arr.get();
+  return arr.get();
 }
 
 void add_throwable_ctors(ClassBuilder& b) {
@@ -568,8 +608,47 @@ void register_throwables(NativeRegistry& r) {
     log::warn("app", "printStackTrace :\n" + rt.describe_throwable(a.h(0)));
     return 0;
   }, S::kPartial, "écrit dans le journal AnyAndroid");
-  t.stub("addSuppressed", "(Ljava/lang/Throwable;)V", "exceptions supprimées ignorées");
-  t.unsupported("getStackTrace", "()[Ljava/lang/StackTraceElement;", "StackTraceElement non implémenté");
+  t.method("addSuppressed", "(Ljava/lang/Throwable;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (a.h(1) == a.h(0)) rt.throw_new("Ljava/lang/IllegalArgumentException;", "Self-suppression not permitted");
+    if (a.h(1) == kNull) rt.throw_npe("Cannot suppress a null exception.");
+    throwable_peer(rt, a.h(0)).suppressed.push_back(a.h(1));
+    return 0;
+  });
+  t.method("getSuppressed", "()[Ljava/lang/Throwable;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::vector<Handle> items = throwable_peer(rt, a.h(0)).suppressed;
+    Handle arr = rt.new_array("[Ljava/lang/Throwable;", int32_t(items.size()));
+    std::memcpy(rt.array(arr, "suppressed").data.data(), items.data(), items.size() * 4);
+    return arr;
+  });
+  // The stack as StackTraceElement objects (libcore's class): built once from
+  // the captured frames, unless setStackTrace replaced it. getOurStackTrace
+  // is the private one libcore's printStackTrace uses.
+  t.method("getOurStackTrace", "()[Ljava/lang/StackTraceElement;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return our_stack_trace(rt, a.h(0));
+  });
+  t.method("getStackTrace", "()[Ljava/lang/StackTraceElement;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return clone_array(rt, our_stack_trace(rt, a.h(0)), "[Ljava/lang/StackTraceElement;");
+  });
+  t.method("setStackTrace", "([Ljava/lang/StackTraceElement;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (a.h(1) == kNull) rt.throw_npe("stackTrace");
+    Handle copy = clone_array(rt, a.h(1), "[Ljava/lang/StackTraceElement;");
+    ArrayObject& arr = rt.array(copy, "stackTrace");
+    for (uint32_t i = 0; i < arr.length; ++i) {
+      Handle e;
+      std::memcpy(&e, &arr.data[size_t(i) * 4], 4);
+      if (e == kNull) rt.throw_npe("stackTrace[" + std::to_string(i) + "]");
+    }
+    throwable_peer(rt, a.h(0)).stack_trace = copy;
+    return 0;
+  });
+  t.method("fillInStackTrace", "()Ljava/lang/Throwable;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    ThrowablePeer& p = throwable_peer(rt, a.h(0));
+    p.stack = rt.capture_stack();
+    // Without this native frame and those of fillInStackTrace overrides.
+    while (!p.stack.empty() && p.stack.front().find(".fillInStackTrace(") != std::string::npos) p.stack.erase(p.stack.begin());
+    p.stack_trace = kNull;
+    return a.h(0);
+  });
 
   struct Def {
     const char* cls;

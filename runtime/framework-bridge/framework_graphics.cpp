@@ -327,6 +327,7 @@ void register_framework_graphics(rt::NativeRegistry& r) {
   register_framework_paint(r);
   register_framework_fonts(r);
   register_framework_path(r);
+  register_framework_matrix(r);
 }
 
 }  // namespace aa::bridge

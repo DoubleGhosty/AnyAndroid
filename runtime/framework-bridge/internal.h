@@ -52,6 +52,8 @@ void register_framework_path(rt::NativeRegistry& r);
 // (unit tests).
 void path_contents(rt::Runtime& rt, int64_t handle, std::vector<uint8_t>& verbs, std::vector<float>& coords,
                    std::vector<float>& weights);
+// Matrix (framework_matrix.cpp), registered by register_framework_graphics.
+void register_framework_matrix(rt::NativeRegistry& r);
 // Typeface and fonts (framework_fonts.cpp), registered by register_framework_graphics.
 void register_framework_fonts(rt::NativeRegistry& r);
 // Minikin's locale list ids (LocaleListCache): 0 is the empty list, then ids

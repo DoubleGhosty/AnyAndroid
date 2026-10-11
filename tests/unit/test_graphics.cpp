@@ -404,3 +404,86 @@ TEST(graphics_typeface_styles_follow_hwui) {
            std::string("java.lang.RuntimeException"));
   bridge::native_free(rt, data);
 }
+
+TEST(graphics_matrix_follows_skmatrix) {
+  Vm vm;
+  rt::Runtime& rt = *vm.rt;
+  const char* mx = "Landroid/graphics/Matrix;";
+  const char* ex = "Landroid/graphics/Matrix$ExtraNatives;";
+  auto create = [&] { return int64_t(call(rt, ex, "nCreate", "(J)J", Args().j(0))); };
+  auto values = [&](int64_t m) {
+    rt::GlobalRef arr(rt, rt.new_array("[F", 9));
+    call(rt, mx, "nGetValues", "(J[F)V", Args().j(m).h(arr.get()));
+    std::vector<float> v(9);
+    std::memcpy(v.data(), rt.array(arr.get(), "f").data.data(), 36);
+    return v;
+  };
+  auto map = [&](int64_t m, float x, float y, bool point) {
+    rt::GlobalRef arr(rt, rt.new_array("[F", 2));
+    float xy[2] = {x, y};
+    std::memcpy(rt.array(arr.get(), "f").data.data(), xy, 8);
+    call(rt, mx, "nMapPoints", "(J[FI[FIIZ)V", Args().j(m).h(arr.get()).i(0).h(arr.get()).i(0).i(1).i(point));
+    std::memcpy(xy, rt.array(arr.get(), "f").data.data(), 8);
+    return std::vector<float>{xy[0], xy[1]};
+  };
+  int64_t m = create();
+  CHECK_EQ(call(rt, mx, "nIsIdentity", "(J)Z", Args().j(m)), uint64_t(1));
+  // A quarter turn is exact (sine and cosine snapped to zero) and keeps
+  // rectangles rectangles.
+  call(rt, mx, "nSetRotate", "(JF)V", Args().j(m).f(90));
+  CHECK(values(m) == (std::vector<float>{0, -1, 0, 1, 0, 0, 0, 0, 1}));
+  CHECK(map(m, 1, 0, true) == (std::vector<float>{0, 1}));
+  CHECK_EQ(call(rt, mx, "nRectStaysRect", "(J)Z", Args().j(m)), uint64_t(1));
+  call(rt, mx, "nSetRotate", "(JF)V", Args().j(m).f(0));
+  CHECK_EQ(call(rt, mx, "nIsIdentity", "(J)Z", Args().j(m)), uint64_t(1));
+  // Composition order: pre applies first to the point, post last.
+  call(rt, mx, "nSetScale", "(JFF)V", Args().j(m).f(2).f(3));
+  call(rt, mx, "nPreTranslate", "(JFF)V", Args().j(m).f(1).f(1));
+  call(rt, mx, "nPostTranslate", "(JFF)V", Args().j(m).f(10).f(0));
+  CHECK(map(m, 0, 0, true) == (std::vector<float>{12, 3}));  // ((0,0)+(1,1))*(2,3)+(10,0)
+  CHECK(map(m, 1, 1, false) == (std::vector<float>{2, 3}));  // vectors ignore the translation
+  // Inversion: exact for scale and translate; a singular matrix leaves the
+  // destination untouched.
+  int64_t inv = create();
+  CHECK_EQ(call(rt, mx, "nInvert", "(JJ)Z", Args().j(m).j(inv)), uint64_t(1));
+  CHECK(map(inv, 12, 3, true) == (std::vector<float>{0, 0}));
+  call(rt, mx, "nSetScale", "(JFF)V", Args().j(m).f(0).f(1));
+  CHECK_EQ(call(rt, mx, "nInvert", "(JJ)Z", Args().j(m).j(inv)), uint64_t(0));
+  CHECK(map(inv, 12, 3, true) == (std::vector<float>{0, 0}));
+  // Rectangles: bounds of the mapped corners, false once rotated off-axis.
+  rt::GlobalRef src(rt, rt.alloc(rt.find_class("Landroid/graphics/RectF;")));
+  rt::GlobalRef dst(rt, rt.alloc(rt.find_class("Landroid/graphics/RectF;")));
+  auto set_rect = [&](rt::Handle h, float l, float t, float r, float b) {
+    rt::Object& o = rt.nonnull(h, "r");
+    const char* names[4] = {"left", "top", "right", "bottom"};
+    float v[4] = {l, t, r, b};
+    for (int i = 0; i < 4; ++i) {
+      uint32_t bits;
+      std::memcpy(&bits, &v[i], 4);
+      o.fields.at(o.klass->declared_field(names[i], "F")->slot) = bits;
+    }
+  };
+  set_rect(src.get(), 0, 0, 2, 2);
+  call(rt, mx, "nSetRotate", "(JFFF)V", Args().j(m).f(45).f(1).f(1));
+  CHECK_EQ(call(rt, mx, "nMapRect", "(JLandroid/graphics/RectF;Landroid/graphics/RectF;)Z", Args().j(m).h(dst.get()).h(src.get())),
+           uint64_t(0));
+  CHECK(std::fabs(float_field(rt, dst.get(), "left") - (1 - std::sqrt(2.0f))) < 1e-5f);
+  CHECK(std::fabs(float_field(rt, dst.get(), "bottom") - (1 + std::sqrt(2.0f))) < 1e-5f);
+  // setRectToRect CENTER: uniform scale, centred on the long axis.
+  set_rect(dst.get(), 0, 0, 10, 4);
+  CHECK_EQ(call(rt, mx, "nSetRectToRect", "(JLandroid/graphics/RectF;Landroid/graphics/RectF;I)Z",
+                Args().j(m).h(src.get()).h(dst.get()).i(2)),
+           uint64_t(1));
+  CHECK(values(m) == (std::vector<float>{2, 0, 3, 0, 2, 0, 0, 0, 1}));
+  // An empty source: identity and false.
+  set_rect(src.get(), 1, 1, 1, 5);
+  CHECK_EQ(call(rt, mx, "nSetRectToRect", "(JLandroid/graphics/RectF;Landroid/graphics/RectF;I)Z",
+                Args().j(m).h(src.get()).h(dst.get()).i(0)),
+           uint64_t(0));
+  CHECK_EQ(call(rt, mx, "nIsIdentity", "(J)Z", Args().j(m)), uint64_t(1));
+  // A copy, then equality by value.
+  call(rt, mx, "nSetSkew", "(JFF)V", Args().j(m).f(0.5f).f(0));
+  int64_t copy = int64_t(call(rt, ex, "nCreate", "(J)J", Args().j(m)));
+  CHECK_EQ(call(rt, mx, "nEquals", "(JJ)Z", Args().j(m).j(copy)), uint64_t(1));
+  CHECK_EQ(call(rt, mx, "nEquals", "(JJ)Z", Args().j(m).j(inv)), uint64_t(0));
+}

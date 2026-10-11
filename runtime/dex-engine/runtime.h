@@ -128,7 +128,13 @@ struct ThrowablePeer final : NativePeer {
   bool has_message = false;
   Handle cause = kNull;
   std::vector<std::string> stack;
-  void trace(std::vector<Handle>& out) const override { out.push_back(cause); }
+  Handle stack_trace = kNull;     // StackTraceElement[] once built or set (libcore mode)
+  std::vector<Handle> suppressed;  // addSuppressed
+  void trace(std::vector<Handle>& out) const override {
+    out.push_back(cause);
+    out.push_back(stack_trace);
+    out.insert(out.end(), suppressed.begin(), suppressed.end());
+  }
 };
 
 struct Field {

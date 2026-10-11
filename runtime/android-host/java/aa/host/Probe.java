@@ -7,6 +7,8 @@ import android.os.ServiceManager;
 import android.view.View;
 import dalvik.system.DexFile;
 import dalvik.system.PathClassLoader;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.lang.reflect.Method;
 import java.util.Collections;
 
@@ -67,5 +69,18 @@ public final class Probe {
         + ", forName " + (again == hello ? "même classe" : "autre classe")
         + ", amorçage " + fromBoot + ", Probe -> " + boot.getClass().getSimpleName()
         + ", entrées " + entries);
+    stackTraces();
+  }
+
+  /** Throwable's stack as libcore prints it (printStackTrace through a PrintWriter). */
+  private static void stackTraces() {
+    Exception e = new IllegalStateException("sonde");
+    e.addSuppressed(new RuntimeException("supprimée"));
+    StackTraceElement top = e.getStackTrace()[0];
+    StringWriter text = new StringWriter();
+    e.printStackTrace(new PrintWriter(text));
+    String[] lines = text.toString().split("\n");
+    System.out.println("pile : " + top.getClassName() + "." + top.getMethodName() + ", " + lines[0] + ", "
+        + lines[1].trim() + ", supprimées " + e.getSuppressed().length);
   }
 }

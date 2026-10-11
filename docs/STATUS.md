@@ -58,7 +58,7 @@ G5 ░░░░░░░░░░   0 %
    ████▏░░░░░ ≈ 42 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 36 suites de tests et 127 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 36 suites de tests et 128 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.
@@ -123,8 +123,8 @@ G5 ░░░░░░░░░░   0 %
   `RenderNode` et `Paint` comme magasins de propriétés avec les valeurs par défaut de HWUI ;
   `Path` sur le modèle de `SkPath` (contours, rectangles, ovales, rectangles arrondis avec la mise
   à l'échelle des rayons de `SkRRect`) et `Path.approximate` à l'identique de HWUI (les
-  interpolateurs d'animation en dépendent) ; `Font`, `FontFamily` et `Typeface` avec les règles de
-  style et de repli de minikin. La mesure et le rendu du texte attendent le moteur de texte (J6).
+  interpolateurs d'animation en dépendent) ; `Matrix` avec les formules de `SkMatrix` ; `Font`,
+  `FontFamily` et `Typeface` avec les règles de style et de repli de minikin. La mesure et le rendu du texte attendent le moteur de texte (J6).
 - **Annotations système des DEX** : `getEnclosingClass`, `getDeclaringClass`, `getSimpleName`,
   `isAnonymousClass` et `getDeclaredClasses` sont lus dans les annotations `InnerClass`,
   `EnclosingClass`, `EnclosingMethod` et `MemberClasses`. La casse Unicode
@@ -204,13 +204,14 @@ Ce qui passe déjà, avec le vrai code d'Android 17 :
 - `MainActivity.onCreate` construit ses vues (`TextView` avec `Paint` et `Typeface`, fonds
   `RippleDrawable`/`GradientDrawable` avec `Path`) puis appelle `setContentView` : `DecorView`
   est créée, ses interpolateurs d'animation (`Path.approximate`) aussi, et la mise en page du
-  décor est gonflée.
+  décor est gonflée (`Toolbar` et ses `ImageView`, avec `Matrix`).
 
-**Blocage actuel** : `Matrix` (natives `Matrix$ExtraNatives`), demandée par l'`ImageView` de la
-`Toolbar` du décor.
+**Blocage actuel** : le décodage des images. Le fond 9-patch de l'`ActionBarContextView` du décor
+passe par `ImageDecoder.nCreate` (PNG avec son chunk `npTc`), puis par les natives de `Bitmap`.
 
 **Suite prévue, dans l'ordre** :
-1. `Matrix` (matrice 3×3 de Skia : opérations, `mapPoints`, `mapRect`, `invert`) ;
+1. décodeur PNG (zlib par miniz, filtres, entrelacement, palettes, profondeurs), chunk 9-patch,
+   natives `ImageDecoder`, `Bitmap` et `NinePatch` ;
 2. les natives suivantes que le chemin demande, chacune vérifiée contre le jar ;
 3. `onStart`, `onPostCreate` et `onResume`, jusqu'à ce que le test `launch` passe : il clôt J4 ;
 4. J5 : démarrage par `handleBindApplication` … `handleResumeActivity`, fenêtre logique. Un
