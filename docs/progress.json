@@ -2,16 +2,16 @@
   "metadata": {
     "project": "AnyAndroid for Windows",
     "version": "0.1.0",
-    "generated_at": "2026-10-11T19:47:07.286220+00:00",
+    "generated_at": "2026-10-11T20:53:12.078170+00:00",
     "target": "Android natif sur Windows (sans VM ni hyperviseur)"
   },
   "summary": {
     "overall_percent": 42.0,
-    "bridge_percent": 87.2,
+    "bridge_percent": 87.5,
     "libcore_percent": 47.2,
     "dalvik_percent": 99.6,
     "total_classes": 139,
-    "total_members": 904,
+    "total_members": 907,
     "total_natives": 1034,
     "total_opcodes": 256
   },
@@ -50,10 +50,10 @@
       {
         "id": "G3",
         "name": "Vrai `framework.jar` et une application AOSP affichée",
-        "description": "**En cours** : plan de l'ADR-006, J0-J2 faits, J3 et J4 en cours (l'`onCreate` d'une vraie activité s'exécute)",
+        "description": "**En cours** : plan de l'ADR-006, J0-J2 faits, J3 et J4 en cours (l'`onCreate` d'une vraie activité va jusqu'à `setContentView`)",
         "progress": 55,
         "weight": 35,
-        "status": "**En cours** : plan de l'ADR-006, J0-J2 faits, J3 et J4 en cours (l'`onCreate` d'une vraie activité s'exécute)",
+        "status": "**En cours** : plan de l'ADR-006, J0-J2 faits, J3 et J4 en cours (l'`onCreate` d'une vraie activité va jusqu'à `setContentView`)",
         "adr": "ADR-006",
         "state": "in_progress"
       },
@@ -1820,7 +1820,7 @@
         {
           "member": "forName(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;` (statique)",
           "status": "Partielle",
-          "note": "chargeur de classes ignoré (un seul espace de classes)"
+          "note": "un seul espace de classes (ADR-006 J2) ; sans libcore, le chargeur est ignoré"
         },
         {
           "member": "getDeclaredMethods()[Ljava/lang/reflect/Method;",
@@ -1829,8 +1829,8 @@
         },
         {
           "member": "getMethods()[Ljava/lang/reflect/Method;",
-          "status": "Partielle",
-          "note": "méthodes publiques des superclasses incluses, celles des interfaces non"
+          "status": "Supportée",
+          "note": ""
         },
         {
           "member": "getDeclaredMethod(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;",
@@ -1939,13 +1939,13 @@
         },
         {
           "member": "getEnclosingClass()Ljava/lang/Class;",
-          "status": "Non supportée",
-          "note": "attributs InnerClass/EnclosingClass non lus"
+          "status": "Supportée",
+          "note": ""
         },
         {
           "member": "getDeclaringClass()Ljava/lang/Class;",
-          "status": "Non supportée",
-          "note": "attributs InnerClass/EnclosingClass non lus"
+          "status": "Supportée",
+          "note": ""
         }
       ],
       "java.lang.ClassCastException": [
@@ -4251,6 +4251,11 @@
           "note": ""
         },
         {
+          "member": "isSynthetic()Z",
+          "status": "Supportée",
+          "note": ""
+        },
+        {
           "member": "equals(Ljava/lang/Object;)Z",
           "status": "Supportée",
           "note": ""
@@ -4425,6 +4430,16 @@
         },
         {
           "member": "isVarArgs()Z",
+          "status": "Supportée",
+          "note": ""
+        },
+        {
+          "member": "isSynthetic()Z",
+          "status": "Supportée",
+          "note": ""
+        },
+        {
+          "member": "isBridge()Z",
           "status": "Supportée",
           "note": ""
         },
@@ -7045,10 +7060,10 @@
           {
             "name": "java.lang.Class",
             "total": 36,
-            "supported": 27,
-            "partial": 4,
+            "supported": 30,
+            "partial": 3,
             "stub": 0,
-            "unsupported": 5,
+            "unsupported": 3,
             "members": [
               {
                 "member": "getName()Ljava/lang/String;",
@@ -7103,7 +7118,7 @@
               {
                 "member": "forName(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;` (statique)",
                 "status": "Partielle",
-                "note": "chargeur de classes ignoré (un seul espace de classes)"
+                "note": "un seul espace de classes (ADR-006 J2) ; sans libcore, le chargeur est ignoré"
               },
               {
                 "member": "getDeclaredMethods()[Ljava/lang/reflect/Method;",
@@ -7112,8 +7127,8 @@
               },
               {
                 "member": "getMethods()[Ljava/lang/reflect/Method;",
-                "status": "Partielle",
-                "note": "méthodes publiques des superclasses incluses, celles des interfaces non"
+                "status": "Supportée",
+                "note": ""
               },
               {
                 "member": "getDeclaredMethod(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;",
@@ -7222,13 +7237,13 @@
               },
               {
                 "member": "getEnclosingClass()Ljava/lang/Class;",
-                "status": "Non supportée",
-                "note": "attributs InnerClass/EnclosingClass non lus"
+                "status": "Supportée",
+                "note": ""
               },
               {
                 "member": "getDeclaringClass()Ljava/lang/Class;",
-                "status": "Non supportée",
-                "note": "attributs InnerClass/EnclosingClass non lus"
+                "status": "Supportée",
+                "note": ""
               }
             ]
           },
@@ -10028,8 +10043,8 @@
           },
           {
             "name": "java.lang.reflect.Constructor",
-            "total": 11,
-            "supported": 10,
+            "total": 12,
+            "supported": 11,
             "partial": 1,
             "stub": 0,
             "unsupported": 0,
@@ -10066,6 +10081,11 @@
               },
               {
                 "member": "isVarArgs()Z",
+                "status": "Supportée",
+                "note": ""
+              },
+              {
+                "member": "isSynthetic()Z",
                 "status": "Supportée",
                 "note": ""
               },
@@ -10238,8 +10258,8 @@
           },
           {
             "name": "java.lang.reflect.Method",
-            "total": 12,
-            "supported": 11,
+            "total": 14,
+            "supported": 13,
             "partial": 1,
             "stub": 0,
             "unsupported": 0,
@@ -10276,6 +10296,16 @@
               },
               {
                 "member": "isVarArgs()Z",
+                "status": "Supportée",
+                "note": ""
+              },
+              {
+                "member": "isSynthetic()Z",
+                "status": "Supportée",
+                "note": ""
+              },
+              {
+                "member": "isBridge()Z",
                 "status": "Supportée",
                 "note": ""
               },
@@ -10377,11 +10407,11 @@
             ]
           }
         ],
-        "members": 585,
-        "supported": 539,
-        "partial": 32,
+        "members": 588,
+        "supported": 545,
+        "partial": 31,
         "stub": 2,
-        "unsupported": 12
+        "unsupported": 10
       },
       "java.util": {
         "classes": [
@@ -10840,14 +10870,14 @@
       }
     },
     "total_classes": 139,
-    "total_members": 904,
+    "total_members": 907,
     "counts": {
-      "supported": 788,
-      "partial": 64,
+      "supported": 794,
+      "partial": 63,
       "stub": 24,
-      "unsupported": 28
+      "unsupported": 26
     },
-    "percent_supported": 87.2
+    "percent_supported": 87.5
   },
   "libcore": {
     "total": 1034,
@@ -11055,11 +11085,11 @@
     ]
   },
   "tests": {
-    "total_suites": 35,
-    "passed_suites": 32,
+    "total_suites": 36,
+    "passed_suites": 33,
     "optional_suites": 3,
-    "unit_tests": 121,
-    "e2e_suites": 31,
+    "unit_tests": 127,
+    "e2e_suites": 32,
     "fuzz_suites": 3,
     "percent_core": 100.0,
     "note": "Les 3 tests non passés requièrent une image système AOSP externe (G2/G3 facultatifs hors dépôt)"
