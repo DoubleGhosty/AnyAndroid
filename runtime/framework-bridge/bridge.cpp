@@ -11,6 +11,7 @@ void install(rt::NativeRegistry& registry, Host& host) {
   register_android_app(registry, host);
   register_android_widget(registry, host);
   register_android_res(registry, host);  // after the classes it extends
+  register_framework_graphics(registry);
   register_libcore_natives(registry);
 }
 
