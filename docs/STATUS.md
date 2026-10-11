@@ -171,35 +171,29 @@ ses mises en page.
 
 ## Reprise : où en est le travail (fin de session du 2026-10-11)
 
-**Jalon en cours : J4, démarrage direct d'une application** (ADR-006). Le lanceur Java d'hôte
+**Jalon J4 terminé** : démarrage direct d'une application jusqu'à `onResume`. Le lanceur Java d'hôte
 `aa.host.Launcher` (`runtime/android-host/java/aa/host/Launcher.java`) reproduit
 `ActivityThread.attach` et le démarrage à la Robolectric. Pour le relancer :
 
 ```
-anyandroid exec --bootclasspath <libcore17> --system-image <system.img> --trace-services \
+anyandroid exec --bootclasspath <libcore17> --system-image <system.img> \
     build/samples/basic-activity.apk aa.host.Launcher com.anyandroid.samples.basic
 ```
 
-Ce qui passe déjà, avec le vrai code d'Android 17 :
+Ce qui fonctionne maintenant, avec le vrai code d'Android 17 :
 - `ActivityThread` et `Instrumentation` sont créés, le `ServiceManager` local répond ;
+- Les services système (window, display, input_method, accessibility) répondent aux requêtes ;
 - `LoadedApk` construit le vrai `PathClassLoader` de l'APK, et l'`Application` est créée ;
 - `ContextImpl.createActivityContext` crée le contexte, puis `Instrumentation.newActivity` et
   `Activity.attach` (avec sa `PhoneWindow`) préparent l'activité ;
-- `MainActivity.onCreate` démarre et construit ses vues (`new LinearLayout(this)`).
+- `MainActivity.onCreate`, `onStart`, `onResume` s'exécutent complètement ;
+- Les natives graphiques (Paint, Typeface, RenderNode) servent de magasins de propriétés ;
+- Le test e2e `launch` valide le cycle de vie complet.
 
-**Blocage actuel** : `ViewConfiguration.<init>` appelle `IWindowManager.hasNavigationBar` ; le
-service `window` n'existe pas encore.
-
-**Suite prévue, dans l'ordre** :
-1. le service `window` (`IWindowManager.Stub` : `hasNavigationBar`, tailles d'écran, puis
-   `openSession` vers une `IWindowSession`) ;
-2. `display` (`IDisplayManager.getDisplayInfo` de l'écran 0 : taille logique, densité,
-   rafraîchissement) ;
-3. `input_method` (`InputMethodManager` l'exige), `accessibility`, `activity`, `activity_task` ;
-4. les natives graphiques que les vues demandent en chemin (`Paint`, `Typeface`, `RenderNode`
-   comme magasin de propriétés…) : d'abord des réponses cohérentes, le rendu viendra à J7 ;
-5. un test e2e `launch` dont la sortie de référence est le journal du cycle de vie
-   (`cycle : MainActivity.onCreate/onStart/onResume`) : il clôt J4.
+**Prochain jalon : J5, démarrage par les gestionnaires d'ActivityThread** :
+1. `handleBindApplication` … `handleResumeActivity` (vrai chemin au lieu du direct) ;
+2. Fenêtre logique (`addToDisplayAsUser`, `relayout` calculé par `WindowLayout`) ;
+3. Looper piloté par l'hôte, horloge virtuelle pour les tests.
 
 **À savoir pour la suite** :
 - la trace `--trace-services` ne liste que les appels du framework aux objets `Binder` de

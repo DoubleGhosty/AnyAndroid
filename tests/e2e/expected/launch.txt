@@ -1,0 +1,7 @@
+démarrage : ActivityThread prêt
+application : com.anyandroid.samples.basic.BasicApp
+activité : MainActivity attachée
+cycle : MainActivity.onCreate
+cycle : MainActivity.onStart
+cycle : MainActivity.onResume
+activité au premier plan
