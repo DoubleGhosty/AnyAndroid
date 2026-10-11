@@ -11,7 +11,7 @@ pas de bac à sable fort** : l'isolation n'a fait l'objet d'aucun audit indépen
 | M2 | Bombe ZIP, entrées chevauchantes ou dupliquées | taille annoncée vérifiée avant décompression, taux de compression plafonné, chevauchements et doublons refusés | en place |
 | M3 | Traversée de chemins (`../`) | noms dangereux signalés, jamais extraits | en place (aucune extraction dans le MVP) |
 | M4 | Bytecode malformé visant la mémoire de l'hôte | vérification structurelle avant exécution (registres, index, cibles de branchement) ; contrôles dynamiques des types, des bornes et des poignées | en place ; pas de vérificateur de types complet |
-| M5 | Épuisement mémoire ou CPU | plafond d'objets, de taille des tableaux, de profondeur de pile, budget d'instructions par événement (`--max-instructions`) | en place |
+| M5 | Épuisement mémoire ou CPU | plafond d'objets, de taille des tableaux, de profondeur de pile, budget d'instructions par événement (`--max-instructions`), budget global de la mémoire native émulée (1 Gio : `Unsafe.allocateMemory`, `mmap`) | en place |
 | M6 | Bibliothèque native qui exécute du code arbitraire | aucune bibliothèque `.so` n'est chargée ; les APK concernés sont refusés | en place |
 | M7 | Accès aux fichiers hors de l'espace privé | système de fichiers virtuel (ADR-005) : arborescence Android assemblée de montages ; image système et APEX en lecture seule ; écriture limitée au bac à sable de l'application ; `..` borné à la racine virtuelle ; noms encodés ; liens et jonctions de l'hôte jamais traversés ; aucune création de lien par l'application ; aucun chemin de l'hôte dans les messages | en place |
 | M8 | Données personnelles dans les journaux | journaux locaux uniquement (stderr et JSONL) ; pas de télémétrie | en place |

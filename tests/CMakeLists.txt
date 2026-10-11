@@ -8,6 +8,7 @@ add_executable(aa_unit_tests
   unit/test_jni.cpp
   unit/test_image.cpp
   unit/test_libcore.cpp
+  unit/test_native_memory.cpp
   unit/test_resources.cpp
   unit/test_res_compiler.cpp)
 target_include_directories(aa_unit_tests PRIVATE unit)
