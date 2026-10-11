@@ -373,8 +373,10 @@ void register_file_dispatcher(rt::NativeRegistry& r) {
       throw_io(rt, e.err);
     }
   }, S::kPartial, "copie privée du fichier (MAP_SHARED non émulé)");
+  // unmap0(address, length), static: IOException (EINVAL) unless `address` is
+  // the start of a mapping, released whole, as munmap(2) seen by the real native.
   r.bind(fci, "unmap0", "(JJ)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    native_free(rt, a.i64(0));
+    if (a.i64(2) <= 0 || !native_try_free(a.i64(0))) throw_io(rt, vfs::kEINVAL);
     return 0;
   });
 }

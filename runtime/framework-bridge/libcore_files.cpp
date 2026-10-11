@@ -30,6 +30,20 @@ namespace {
 
 FILE* std_stream(int32_t fd) { return fd == 1 ? stdout : fd == 2 ? stderr : nullptr; }
 
+// Zeroed bytes for a mapping of `length` bytes, or ENOMEM (size limit, budget
+// of the emulated native memory, host memory) before anything is published.
+std::vector<uint8_t> mapping_bytes(uint64_t length) {
+  constexpr uint64_t kMaxMapping = uint64_t(2) << 30;
+  if (length > kMaxMapping || !native_memory_fits(length)) throw vfs::VfsError{vfs::kENOMEM, "mmap"};
+  std::vector<uint8_t> data;
+  try {
+    data.assign(size_t(length), 0);
+  } catch (const std::bad_alloc&) {
+    throw vfs::VfsError{vfs::kENOMEM, "mmap"};
+  }
+  return data;
+}
+
 }  // namespace
 
 size_t read_fd(int32_t fd, std::span<uint8_t> out) {
@@ -60,16 +74,9 @@ vfs::VStat fstat_fd(int32_t fd) {
 }
 
 int64_t map_fd_copy(rt::Runtime& rt, int32_t fd, uint64_t offset, uint64_t length, bool writable) {
-  constexpr uint64_t kMaxMapping = uint64_t(2) << 30;
-  if (length > kMaxMapping) throw vfs::VfsError{vfs::kENOMEM, "mmap"};  // before any allocation
-  if (fd >= 0 && fd <= 2) throw vfs::VfsError{vfs::kEACCES, "mmap"};    // not a regular file
+  if (fd >= 0 && fd <= 2) throw vfs::VfsError{vfs::kEACCES, "mmap"};  // not a regular file
   libcore_vfs().fstat(fd);  // EBADF before allocating
-  std::vector<uint8_t> data;
-  try {
-    data.assign(size_t(length), 0);
-  } catch (const std::bad_alloc&) {
-    throw vfs::VfsError{vfs::kENOMEM, "mmap"};
-  }
+  std::vector<uint8_t> data = mapping_bytes(length);
   size_t done = 0;
   while (done < data.size()) {
     size_t n = libcore_vfs().pread(fd, std::span<uint8_t>(data).subspan(done), offset + done);
@@ -283,19 +290,29 @@ void register_linux(rt::NativeRegistry& r) {
   });
   // mmap: a private copy of the file range in emulated native memory. Writes
   // are not carried back to the file (MAP_SHARED is not emulated).
+  // MAP_ANONYMOUS: zeroed memory, the descriptor (null or -1) is ignored. The
+  // address hint is ignored too, and MAP_FIXED, which would impose it, fails.
   r.bind(lx, "mmap", "(JJIILjava/io/FileDescriptor;J)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int64_t byte_count = a.i64(3);
-    int32_t prot = a.i32(5);
-    int32_t fd = fd_of(rt, a.h(7));
+    int32_t prot = a.i32(5), flags = a.i32(6);
     int64_t offset = a.i64(8);
-    if (byte_count <= 0 || offset < 0) throw_errno(rt, "mmap", vfs::kEINVAL);
-    constexpr int32_t kProtWrite = 0x2;
+    constexpr int32_t kProtWrite = 0x2, kMapFixed = 0x10, kMapAnonymous = 0x20;
+    if (byte_count <= 0 || offset < 0 || (flags & kMapFixed)) throw_errno(rt, "mmap", vfs::kEINVAL);
+    bool writable = (prot & kProtWrite) != 0;
+    if (flags & kMapAnonymous) {
+      return rt::ret_long(guarded(rt, "mmap", [&] {
+        return native_wrap(rt, mapping_bytes(uint64_t(byte_count)), writable);
+      }));
+    }
+    int32_t fd = fd_of(rt, a.h(7));
     return rt::ret_long(guarded(rt, "mmap", [&] {
-      return map_fd_copy(rt, fd, uint64_t(offset), uint64_t(byte_count), (prot & kProtWrite) != 0);
+      return map_fd_copy(rt, fd, uint64_t(offset), uint64_t(byte_count), writable);
     }));
   },S::kPartial, "copie privée du fichier (MAP_SHARED non émulé)");
+  // EINVAL, as munmap(2), unless `address` is the start of a mapping, which is
+  // released whole (partial unmapping is not emulated).
   r.bind(lx, "munmap", "(JJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    native_free(rt, a.i64(1));
+    if (a.i64(3) <= 0 || !native_try_free(a.i64(1))) throw_errno(rt, "munmap", vfs::kEINVAL);
     return 0;
   });
   for (const char* name : {"fsync", "fdatasync"}) {
@@ -318,7 +335,10 @@ void register_linux(rt::NativeRegistry& r) {
   });
   r.bind(lx, "posix_fallocate", "(Ljava/io/FileDescriptor;JJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(1));
-    int64_t end = a.i64(2) + a.i64(4);
+    int64_t offset = a.i64(2), length = a.i64(4);
+    if (offset < 0 || length <= 0) throw_errno(rt, "posix_fallocate", vfs::kEINVAL);
+    if (length > INT64_MAX - offset) throw_errno(rt, "posix_fallocate", vfs::kEFBIG);
+    int64_t end = offset + length;
     guarded(rt, "posix_fallocate", [&] {
       if (the_vfs().fstat(fd).size < uint64_t(end)) the_vfs().ftruncate(fd, uint64_t(end));
     });
@@ -534,36 +554,83 @@ void register_unix_file_system(rt::NativeRegistry& r) {
 }
 
 // libcore.io.Memory: peek/poke on native addresses (emulated native memory,
-// see native_memory.h) and bulk copies between arrays.
+// see native_memory.h) and bulk copies between primitive arrays.
 template <typename T>
-T peek(Runtime& rt, int64_t address, bool swap) {
-  T v;
-  std::memcpy(&v, native_span(rt, address, sizeof(T)).data(), sizeof(T));
-  if (swap) {
-    if constexpr (sizeof(T) == 2) v = T(__builtin_bswap16(uint16_t(v)));
-    if constexpr (sizeof(T) == 4) v = T(__builtin_bswap32(uint32_t(v)));
-    if constexpr (sizeof(T) == 8) v = T(__builtin_bswap64(uint64_t(v)));
-  }
+T swapped(T v) {
+  if constexpr (sizeof(T) == 2) return T(__builtin_bswap16(uint16_t(v)));
+  if constexpr (sizeof(T) == 4) return T(__builtin_bswap32(uint32_t(v)));
+  if constexpr (sizeof(T) == 8) return T(__builtin_bswap64(uint64_t(v)));
   return v;
 }
 
 template <typename T>
+T peek(Runtime& rt, int64_t address, bool swap) {
+  T v;
+  std::memcpy(&v, native_span(rt, address, sizeof(T)).data(), sizeof(T));
+  return swap ? swapped(v) : v;
+}
+
+template <typename T>
 void poke(Runtime& rt, int64_t address, T v, bool swap) {
-  if (swap) {
-    if constexpr (sizeof(T) == 2) v = T(__builtin_bswap16(uint16_t(v)));
-    if constexpr (sizeof(T) == 4) v = T(__builtin_bswap32(uint32_t(v)));
-    if constexpr (sizeof(T) == 8) v = T(__builtin_bswap64(uint64_t(v)));
-  }
+  if (swap) v = swapped(v);
   std::memcpy(native_span(rt, address, sizeof(T), true).data(), &v, sizeof(T));
 }
 
-// Bytes [offset, offset + count) of a primitive array, bounds-checked.
-std::span<uint8_t> array_bytes(Runtime& rt, Handle array, int64_t offset, int64_t count) {
+// Bytes [offset, offset + count) of a primitive array, bounds-checked. Arrays
+// of references are refused: copying bytes into one would forge handles.
+std::span<uint8_t> array_bytes(Runtime& rt, Handle array, int64_t offset, int64_t count, uint32_t width = 0) {
   rt::ArrayObject& arr = rt.array(array, "tableau");
+  if (!arr.klass->component || !arr.klass->component->primitive || (width && arr.width != width)) {
+    rt.throw_new("Ljava/lang/IllegalArgumentException;",
+                 "Memory : " + arr.klass->java_name() + " au lieu du tableau primitif attendu");
+  }
   if (offset < 0 || count < 0 || uint64_t(offset) + uint64_t(count) > arr.data.size()) {
     rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "Memory : plage hors du tableau");
   }
   return std::span<uint8_t>(arr.data).subspan(size_t(offset), size_t(count));
+}
+
+// Elements [offset, offset + count) of a primitive array of `width`-byte elements.
+std::span<uint8_t> array_elements(Runtime& rt, Handle array, int32_t offset, int32_t count, uint32_t width) {
+  if (offset < 0 || count < 0) {
+    rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "Memory : plage hors du tableau");
+  }
+  return array_bytes(rt, array, int64_t(offset) * width, int64_t(count) * width, width);
+}
+
+// The bytes behind Memory.memmove's objects: a primitive array, or a direct
+// java.nio.Buffer, whose `address` field is an emulated native address (as
+// GetDirectBufferAddress in ART's ScopedBytes).
+std::span<uint8_t> memmove_bytes(Runtime& rt, Handle object, int32_t offset, int64_t count, bool write) {
+  rt::Object& o = rt.nonnull(object, "Memory.memmove");
+  if (dynamic_cast<rt::ArrayObject*>(&o)) return array_bytes(rt, object, offset, count);
+  for (rt::Class* c = o.klass; c; c = c->super) {
+    if (c->descriptor != "Ljava/nio/Buffer;") continue;
+    rt::Field* f = find_field(o.klass, "address", "J");
+    if (!f || f->is_static()) break;
+    uint64_t address = uint64_t(o.fields.at(f->slot)) | (uint64_t(o.fields.at(f->slot + 1)) << 32);
+    if (address == 0) break;  // heap buffer
+    if (offset < 0 || count < 0) rt.throw_new("Ljava/lang/IndexOutOfBoundsException;", "Memory.memmove");
+    if (count == 0) return {};
+    return native_span(rt, int64_t(address + uint32_t(offset)), uint64_t(count), write);
+  }
+  rt.throw_new("Ljava/lang/IllegalArgumentException;", "Memory.memmove : " + o.klass->java_name() +
+                                                            " n'est ni un tableau primitif ni un tampon direct");
+}
+
+// Copies `bytes` bytes of `width`-byte elements, reversing the bytes of each
+// element when `swap` (whole elements only, as libcore's swap routines).
+void copy_elements(uint8_t* dst, const uint8_t* src, size_t bytes, uint32_t width, bool swap) {
+  if (!swap || width == 1) {
+    std::memmove(dst, src, bytes);
+    return;
+  }
+  for (size_t i = 0; i + width <= bytes; i += width) {
+    uint8_t e[8];
+    std::memcpy(e, src + i, width);
+    std::reverse(e, e + width);
+    std::memcpy(dst + i, e, width);
+  }
 }
 
 void register_libcore_memory(rt::NativeRegistry& r) {
@@ -587,6 +654,29 @@ void register_libcore_memory(rt::NativeRegistry& r) {
     if (count > 0) std::memcpy(native_span(rt, a.i64(0), uint64_t(count), true).data(), src.data(), size_t(count));
     return 0;
   });
+  // peek/poke<Type>Array(long address, <type>[] array, int offset, int count,
+  // boolean swap): offset and count in elements.
+  struct ArrayKind {
+    const char* name;
+    char type;
+    uint32_t width;
+  };
+  for (ArrayKind k : {ArrayKind{"Char", 'C', 2}, ArrayKind{"Short", 'S', 2}, ArrayKind{"Int", 'I', 4},
+                      ArrayKind{"Float", 'F', 4}, ArrayKind{"Long", 'J', 8}, ArrayKind{"Double", 'D', 8}}) {
+    std::string sig = std::string("(J[") + k.type + "IIZ)V";
+    r.bind(mem, std::string("peek") + k.name + "Array", sig, [width = k.width](Runtime& rt, NativeArgs& a) -> uint64_t {
+      auto dst = array_elements(rt, a.h(2), a.i32(3), a.i32(4), width);
+      if (dst.empty()) return 0;
+      copy_elements(dst.data(), native_span(rt, a.i64(0), dst.size()).data(), dst.size(), width, a.z(5));
+      return 0;
+    });
+    r.bind(mem, std::string("poke") + k.name + "Array", sig, [width = k.width](Runtime& rt, NativeArgs& a) -> uint64_t {
+      auto src = array_elements(rt, a.h(2), a.i32(3), a.i32(4), width);
+      if (src.empty()) return 0;
+      copy_elements(native_span(rt, a.i64(0), src.size(), true).data(), src.data(), src.size(), width, a.z(5));
+      return 0;
+    });
+  }
   r.bind(mem, "peekShortNative", "(J)S", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     return uint32_t(int32_t(peek<int16_t>(rt, a.i64(0), false)));
   });
@@ -608,33 +698,64 @@ void register_libcore_memory(rt::NativeRegistry& r) {
     poke<uint64_t>(rt, a.i64(0), uint64_t(a.i64(2)), false);
     return 0;
   });
-  r.bind(mem, "peekShort", "(JZ)S", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+  // peek/poke<Type>(long address[, value], boolean swap) are bytecode around
+  // the natives above (call, then reverseBytes): intrinsics save both calls.
+  const char* note = "accès direct à la mémoire native émulée";
+  r.intrinsic(mem, "peekShort", "(JZ)S", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     return uint32_t(int32_t(peek<int16_t>(rt, a.i64(0), a.z(2))));
-  });
-  r.bind(mem, "pokeShort", "(JSZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+  }, note);
+  r.intrinsic(mem, "pokeShort", "(JSZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     poke<uint16_t>(rt, a.i64(0), uint16_t(a.raw(2)), a.z(3));
     return 0;
-  });
-  r.bind(mem, "peekInt", "(JZ)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+  }, note);
+  r.intrinsic(mem, "peekInt", "(JZ)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     return peek<uint32_t>(rt, a.i64(0), a.z(2));
-  });
-  r.bind(mem, "pokeInt", "(JIZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+  }, note);
+  r.intrinsic(mem, "pokeInt", "(JIZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     poke<uint32_t>(rt, a.i64(0), a.raw(2), a.z(3));
     return 0;
-  });
-  r.bind(mem, "peekLong", "(JZ)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+  }, note);
+  r.intrinsic(mem, "peekLong", "(JZ)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     return peek<uint64_t>(rt, a.i64(0), a.z(2));
-  });
-  r.bind(mem, "pokeLong", "(JJZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+  }, note);
+  r.intrinsic(mem, "pokeLong", "(JJZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     poke<uint64_t>(rt, a.i64(0), uint64_t(a.i64(2)), a.z(4));
     return 0;
-  });
-  // memmove(Object dst, int dstOffset, Object src, int srcOffset, long byteCount): arrays.
+  }, note);
+  // memmove(Object dst, int dstOffset, Object src, int srcOffset, long byteCount).
   r.bind(mem, "memmove", "(Ljava/lang/Object;ILjava/lang/Object;IJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int64_t count = a.i64(4);
-    auto dst = array_bytes(rt, a.h(0), a.i32(1), count);
-    auto src = array_bytes(rt, a.h(2), a.i32(3), count);
+    auto dst = memmove_bytes(rt, a.h(0), a.i32(1), count, true);
+    auto src = memmove_bytes(rt, a.h(2), a.i32(3), count, false);
     if (count > 0) std::memmove(dst.data(), src.data(), size_t(count));
+    return 0;
+  });
+  // unsafeBulkGet(Object dst, int dstOffset, int byteCount, byte[] src, int srcOffset,
+  // int sizeofElements, boolean swap) and unsafeBulkPut(byte[] dst, int dstOffset,
+  // int byteCount, Object src, int srcOffset, int sizeofElements, boolean swap):
+  // heap ByteBuffers' bulk transfers. The offset in the typed array is in elements.
+  auto element_width = [](Runtime& rt, int32_t width) {
+    if (width != 1 && width != 2 && width != 4 && width != 8) {
+      rt.throw_new("Ljava/lang/IllegalArgumentException;", "Memory : taille d'élément " + std::to_string(width));
+    }
+    return uint32_t(width);
+  };
+  r.bind(mem, "unsafeBulkGet", "(Ljava/lang/Object;II[BIIZ)V", [element_width](Runtime& rt, NativeArgs& a) -> uint64_t {
+    uint32_t width = element_width(rt, a.i32(5));
+    int32_t count = a.i32(2);
+    if (a.i32(1) < 0) rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "Memory : plage hors du tableau");
+    auto dst = array_bytes(rt, a.h(0), int64_t(a.i32(1)) * width, count, width);
+    auto src = array_bytes(rt, a.h(3), a.i32(4), count, 1);
+    if (count > 0) copy_elements(dst.data(), src.data(), size_t(count), width, a.z(6));
+    return 0;
+  });
+  r.bind(mem, "unsafeBulkPut", "([BIILjava/lang/Object;IIZ)V", [element_width](Runtime& rt, NativeArgs& a) -> uint64_t {
+    uint32_t width = element_width(rt, a.i32(5));
+    int32_t count = a.i32(2);
+    if (a.i32(4) < 0) rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "Memory : plage hors du tableau");
+    auto dst = array_bytes(rt, a.h(0), a.i32(1), count, 1);
+    auto src = array_bytes(rt, a.h(3), int64_t(a.i32(4)) * width, count, width);
+    if (count > 0) copy_elements(dst.data(), src.data(), size_t(count), width, a.z(6));
     return 0;
   });
 }

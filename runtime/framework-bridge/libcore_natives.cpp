@@ -245,9 +245,13 @@ void register_system(rt::NativeRegistry& r) {
   });
 
   r.bind("Ljdk/internal/misc/VM;", "getNanoTimeAdjustment", "(J)J", [](Runtime&, NativeArgs& a) -> uint64_t {
-    // Nanoseconds since `offset` seconds after the epoch.
-    int64_t ms = unix_millis();
-    return rt::ret_long((ms / 1000 - a.i64(0)) * 1000000000 + (ms % 1000) * 1000000);
+    // Nanoseconds since `offset` seconds after the epoch; -1, as HotSpot, when
+    // `offset` is 2^32 seconds or more away (the caller then falls back to
+    // currentTimeMillis), which also keeps the arithmetic in range.
+    int64_t ms = unix_millis(), seconds = ms / 1000, offset = a.i64(0);
+    constexpr int64_t kMaxDiff = int64_t(1) << 32;
+    if (offset <= seconds - kMaxDiff || offset >= seconds + kMaxDiff) return rt::ret_long(-1);
+    return rt::ret_long((seconds - offset) * 1000000000 + (ms % 1000) * 1000000);
   });
   r.bind("Ljava/lang/Runtime;", "nativeGc", "()V", [](Runtime& rt, NativeArgs&) -> uint64_t {
     rt.request_gc();
@@ -864,43 +868,79 @@ void register_os(rt::NativeRegistry& r) {
 //
 // Offsets are opaque cookies: kFieldBase + 4 * slot for instance fields,
 // kArrayBase + index * scale for array elements.
+//
+// References (32-bit handles) only flow through reference storage: the
+// Object/Reference accessors need a reference field or a reference array
+// element, and raw accesses (primitive accessors, copyMemory, setMemory)
+// never write into one, nor into native memory as a reference. Otherwise
+// bytes chosen by the application would become handles to arbitrary objects.
 
 constexpr int64_t kFieldBase = 8;
 constexpr int64_t kArrayBase = 16;
 
-struct Location {
-  uint8_t* p;
-  size_t size;
+struct Access {
+  bool write = false;
+  bool reference = false;  // Object/Reference accessors (one 4-byte handle)
 };
 
-Location locate(Runtime& rt, Handle obj, int64_t offset, size_t size) {
-  // A null object: `offset` is an absolute address of the emulated native memory.
-  if (obj == kNull) return {native_span(rt, offset, size, true).data(), size};
+[[noreturn]] void bad_unsafe(Runtime& rt, const std::string& why, int64_t offset) {
+  rt.throw_new("Ljava/lang/IllegalArgumentException;", "Unsafe : " + why + " (offset " + std::to_string(offset) + ")");
+}
+
+bool is_ref_slot(const rt::Class* cls, uint64_t slot) {
+  return std::find(cls->ref_slots.begin(), cls->ref_slots.end(), slot) != cls->ref_slots.end();
+}
+
+// `size` bytes at (obj, offset), checked against the object, its kind of
+// storage and `access`.
+uint8_t* locate(Runtime& rt, Handle obj, int64_t offset, uint64_t size, Access access) {
+  if (obj == kNull) {
+    // `offset` is an absolute address of the emulated native memory, which
+    // holds bytes, never references.
+    if (access.reference) bad_unsafe(rt, "référence lue ou écrite hors d'un objet", offset);
+    return native_span(rt, offset, size, access.write).data();
+  }
   rt::Object& o = rt.nonnull(obj, "Unsafe");
   if (auto* arr = dynamic_cast<rt::ArrayObject*>(&o)) {
-    int64_t at = offset - kArrayBase;
-    if (at < 0 || uint64_t(at) + size > arr->data.size()) rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "Unsafe");
-    return {arr->data.data() + at, size};
+    bool refs = arr->klass->component && !arr->klass->component->primitive;
+    if (access.reference && !refs) bad_unsafe(rt, "référence dans un tableau primitif", offset);
+    if (access.write && !access.reference && refs) {
+      bad_unsafe(rt, "octets écrits dans un tableau de références", offset);
+    }
+    if (offset < kArrayBase || uint64_t(offset - kArrayBase) > arr->data.size() ||
+        size > arr->data.size() - uint64_t(offset - kArrayBase)) {
+      rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "Unsafe");
+    }
+    uint64_t at = uint64_t(offset - kArrayBase);
+    if (access.reference && at % 4) bad_unsafe(rt, "référence non alignée", offset);
+    return arr->data.data() + at;
   }
-  int64_t at = offset - kFieldBase;
-  if (at < 0 || at % 4 || uint64_t(at) + size > o.fields.size() * 4) {
-    rt.throw_new("Ljava/lang/IllegalArgumentException;", "Unsafe : offset invalide " + std::to_string(offset));
+  uint64_t bytes = uint64_t(o.fields.size()) * 4;
+  if (offset < kFieldBase || (offset - kFieldBase) % 4 || uint64_t(offset - kFieldBase) > bytes ||
+      size > bytes - uint64_t(offset - kFieldBase)) {
+    bad_unsafe(rt, "offset invalide", offset);
   }
-  return {reinterpret_cast<uint8_t*>(o.fields.data()) + at, size};
+  uint64_t at = uint64_t(offset - kFieldBase);
+  if (access.reference) {
+    if (!is_ref_slot(o.klass, at / 4)) bad_unsafe(rt, "le champ n'est pas une référence", offset);
+  } else if (access.write) {
+    for (uint64_t slot = at / 4; slot < (at + size + 3) / 4; ++slot) {
+      if (is_ref_slot(o.klass, slot)) bad_unsafe(rt, "octets écrits dans un champ référence", offset);
+    }
+  }
+  return reinterpret_cast<uint8_t*>(o.fields.data()) + at;
 }
 
 template <typename T>
-T load(Runtime& rt, Handle obj, int64_t off) {
-  Location l = locate(rt, obj, off, sizeof(T));
+T load(Runtime& rt, Handle obj, int64_t off, bool reference = false) {
   T v;
-  std::memcpy(&v, l.p, sizeof(T));
+  std::memcpy(&v, locate(rt, obj, off, sizeof(T), Access{false, reference}), sizeof(T));
   return v;
 }
 
 template <typename T>
-void store(Runtime& rt, Handle obj, int64_t off, T v) {
-  Location l = locate(rt, obj, off, sizeof(T));
-  std::memcpy(l.p, &v, sizeof(T));
+void store(Runtime& rt, Handle obj, int64_t off, T v, bool reference = false) {
+  std::memcpy(locate(rt, obj, off, sizeof(T), Access{true, reference}), &v, sizeof(T));
 }
 
 void register_unsafe(rt::NativeRegistry& r) {
@@ -935,7 +975,7 @@ void register_unsafe(rt::NativeRegistry& r) {
           case 'Z': case 'B': return uint32_t(int32_t(load<int8_t>(rt, o, off)));
           case 'S': return uint32_t(int32_t(load<int16_t>(rt, o, off)));
           case 'C': return load<uint16_t>(rt, o, off);
-          default: return load<uint32_t>(rt, o, off);
+          default: return load<uint32_t>(rt, o, off, type == 'L');
         }
       };
       auto put = [type = k.type](Runtime& rt, NativeArgs& a) -> uint64_t {
@@ -945,7 +985,7 @@ void register_unsafe(rt::NativeRegistry& r) {
           case 'J': case 'D': store<uint64_t>(rt, o, off, uint64_t(a.i64(4))); break;
           case 'Z': case 'B': store<uint8_t>(rt, o, off, uint8_t(a.raw(4))); break;
           case 'S': case 'C': store<uint16_t>(rt, o, off, uint16_t(a.raw(4))); break;
-          default: store<uint32_t>(rt, o, off, a.raw(4));
+          default: store<uint32_t>(rt, o, off, a.raw(4), type == 'L');
         }
         return 0;
       };
@@ -961,7 +1001,8 @@ void register_unsafe(rt::NativeRegistry& r) {
       if (k.type == 'I' || k.type == 'J' || k.type == 'L') {
         r.bind(u, std::string("putOrdered") + k.name, putsig, put);
         std::string cas_sig = "(Ljava/lang/Object;J" + jt + jt + ")Z";
-        auto cas = [wide](Runtime& rt, NativeArgs& a) -> uint64_t {
+        bool ref = k.type == 'L';
+        auto cas = [wide, ref](Runtime& rt, NativeArgs& a) -> uint64_t {
           Handle o = a.h(1);
           int64_t off = a.i64(2);
           if (wide) {
@@ -971,15 +1012,15 @@ void register_unsafe(rt::NativeRegistry& r) {
             return 1;
           }
           uint32_t expected = a.raw(4), value = a.raw(5);
-          if (load<uint32_t>(rt, o, off) != expected) return 0;
-          store<uint32_t>(rt, o, off, value);
+          if (load<uint32_t>(rt, o, off, ref) != expected) return 0;
+          store<uint32_t>(rt, o, off, value, ref);
           return 1;
         };
         for (const char* prefix : {"compareAndSwap", "compareAndSet", "weakCompareAndSet"}) {
           r.bind(u, std::string(prefix) + k.name, cas_sig, cas);
         }
         // compareAndExchange: returns the previous value.
-        auto cae = [wide](Runtime& rt, NativeArgs& a) -> uint64_t {
+        auto cae = [wide, ref](Runtime& rt, NativeArgs& a) -> uint64_t {
           Handle o = a.h(1);
           int64_t off = a.i64(2);
           if (wide) {
@@ -987,8 +1028,8 @@ void register_unsafe(rt::NativeRegistry& r) {
             if (old == uint64_t(a.i64(4))) store<uint64_t>(rt, o, off, uint64_t(a.i64(6)));
             return old;
           }
-          uint32_t old = load<uint32_t>(rt, o, off);
-          if (old == a.raw(4)) store<uint32_t>(rt, o, off, a.raw(5));
+          uint32_t old = load<uint32_t>(rt, o, off, ref);
+          if (old == a.raw(4)) store<uint32_t>(rt, o, off, a.raw(5), ref);
           return old;
         };
         std::string cae_sig = "(Ljava/lang/Object;J" + jt + jt + ")" + jt;
@@ -1028,8 +1069,8 @@ void register_unsafe(rt::NativeRegistry& r) {
       int64_t bytes = a.i64(7);
       if (bytes < 0) rt.throw_new("Ljava/lang/IllegalArgumentException;", "taille négative");
       if (bytes == 0) return 0;
-      uint8_t* src = locate(rt, a.h(1), a.i64(2), size_t(bytes)).p;
-      uint8_t* dst = locate(rt, a.h(4), a.i64(5), size_t(bytes)).p;
+      uint8_t* src = locate(rt, a.h(1), a.i64(2), uint64_t(bytes), Access{false, false});
+      uint8_t* dst = locate(rt, a.h(4), a.i64(5), uint64_t(bytes), Access{true, false});
       std::memmove(dst, src, size_t(bytes));
       return 0;
     };
@@ -1037,7 +1078,8 @@ void register_unsafe(rt::NativeRegistry& r) {
       int64_t bytes = a.i64(4);
       if (bytes < 0) rt.throw_new("Ljava/lang/IllegalArgumentException;", "taille négative");
       if (bytes == 0) return 0;
-      std::memset(locate(rt, a.h(1), a.i64(2), size_t(bytes)).p, int(uint8_t(a.raw(6))), size_t(bytes));
+      std::memset(locate(rt, a.h(1), a.i64(2), uint64_t(bytes), Access{true, false}), int(uint8_t(a.raw(6))),
+                  size_t(bytes));
       return 0;
     };
     r.bind(u, "setMemory", "(Ljava/lang/Object;JJB)V", do_set);
@@ -1367,8 +1409,10 @@ uint64_t direct_get(Runtime& rt, NativeArgs& a) {
     if (nb > 1) msg += ", nb=" + std::to_string(nb);
     rt.throw_new("Ljava/lang/IndexOutOfBoundsException;", msg + ")");
   }
+  // `address` is a field of the buffer, so any value: unsigned arithmetic, the
+  // sum being just another address that native_span checks.
   T v;
-  std::memcpy(&v, native_span(rt, b.address + i, sizeof(T)).data(), sizeof(T));
+  std::memcpy(&v, native_span(rt, int64_t(uint64_t(b.address) + uint32_t(i)), sizeof(T)).data(), sizeof(T));
   if (!b.native_order) {
     if constexpr (sizeof(T) == 2) v = T(__builtin_bswap16(uint16_t(v)));
     if constexpr (sizeof(T) == 4) v = T(__builtin_bswap32(uint32_t(v)));
