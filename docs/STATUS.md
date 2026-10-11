@@ -129,14 +129,20 @@ ses mises en page.
 
 ## Prochaines étapes, dans l'ordre
 
-1. `ActivityThread` : démarrer une application comme le fait Android (`LoadedApk`,
-   `ContextImpl`, `Instrumentation`), avec la hiérarchie complète des services système.
-2. Rendu du vrai framework : `View`, `Canvas`, `Paint`, texte. Moteur de dessin 2D
-   sur Windows, à la place de Skia/HWUI.
-3. **Sortie de G3** : une application AOSP de l'image (par exemple Calculatrice) affichée dans
-   une fenêtre Windows.
-4. G4 : chargeur ELF et bionic, pour les applications avec du code natif.
-5. G5 : microG, puis les GApps fournies par l'utilisateur.
+Le plan de G3 est fixé par [ADR-006](adr/ADR-006-demarrage-applications.md) : pas de
+`system_server`, des services système locaux en Java (javac + D8) appelés sans `Parcel`, et les
+vrais gestionnaires d'`ActivityThread`.
+
+1. **J0-J2** : outillage Java/D8 et DEX d'hôte, `ServiceManager` local, vrais chargeurs de classes.
+2. **J3-J5** : services système v1, puis démarrage d'une application jusqu'à `onResume`, d'abord
+   en direct puis par `handleBindApplication` … `handleResumeActivity`.
+3. **J6-J8** : texte, rendu logiciel du vrai framework (`drawSoftware`, moteur 2D choisi par
+   l'ADR-007), fenêtre Win32 et entrées.
+4. **J9-J10, sortie de G3** : navigation, puis une application réelle affichée et utilisable :
+   un exemple Java sur les widgets du framework, puis `Music` de la GSI (la Calculatrice AOSP
+   n'existe pas dans les images d'Android 17).
+5. G4 : chargeur ELF et bionic, pour les applications avec du code natif.
+6. G5 : microG (démarrage de GmsCore avec les mêmes services), puis les GApps.
 
 ## Règles que le projet s'impose
 
