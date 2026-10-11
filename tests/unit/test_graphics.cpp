@@ -14,6 +14,7 @@
 #include "framework-bridge/native_memory.h"
 #include "smali.h"
 #include "test.h"
+#include "third_party/miniz/miniz.h"
 
 using namespace aa;
 
@@ -38,6 +39,87 @@ const char* kBootClasses[] = {
 .class public Landroid/graphics/Typeface;
 .super Ljava/lang/Object;
 .field public static final DEFAULT:Landroid/graphics/Typeface;
+)",
+    R"(
+.class public Landroid/graphics/Rect;
+.super Ljava/lang/Object;
+.field public left:I
+.field public top:I
+.field public right:I
+.field public bottom:I
+.method public void <init>(IIII)V
+.registers 5
+iput p1, p0, Landroid/graphics/Rect;->left:I
+iput p2, p0, Landroid/graphics/Rect;->top:I
+iput p3, p0, Landroid/graphics/Rect;->right:I
+iput p4, p0, Landroid/graphics/Rect;->bottom:I
+return-void
+.end method
+)",
+    R"(
+.class public Landroid/graphics/NinePatch;
+.super Ljava/lang/Object;
+)",
+    R"(
+.class public Landroid/graphics/NinePatch$InsetStruct;
+.super Ljava/lang/Object;
+.method public void <init>(IIIIIIIIFIF)V
+.registers 12
+return-void
+.end method
+)",
+    R"(
+.class public Landroid/graphics/ColorSpace;
+.super Ljava/lang/Object;
+)",
+    R"(
+.class public Landroid/graphics/Bitmap;
+.super Ljava/lang/Object;
+.field public mNativePtr:J
+.field public mWidth:I
+.field public mHeight:I
+.field public mDensity:I
+.field public mIsMutable:Z
+.field public mNinePatchChunk:[B
+.field public mNinePatchInsets:Landroid/graphics/NinePatch$InsetStruct;
+.method void <init>(JIIIZ[BLandroid/graphics/NinePatch$InsetStruct;)V
+.registers 9
+iput-wide p1, p0, Landroid/graphics/Bitmap;->mNativePtr:J
+return-void
+.end method
+)",
+    R"(
+.class public Landroid/graphics/ImageDecoder$Source;
+.super Ljava/lang/Object;
+)",
+    R"(
+.class public Landroid/graphics/ImageDecoder;
+.super Ljava/lang/Object;
+.field public mNativePtr:J
+.field public mWidth:I
+.field public mHeight:I
+.field public mNinePatchChunk:[B
+.field public mOpticalInsets:Landroid/graphics/Rect;
+.field public mOutlineInsets:Landroid/graphics/Rect;
+.field public mOutlineRadius:F
+.field public mOutlineAlpha:I
+.method void <init>(JIIZZLjava/lang/String;Landroid/graphics/ColorSpace;Landroid/graphics/Rect;)V
+.registers 10
+iput-wide p1, p0, Landroid/graphics/ImageDecoder;->mNativePtr:J
+return-void
+.end method
+)",
+    R"(
+.class public Landroid/util/Size;
+.super Ljava/lang/Object;
+.field public mWidth:I
+.field public mHeight:I
+.method public void <init>(II)V
+.registers 3
+iput p1, p0, Landroid/util/Size;->mWidth:I
+iput p2, p0, Landroid/util/Size;->mHeight:I
+return-void
+.end method
 )",
 };
 
@@ -72,6 +154,10 @@ struct Args {
   }
   Args& i(int32_t v) {
     w.push_back(uint32_t(v));
+    return *this;
+  }
+  Args& z(bool v) {
+    w.push_back(v ? 1 : 0);
     return *this;
   }
   Args& f(float v) {
@@ -125,6 +211,92 @@ float float_field(rt::Runtime& rt, rt::Handle h, const char* name) {
   uint32_t bits = o.fields.at(f->slot);
   std::memcpy(&v, &bits, 4);
   return v;
+}
+
+int64_t get_native_ptr(rt::Runtime& rt, rt::Handle h, const char* cls = "Landroid/graphics/Bitmap;") {
+  rt::Object& o = rt.nonnull(h, cls);
+  rt::Field* f = o.klass->declared_field("mNativePtr", "J");
+  uint64_t low = o.fields.at(f->slot);
+  uint64_t high = o.fields.at(f->slot + 1);
+  return int64_t(low | (high << 32));
+}
+
+int32_t get_field_i32(rt::Runtime& rt, rt::Handle h, const char* name) {
+  rt::Object& o = rt.nonnull(h, "o");
+  rt::Field* f = o.klass->declared_field(name, "I");
+  return int32_t(o.fields.at(f->slot));
+}
+
+std::vector<uint8_t> make_dummy_9patch_chunk() {
+  std::vector<uint8_t> chunk(64, 0);
+  chunk[0] = 0;
+  chunk[1] = 2;
+  chunk[2] = 2;
+  chunk[3] = 4;
+  int32_t pad = 4;
+  std::memcpy(&chunk[12], &pad, 4);
+  std::memcpy(&chunk[16], &pad, 4);
+  std::memcpy(&chunk[20], &pad, 4);
+  std::memcpy(&chunk[24], &pad, 4);
+  int32_t x0 = 2, x1 = 8;
+  std::memcpy(&chunk[32], &x0, 4);
+  std::memcpy(&chunk[36], &x1, 4);
+  int32_t y0 = 2, y1 = 8;
+  std::memcpy(&chunk[40], &y0, 4);
+  std::memcpy(&chunk[44], &y1, 4);
+  uint32_t c = 1;
+  for (int i = 0; i < 4; ++i) std::memcpy(&chunk[48 + i * 4], &c, 4);
+  return chunk;
+}
+
+std::vector<uint8_t> make_png_rgba(int width, int height, uint32_t argb_color,
+                                   const std::vector<uint8_t>& nptc = {}) {
+  std::vector<uint8_t> png;
+  const uint8_t sig[] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+  png.insert(png.end(), sig, sig + sizeof(sig));
+
+  auto write_chunk = [&](const char type[4], const uint8_t* data, size_t len) {
+    uint8_t len_bytes[4] = {uint8_t(len >> 24), uint8_t(len >> 16), uint8_t(len >> 8), uint8_t(len)};
+    png.insert(png.end(), len_bytes, len_bytes + 4);
+    size_t type_start = png.size();
+    png.insert(png.end(), type, type + 4);
+    if (len > 0) png.insert(png.end(), data, data + len);
+    uint32_t crc = uint32_t(mz_crc32(0, png.data() + type_start, len + 4));
+    uint8_t crc_bytes[4] = {uint8_t(crc >> 24), uint8_t(crc >> 16), uint8_t(crc >> 8), uint8_t(crc)};
+    png.insert(png.end(), crc_bytes, crc_bytes + 4);
+  };
+
+  uint8_t ihdr[13] = {uint8_t(width >> 24), uint8_t(width >> 16), uint8_t(width >> 8), uint8_t(width),
+                      uint8_t(height >> 24), uint8_t(height >> 16), uint8_t(height >> 8), uint8_t(height),
+                      8, 6, 0, 0, 0};
+  write_chunk("IHDR", ihdr, 13);
+
+  if (!nptc.empty()) {
+    write_chunk("npTc", nptc.data(), nptc.size());
+  }
+
+  std::vector<uint8_t> raw;
+  uint8_t a = uint8_t((argb_color >> 24) & 0xff);
+  uint8_t r = uint8_t((argb_color >> 16) & 0xff);
+  uint8_t g = uint8_t((argb_color >> 8) & 0xff);
+  uint8_t b = uint8_t(argb_color & 0xff);
+  for (int y = 0; y < height; ++y) {
+    raw.push_back(0);  // None filter
+    for (int x = 0; x < width; ++x) {
+      raw.push_back(r);
+      raw.push_back(g);
+      raw.push_back(b);
+      raw.push_back(a);
+    }
+  }
+
+  mz_ulong comp_len = mz_compressBound(mz_ulong(raw.size()));
+  std::vector<uint8_t> comp(comp_len);
+  mz_compress(comp.data(), &comp_len, raw.data(), mz_ulong(raw.size()));
+  write_chunk("IDAT", comp.data(), comp_len);
+  write_chunk("IEND", nullptr, 0);
+
+  return png;
 }
 
 }  // namespace
@@ -486,4 +658,134 @@ TEST(graphics_matrix_follows_skmatrix) {
   int64_t copy = int64_t(call(rt, ex, "nCreate", "(J)J", Args().j(m)));
   CHECK_EQ(call(rt, mx, "nEquals", "(JJ)Z", Args().j(m).j(copy)), uint64_t(1));
   CHECK_EQ(call(rt, mx, "nEquals", "(JJ)Z", Args().j(m).j(inv)), uint64_t(0));
+}
+
+TEST(graphics_nine_patch_natives) {
+  Vm vm;
+  rt::Runtime& rt = *vm.rt;
+  const char* np = "Landroid/graphics/NinePatch;";
+
+  // isNinePatchChunk with null returns false
+  CHECK_EQ(call(rt, np, "isNinePatchChunk", "([B)Z", Args().h(rt::kNull)), uint64_t(0));
+
+  // isNinePatchChunk with short invalid array returns false
+  rt::Handle bad_arr = rt.new_array("[B", 10);
+  CHECK_EQ(call(rt, np, "isNinePatchChunk", "([B)Z", Args().h(bad_arr)), uint64_t(0));
+
+  // isNinePatchChunk with valid chunk returns true
+  auto chunk_data = make_dummy_9patch_chunk();
+  rt::Handle good_arr = rt.new_array("[B", uint32_t(chunk_data.size()));
+  std::memcpy(rt.array(good_arr, "byte[]").data.data(), chunk_data.data(), chunk_data.size());
+  CHECK_EQ(call(rt, np, "isNinePatchChunk", "([B)Z", Args().h(good_arr)), uint64_t(1));
+
+  // validateNinePatchChunk with null throws
+  CHECK_EQ(thrown(rt, [&] { call(rt, np, "validateNinePatchChunk", "([B)J", Args().h(rt::kNull)); }),
+           std::string("java.lang.IllegalArgumentException"));
+
+  // validateNinePatchChunk with bad array throws
+  CHECK_EQ(thrown(rt, [&] { call(rt, np, "validateNinePatchChunk", "([B)J", Args().h(bad_arr)); }),
+           std::string("java.lang.IllegalArgumentException"));
+
+  // validateNinePatchChunk with valid chunk returns handle (tag 0x110C)
+  uint64_t h = call(rt, np, "validateNinePatchChunk", "([B)J", Args().h(good_arr));
+  CHECK_EQ(uint16_t(h >> 48), uint16_t(0x110C));
+
+  // nativeFinalize cleans up handle
+  call(rt, np, "nativeFinalize", "(J)V", Args().j(int64_t(h)));
+}
+
+TEST(graphics_bitmap_natives) {
+  Vm vm;
+  rt::Runtime& rt = *vm.rt;
+  const char* bm = "Landroid/graphics/Bitmap;";
+
+  // nativeCreate: 4x4 ARGB_8888 bitmap
+  rt::Handle bm_obj = rt::Handle(call(rt, bm, "nativeCreate", "([IIIIIIZJ)Landroid/graphics/Bitmap;",
+                                      Args().h(rt::kNull).i(0).i(4).i(4).i(4).i(5).z(true).j(0)));
+  CHECK(bm_obj != rt::kNull);
+  int64_t ptr = get_native_ptr(rt, bm_obj);
+  CHECK_EQ(uint16_t(uint64_t(ptr) >> 48), uint16_t(0x110B));
+
+  // Property queries
+  CHECK_EQ(call(rt, bm, "nativeRowBytes", "(J)I", Args().j(ptr)), uint64_t(16));
+  CHECK_EQ(call(rt, bm, "nativeConfig", "(J)I", Args().j(ptr)), uint64_t(5));
+  CHECK_EQ(call(rt, bm, "nativeHasAlpha", "(J)Z", Args().j(ptr)), uint64_t(1));
+  CHECK_EQ(call(rt, bm, "nativeIsPremultiplied", "(J)Z", Args().j(ptr)), uint64_t(1));
+  CHECK_EQ(call(rt, bm, "nativeGetAllocationByteCount", "(J)I", Args().j(ptr)), uint64_t(64));
+
+  // Pixel read/write
+  CHECK_EQ(call(rt, bm, "nativeGetPixel", "(JII)I", Args().j(ptr).i(1).i(2)), uint64_t(0));
+  call(rt, bm, "nativeSetPixel", "(JIII)V", Args().j(ptr).i(1).i(2).i(int32_t(0xFF112233)));
+  CHECK_EQ(uint32_t(call(rt, bm, "nativeGetPixel", "(JII)I", Args().j(ptr).i(1).i(2))), uint32_t(0xFF112233));
+
+  // Out of bounds checks
+  CHECK_EQ(thrown(rt, [&] { call(rt, bm, "nativeGetPixel", "(JII)I", Args().j(ptr).i(10).i(2)); }),
+           std::string("java.lang.IllegalArgumentException"));
+  CHECK_EQ(thrown(rt, [&] { call(rt, bm, "nativeSetPixel", "(JIII)V", Args().j(ptr).i(1).i(20).i(0)); }),
+           std::string("java.lang.IllegalArgumentException"));
+
+  // Erase with color
+  call(rt, bm, "nativeErase", "(JI)V", Args().j(ptr).i(int32_t(0xFFAABBCC)));
+  CHECK_EQ(uint32_t(call(rt, bm, "nativeGetPixel", "(JII)I", Args().j(ptr).i(0).i(0))), uint32_t(0xFFAABBCC));
+  CHECK_EQ(uint32_t(call(rt, bm, "nativeGetPixel", "(JII)I", Args().j(ptr).i(3).i(3))), uint32_t(0xFFAABBCC));
+
+  // Copy and sameAs
+  rt::Handle copy_obj = rt::Handle(call(rt, bm, "nativeCopy", "(JIZ)Landroid/graphics/Bitmap;",
+                                        Args().j(ptr).i(5).z(true)));
+  int64_t copy_ptr = get_native_ptr(rt, copy_obj);
+  CHECK_EQ(call(rt, bm, "nativeSameAs", "(JJ)Z", Args().j(ptr).j(copy_ptr)), uint64_t(1));
+
+  call(rt, bm, "nativeSetPixel", "(JIII)V", Args().j(copy_ptr).i(0).i(0).i(0));
+  CHECK_EQ(call(rt, bm, "nativeSameAs", "(JJ)Z", Args().j(ptr).j(copy_ptr)), uint64_t(0));
+
+  // nativeGetNativeFinalizer returns non-zero
+  CHECK(call(rt, bm, "nativeGetNativeFinalizer", "()J") != 0);
+
+  // Recycle
+  call(rt, bm, "nativeRecycle", "(J)V", Args().j(ptr));
+  call(rt, bm, "nativeRecycle", "(J)V", Args().j(copy_ptr));
+}
+
+TEST(graphics_image_decoder_png_and_ninepatch) {
+  Vm vm;
+  rt::Runtime& rt = *vm.rt;
+  const char* id = "Landroid/graphics/ImageDecoder;";
+  const char* bm = "Landroid/graphics/Bitmap;";
+
+  auto patch = make_dummy_9patch_chunk();
+  auto png = make_png_rgba(4, 4, 0xFF4488CC, patch);
+
+  rt::Handle png_arr = rt.new_array("[B", uint32_t(png.size()));
+  std::memcpy(rt.array(png_arr, "byte[]").data.data(), png.data(), png.size());
+
+  // nCreate([BIIZLandroid/graphics/ImageDecoder$Source;)
+  rt::Handle dec_obj = rt::Handle(call(rt, id, "nCreate", "([BIIZLandroid/graphics/ImageDecoder$Source;)Landroid/graphics/ImageDecoder;",
+                                       Args().h(png_arr).i(0).i(int32_t(png.size())).z(false).h(rt::kNull)));
+  CHECK(dec_obj != rt::kNull);
+  int64_t dec_ptr = get_native_ptr(rt, dec_obj, "Landroid/graphics/ImageDecoder;");
+  CHECK_EQ(uint16_t(uint64_t(dec_ptr) >> 48), uint16_t(0x110D));
+
+  // Size query
+  rt::Handle size_obj = rt::Handle(call(rt, id, "nGetSampledSize", "(JI)Landroid/util/Size;", Args().j(dec_ptr).i(1)));
+  CHECK_EQ(get_field_i32(rt, size_obj, "mWidth"), 4);
+  CHECK_EQ(get_field_i32(rt, size_obj, "mHeight"), 4);
+
+  // Decode to Bitmap
+  rt::Handle bm_obj = rt::Handle(call(rt, id, "nDecodeBitmap",
+                                      "(JLandroid/graphics/ImageDecoder;IILandroid/graphics/Rect;IIJJ)Landroid/graphics/Bitmap;",
+                                      Args().j(dec_ptr).h(dec_obj).i(4).i(4).h(rt::kNull).i(0).i(0).j(0).j(0)));
+  CHECK(bm_obj != rt::kNull);
+  int64_t bm_ptr = get_native_ptr(rt, bm_obj, "Landroid/graphics/Bitmap;");
+  CHECK_EQ(uint32_t(call(rt, bm, "nativeGetPixel", "(JII)I", Args().j(bm_ptr).i(1).i(1))), uint32_t(0xFF4488CC));
+
+  // Verify 9-patch chunk was attached to Bitmap
+  rt::Object& bm_o = rt.nonnull(bm_obj, "Bitmap");
+  rt::Field* f_chunk = bm_o.klass->declared_field("mNinePatchChunk", "[B");
+  CHECK(f_chunk != nullptr);
+  rt::Handle chunk_h = bm_o.fields.at(f_chunk->slot);
+  CHECK(chunk_h != rt::kNull);
+  CHECK_EQ(rt.array(chunk_h, "byte[]").length, uint32_t(patch.size()));
+
+  // Close decoder
+  call(rt, id, "nClose", "(J)V", Args().j(dec_ptr));
 }

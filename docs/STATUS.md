@@ -42,23 +42,23 @@ le nombre de fichiers.
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
 | G2    | Vraie libcore d'AOSP (Android 17)                           | 92 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 55 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J2 faits, J3 et J4 en cours (l'`onCreate` d'une vraie activité va jusqu'à `setContentView`) |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 58 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J2 faits, J3 et J4 en cours (sous-système d'images opérationnel, `onCreate` d'une vraie activité) |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
-| **Total** | **Android natif sur Windows**                          | **≈ 42 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
+| **Total** | **Android natif sur Windows**                          | **≈ 43 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
 
 ```
 G0 ██████████ 100 %
 G1 ██████████ 100 %
 G2 █████████░  92 %
-G3 █████▌░░░░  55 %
+G3 █████▋░░░░  58 %
 G4 ░░░░░░░░░░   0 %
 G5 ░░░░░░░░░░   0 %
    ───────────────
-   ████▏░░░░░ ≈ 42 % vers « Android natif sur Windows »
+   ████▎░░░░░ ≈ 43 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 36 suites de tests et 128 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 36 suites de tests et 131 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.
@@ -206,17 +206,17 @@ Ce qui passe déjà, avec le vrai code d'Android 17 :
   est créée, ses interpolateurs d'animation (`Path.approximate`) aussi, et la mise en page du
   décor est gonflée (`Toolbar` et ses `ImageView`, avec `Matrix`).
 
-**Blocage actuel** : le décodage des images. Le fond 9-patch de l'`ActionBarContextView` du décor
-passe par `ImageDecoder.nCreate` (PNG avec son chunk `npTc`), puis par les natives de `Bitmap`.
+- **Sous-système d'images opérationnel** :
+  - Décodeur PNG (miniz zlib, unfiltering Paeth/Sub/Up/Average, conversion ARGB_8888) ;
+  - Parsing et injection des chunks 9-patch AOSP (`npTc`, optical insets `npLb`, outlines `npOl`) ;
+  - Natives Java d'`android.graphics.NinePatch` (`isNinePatchChunk`, `validateNinePatchChunk`, `nativeFinalize`) ;
+  - Natives Java d'`android.graphics.Bitmap` (`nativeCreate`, `nativeGetPixel`, `nativeSetPixel`, `nativeRowBytes`, `nativeErase`, `nativeCopy`, `nativeSameAs`, cycle de vie et allocation) ;
+  - Natives Java d'`android.graphics.ImageDecoder` (`nCreate` sur assets décompressés d'APK, flux et mémoire, `nDecodeBitmap`, `nGetSampledSize`).
 
 **Suite prévue, dans l'ordre** :
-1. décodeur PNG (zlib par miniz, filtres, entrelacement, palettes, profondeurs), chunk 9-patch,
-   natives `ImageDecoder`, `Bitmap` et `NinePatch` ;
-2. les natives suivantes que le chemin demande, chacune vérifiée contre le jar ;
-3. `onStart`, `onPostCreate` et `onResume`, jusqu'à ce que le test `launch` passe : il clôt J4 ;
-4. J5 : démarrage par `handleBindApplication` … `handleResumeActivity`, fenêtre logique. Un
-   pilote de `Looper` à horloge virtuelle (`looper_driver.cpp`) a été poussé par une autre session
-   et reste à relire et à tester.
+1. Poursuite du cycle de vie J4 : `onStart`, `onPostCreate` et `onResume`, jusqu'à ce que le test `launch` passe ;
+2. J5 : démarrage par `handleBindApplication` … `handleResumeActivity`, fenêtre logique. Un
+   pilote de `Looper` à horloge virtuelle (`looper_driver.cpp`) a été préparé et reste à brancher.
 
 **À savoir pour la suite** :
 - la trace `--trace-services` ne liste que les appels du framework aux objets `Binder` de

@@ -54,6 +54,10 @@ void path_contents(rt::Runtime& rt, int64_t handle, std::vector<uint8_t>& verbs,
                    std::vector<float>& weights);
 // Matrix (framework_matrix.cpp), registered by register_framework_graphics.
 void register_framework_matrix(rt::NativeRegistry& r);
+// Images: ImageDecoder, Bitmap, NinePatch (framework_images.cpp), registered by register_framework_graphics.
+void register_framework_images(rt::NativeRegistry& r);
+// Returns pointer to open AssetStream bytes, or nullptr.
+const std::vector<uint8_t>* asset_data(int64_t handle);
 // Typeface and fonts (framework_fonts.cpp), registered by register_framework_graphics.
 void register_framework_fonts(rt::NativeRegistry& r);
 // Minikin's locale list ids (LocaleListCache): 0 is the empty list, then ids

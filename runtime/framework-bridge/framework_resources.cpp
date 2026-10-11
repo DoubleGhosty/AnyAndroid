@@ -868,4 +868,9 @@ void register_resource_natives(rt::NativeRegistry& r) {
   register_xml_block(r);
 }
 
+const std::vector<uint8_t>* asset_data(int64_t handle) {
+  auto s = tables().assets.get(handle);
+  return s ? &s->data : nullptr;
+}
+
 }  // namespace aa::bridge

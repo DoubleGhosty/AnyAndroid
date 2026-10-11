@@ -6,6 +6,7 @@ add_library(aa_bridge STATIC
   framework_appmem.cpp
   framework_fonts.cpp
   framework_graphics.cpp
+  framework_images.cpp
   framework_matrix.cpp
   framework_paint.cpp
   framework_path.cpp

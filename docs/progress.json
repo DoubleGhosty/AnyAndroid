@@ -2,11 +2,11 @@
   "metadata": {
     "project": "AnyAndroid for Windows",
     "version": "0.1.0",
-    "generated_at": "2026-10-11T21:06:46.827175+00:00",
+    "generated_at": "2026-10-11T22:49:14.422175+00:00",
     "target": "Android natif sur Windows (sans VM ni hyperviseur)"
   },
   "summary": {
-    "overall_percent": 42.0,
+    "overall_percent": 43.0,
     "bridge_percent": 87.5,
     "libcore_percent": 47.2,
     "dalvik_percent": 99.6,
@@ -50,10 +50,10 @@
       {
         "id": "G3",
         "name": "Vrai `framework.jar` et une application AOSP affichée",
-        "description": "**En cours** : plan de l'ADR-006, J0-J2 faits, J3 et J4 en cours (l'`onCreate` d'une vraie activité va jusqu'à `setContentView`)",
-        "progress": 55,
+        "description": "**En cours** : plan de l'ADR-006, J0-J2 faits, J3 et J4 en cours (sous-système d'images opérationnel, `onCreate` d'une vraie activité)",
+        "progress": 58,
         "weight": 35,
-        "status": "**En cours** : plan de l'ADR-006, J0-J2 faits, J3 et J4 en cours (l'`onCreate` d'une vraie activité va jusqu'à `setContentView`)",
+        "status": "**En cours** : plan de l'ADR-006, J0-J2 faits, J3 et J4 en cours (sous-système d'images opérationnel, `onCreate` d'une vraie activité)",
         "adr": "ADR-006",
         "state": "in_progress"
       },
@@ -78,7 +78,7 @@
         "state": "pending"
       }
     ],
-    "overall_percent": 42.0
+    "overall_percent": 43.0
   },
   "bridge": {
     "classes": {
@@ -11088,7 +11088,7 @@
     "total_suites": 36,
     "passed_suites": 33,
     "optional_suites": 3,
-    "unit_tests": 128,
+    "unit_tests": 131,
     "e2e_suites": 32,
     "fuzz_suites": 3,
     "percent_core": 100.0,
