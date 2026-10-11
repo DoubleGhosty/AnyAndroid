@@ -246,3 +246,138 @@ TEST(reflection_from_bytecode) {
     CHECK_EQ(result, std::string("21|10|caché|raté|2.5|3|CNFE"));
   }
 }
+
+namespace {
+
+// InvocationTargetException built by bytecode, as libraries do when they
+// wrap a failure themselves (not only by Method.invoke).
+const char* kIteTest = R"SMALI(
+.class public LIteTest;
+.super Ljava/lang/Object;
+
+.method public static make()Ljava/lang/reflect/InvocationTargetException;
+    .registers 3
+    new-instance v0, Ljava/lang/IllegalStateException;
+    const-string v1, "cible"
+    invoke-direct {v0, v1}, Ljava/lang/IllegalStateException;-><init>(Ljava/lang/String;)V
+    new-instance v1, Ljava/lang/reflect/InvocationTargetException;
+    invoke-direct {v1, v0}, Ljava/lang/reflect/InvocationTargetException;-><init>(Ljava/lang/Throwable;)V
+    return-object v1
+.end method
+
+# "<message of the target> <getTargetException() == getCause()> <message>"
+.method static describe(Ljava/lang/reflect/InvocationTargetException;)Ljava/lang/String;
+    .registers 5
+    new-instance v0, Ljava/lang/StringBuilder;
+    invoke-direct {v0}, Ljava/lang/StringBuilder;-><init>()V
+    invoke-virtual {p0}, Ljava/lang/reflect/InvocationTargetException;->getCause()Ljava/lang/Throwable;
+    move-result-object v1
+    if-eqz v1, :no_cause
+    invoke-virtual {v1}, Ljava/lang/Throwable;->getMessage()Ljava/lang/String;
+    move-result-object v1
+    :no_cause
+    invoke-virtual {v0, v1}, Ljava/lang/StringBuilder;->append(Ljava/lang/Object;)Ljava/lang/StringBuilder;
+    const-string v1, " "
+    invoke-virtual {v0, v1}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+    invoke-virtual {p0}, Ljava/lang/reflect/InvocationTargetException;->getTargetException()Ljava/lang/Throwable;
+    move-result-object v1
+    invoke-virtual {p0}, Ljava/lang/reflect/InvocationTargetException;->getCause()Ljava/lang/Throwable;
+    move-result-object v2
+    const/4 v3, 0x0
+    if-ne v1, v2, :differ
+    const/4 v3, 0x1
+    :differ
+    invoke-virtual {v0, v3}, Ljava/lang/StringBuilder;->append(Z)Ljava/lang/StringBuilder;
+    const-string v1, " "
+    invoke-virtual {v0, v1}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+    invoke-virtual {p0}, Ljava/lang/Throwable;->getMessage()Ljava/lang/String;
+    move-result-object v1
+    invoke-virtual {v0, v1}, Ljava/lang/StringBuilder;->append(Ljava/lang/Object;)Ljava/lang/StringBuilder;
+    invoke-virtual {v0}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+    move-result-object v0
+    return-object v0
+.end method
+
+.method public static run()Ljava/lang/String;
+    .registers 5
+    new-instance v0, Ljava/lang/StringBuilder;
+    invoke-direct {v0}, Ljava/lang/StringBuilder;-><init>()V
+    const-string v4, "|"
+
+    invoke-static {}, LIteTest;->make()Ljava/lang/reflect/InvocationTargetException;
+    move-result-object v1
+    invoke-static {v1}, LIteTest;->describe(Ljava/lang/reflect/InvocationTargetException;)Ljava/lang/String;
+    move-result-object v2
+    invoke-virtual {v0, v2}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+    invoke-virtual {v0, v4}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    # new InvocationTargetException(t, null) is legal: no message.
+    invoke-virtual {v1}, Ljava/lang/reflect/InvocationTargetException;->getTargetException()Ljava/lang/Throwable;
+    move-result-object v2
+    new-instance v1, Ljava/lang/reflect/InvocationTargetException;
+    const/4 v3, 0x0
+    invoke-direct {v1, v2, v3}, Ljava/lang/reflect/InvocationTargetException;-><init>(Ljava/lang/Throwable;Ljava/lang/String;)V
+    invoke-static {v1}, LIteTest;->describe(Ljava/lang/reflect/InvocationTargetException;)Ljava/lang/String;
+    move-result-object v3
+    invoke-virtual {v0, v3}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+    invoke-virtual {v0, v4}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    new-instance v1, Ljava/lang/reflect/InvocationTargetException;
+    const-string v3, "enveloppe"
+    invoke-direct {v1, v2, v3}, Ljava/lang/reflect/InvocationTargetException;-><init>(Ljava/lang/Throwable;Ljava/lang/String;)V
+    invoke-static {v1}, LIteTest;->describe(Ljava/lang/reflect/InvocationTargetException;)Ljava/lang/String;
+    move-result-object v3
+    invoke-virtual {v0, v3}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+    invoke-virtual {v0, v4}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    # The protected constructor, from a subclass.
+    new-instance v1, LIteSub;
+    invoke-direct {v1}, LIteSub;-><init>()V
+    invoke-static {v1}, LIteTest;->describe(Ljava/lang/reflect/InvocationTargetException;)Ljava/lang/String;
+    move-result-object v3
+    invoke-virtual {v0, v3}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    invoke-virtual {v0}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+    move-result-object v0
+    return-object v0
+.end method
+)SMALI";
+
+const char* kIteSub = R"SMALI(
+.class public LIteSub;
+.super Ljava/lang/reflect/InvocationTargetException;
+
+.method public constructor <init>()V
+    .registers 1
+    invoke-direct {p0}, Ljava/lang/reflect/InvocationTargetException;-><init>()V
+    return-void
+.end method
+)SMALI";
+
+}  // namespace
+
+TEST(invocation_target_exception_from_bytecode) {
+  std::vector<tool::ClassDef> classes;
+  for (const char* s : {kIteTest, kIteSub}) classes.push_back(tool::assemble_smali(s, "ite.smali"));
+  auto dex = dex::DexFile::open(tool::write_dex(classes), "ite.dex");
+  bridge::NullHost host;
+  auto runtime = std::make_unique<rt::Runtime>();
+  bridge::install(runtime->registry(), host);
+  runtime->add_dex(dex.get());
+  {
+    rt::Runtime::Scope scope(*runtime, "test");
+    std::string result;
+    try {
+      result = runtime->string_utf8(rt::Handle(runtime->call_static("LIteTest;", "run", "()Ljava/lang/String;")));
+    } catch (const rt::JavaThrow& t) {
+      result = runtime->describe_throwable(t.exception);
+    }
+    CHECK_EQ(result, std::string("cible true null|cible true null|cible true enveloppe|null true null"));
+    // The Throwable state is that of any exception: stack trace of the
+    // creating method (constructors omitted), then the target as its cause.
+    auto ite = rt::Handle(runtime->call_static("LIteTest;", "make", "()Ljava/lang/reflect/InvocationTargetException;"));
+    std::string trace = runtime->describe_throwable(ite);
+    CHECK(trace.starts_with("java.lang.reflect.InvocationTargetException\n    at IteTest.make(pc "));
+    CHECK(trace.find("Caused by: java.lang.IllegalStateException: cible\n") != std::string::npos);
+  }
+}
