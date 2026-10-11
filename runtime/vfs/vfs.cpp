@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstring>
 #include <mutex>
+#include <stdexcept>
 
 #include "common/bytes.h"
 #include "common/file_io.h"
@@ -203,6 +204,61 @@ class AliasMount final : public Mount {
 
   ImageMount image_;
   std::map<std::string, std::string> files_;
+};
+
+// --- Memory mount ----------------------------------------------------------------------
+
+// A flat, read-only directory of files held in memory.
+class MemoryMount final : public Mount {
+ public:
+  using Files = std::map<std::string, std::shared_ptr<const std::vector<uint8_t>>>;
+  explicit MemoryMount(Files files) : files_(std::move(files)) {}
+
+  std::optional<VStat> lstat(const std::string& rel) override {
+    if (rel == "/") return root_stat();
+    auto it = files_.find(rel.substr(1));
+    if (it == files_.end()) return std::nullopt;
+    return file_stat(it);
+  }
+  std::string readlink(const std::string& rel) override { throw VfsError{lstat(rel) ? kEINVAL : kENOENT, rel}; }
+  std::vector<std::string> list(const std::string& rel) override {
+    if (rel != "/") throw VfsError{lstat(rel) ? kENOTDIR : kENOENT, rel};
+    std::vector<std::string> names;
+    for (const auto& [name, data] : files_) names.push_back(name);
+    return names;
+  }
+  std::unique_ptr<OpenFile> open(const std::string& rel, int32_t flags, uint32_t) override {
+    if (rel == "/") {
+      if ((flags & kO_ACCMODE) != kO_RDONLY) throw VfsError{kEISDIR, rel};
+      return std::make_unique<ImageFile>(std::make_shared<const std::vector<uint8_t>>(), root_stat());
+    }
+    auto it = files_.find(rel.substr(1));
+    if (it == files_.end()) throw VfsError{(flags & kO_CREAT) ? kEROFS : kENOENT, rel};
+    if ((flags & kO_ACCMODE) != kO_RDONLY || (flags & kO_TRUNC)) throw VfsError{kEROFS, rel};
+    if (flags & kO_DIRECTORY) throw VfsError{kENOTDIR, rel};
+    return std::make_unique<ImageFile>(it->second, file_stat(it));
+  }
+
+ private:
+  static VStat root_stat() {
+    VStat v;
+    v.type = NodeType::kDirectory;
+    v.mode = kIfDir | 0755;
+    v.nlink = 2;
+    v.mtime = kImageTime;
+    v.ino = 1;
+    return v;
+  }
+  VStat file_stat(Files::const_iterator it) const {
+    VStat v;
+    v.mode = kIfReg | 0644;
+    v.size = it->second->size();
+    v.mtime = kImageTime;
+    v.ino = 2 + uint64_t(std::distance(files_.begin(), it));
+    return v;
+  }
+
+  Files files_;
 };
 
 // --- APEX mount ------------------------------------------------------------------------
@@ -670,6 +726,15 @@ std::unique_ptr<Mount> alias_mount(std::shared_ptr<image::FileSystem> fs, const 
   }
   return std::make_unique<AliasMount>(std::move(fs), std::move(present));
 }
+std::unique_ptr<Mount> memory_mount(std::map<std::string, std::shared_ptr<const std::vector<uint8_t>>> files) {
+  for (auto it = files.begin(); it != files.end();) {
+    const std::string& name = it->first;
+    bool bad = name.empty() || name == "." || name == ".." || name.size() > kMaxName ||
+               name.find_first_of(std::string_view("/\0", 2)) != std::string::npos || !it->second;
+    it = bad ? files.erase(it) : std::next(it);
+  }
+  return std::make_unique<MemoryMount>(std::move(files));
+}
 std::unique_ptr<Mount> host_mount(const std::filesystem::path& dir, bool read_only) {
   return std::make_unique<HostMount>(dir, read_only);
 }
@@ -965,6 +1030,22 @@ void Vfs::write_file(std::string_view path, std::span<const uint8_t> data) {
 // --- Standard Android layout ---------------------------------------------------------------------
 
 std::shared_ptr<Vfs> make_android_vfs(const LayoutOptions& o) {
+  // The package name comes from the application's manifest and becomes a path
+  // component of the mounts below: only Java package names are accepted.
+  bool valid = !o.package.empty() && o.package.size() <= kMaxName;
+  bool segment_start = true;
+  for (char c : o.package) {
+    bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+    bool digit = c >= '0' && c <= '9';
+    if (c == '.') {
+      valid &= !segment_start;
+      segment_start = true;
+    } else {
+      valid &= letter || (digit && !segment_start);
+      segment_start = false;
+    }
+  }
+  if (!valid || segment_start) throw std::invalid_argument("nom de paquet invalide : " + o.package.substr(0, 64));
   auto vfs = std::make_shared<Vfs>();
   if (o.system) {
     std::shared_ptr<image::FileSystem> fs(o.system, const_cast<image::FileSystem*>(&o.system->fs()));
@@ -1000,6 +1081,7 @@ std::shared_ptr<Vfs> make_android_vfs(const LayoutOptions& o) {
     vfs->mount("/", host_mount(o.data_root / "root", true));
   }
   std::filesystem::path app = o.data_root / encode_host_name(o.package);
+  if (!o.app_files.empty()) vfs->mount("/data/app/" + o.package, memory_mount(o.app_files));
   vfs->mount("/data/data/" + o.package, host_mount(app / "data", false));
   vfs->mount("/data/user/0/" + o.package, host_mount(app / "data", false));
   vfs->mount("/data/user_de/0/" + o.package, host_mount(app / "data_de", false));

@@ -70,6 +70,7 @@ void Runtime::collect_garbage() {
     }
   }
   for (const auto& cache : dex_caches_) {
+    mark(cache->loader);
     for (Handle h : cache->strings) mark(h);
   }
   for (const auto& [s, h] : interned_) mark(h);

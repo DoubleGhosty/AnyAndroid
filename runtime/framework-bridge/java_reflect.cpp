@@ -278,12 +278,37 @@ void register_class_reflection(rt::NativeRegistry& r) {
     if (initialize) rt.ensure_initialized(cls);
     return rt.class_mirror(cls);
   };
-  c.static_method("forName", "(Ljava/lang/String;)Ljava/lang/Class;", [for_name](Runtime& rt, NativeArgs& a) -> uint64_t {
-    return for_name(rt, a.str(0), true);
-  });
+  // Libcore mode: Class.forName of libcore (classForName through the loader;
+  // a LinkageError behind the ClassNotFoundException is thrown as is).
+  auto for_name_with_loader = [](Runtime& rt, Handle name, bool initialize, Handle loader) -> Handle {
+    if (name == kNull) rt.throw_npe("name == null");
+    rt::Class* cls = nullptr;
+    try {
+      cls = class_for_name(rt, name, loader);
+    } catch (const rt::JavaThrow& t) {
+      rt::GlobalRef keep(rt, t.exception);
+      Handle cause = Handle(rt.call_virtual(t.exception, "getCause", "()Ljava/lang/Throwable;"));
+      if (cause != kNull && rt.instance_of(cause, rt.find_class("Ljava/lang/LinkageError;"))) throw rt::JavaThrow{cause};
+      throw;
+    }
+    if (initialize) rt.ensure_initialized(cls);
+    return rt.class_mirror(cls);
+  };
+  c.static_method("forName", "(Ljava/lang/String;)Ljava/lang/Class;",
+                  [for_name, for_name_with_loader](Runtime& rt, NativeArgs& a) -> uint64_t {
+                    if (!rt.libcore_mode()) return for_name(rt, a.str(0), true);
+                    // The caller's loader: frame n-1 is forName itself.
+                    const auto& frames = rt.current_thread()->frames;
+                    Handle loader =
+                        frames.size() >= 2 ? class_loader_of(rt, frames[frames.size() - 2].method->owner, true) : kNull;
+                    return for_name_with_loader(rt, a.h(0), true, loader);
+                  });
   c.static_method("forName", "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;",
-                  [for_name](Runtime& rt, NativeArgs& a) -> uint64_t { return for_name(rt, a.str(0), a.z(1)); },
-                  S::kPartial, "chargeur de classes ignoré (un seul espace de classes)");
+                  [for_name, for_name_with_loader](Runtime& rt, NativeArgs& a) -> uint64_t {
+                    if (!rt.libcore_mode()) return for_name(rt, a.str(0), a.z(1));
+                    return for_name_with_loader(rt, a.h(0), a.z(1), a.h(2));
+                  },
+                  S::kPartial, "un seul espace de classes (ADR-006 J2) ; sans libcore, le chargeur est ignoré");
 
   auto methods = [](bool public_only, bool inherited) {
     return [public_only, inherited](Runtime& rt, NativeArgs& a) -> uint64_t {
@@ -391,17 +416,7 @@ void register_class_reflection(rt::NativeRegistry& r) {
     return a.h(1);
   });
   c.method("getClassLoader", "()Ljava/lang/ClassLoader;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    rt::Class* cls = class_arg(rt, a.h(0), "Class");
-    if (cls->primitive) return kNull;
-    if (cls->framework || cls->boot) {
-      // Android (unlike the RI) answers BootClassLoader.getInstance() for the
-      // boot class path; without libcore there is no such loader.
-      if (rt.libcore_mode() && rt.lookup_class("Ljava/lang/BootClassLoader;")) {
-        return rt.call_static("Ljava/lang/BootClassLoader;", "getInstance", "()Ljava/lang/BootClassLoader;");
-      }
-      return kNull;
-    }
-    return rt.call_static("Ljava/lang/ClassLoader;", "getSystemClassLoader", "()Ljava/lang/ClassLoader;");
+    return class_loader_of(rt, class_arg(rt, a.h(0), "Class"), false);
   });
   c.unsupported("getAnnotation", "(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;", kNoAnnotations);
   c.unsupported("getAnnotations", "()[Ljava/lang/annotation/Annotation;", kNoAnnotations);
@@ -749,20 +764,10 @@ void register_art_reflection_natives(rt::NativeRegistry& r) {
          });
   r.bind(cls, "classForName", "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     if (a.h(0) == kNull) rt.throw_npe("name == null");
-    std::string n = rt.string_utf8(a.h(0));
-    if (n.empty() || n.find('/') != std::string::npos || (n.find(';') != std::string::npos && n[0] != '[')) {
-      rt.throw_new("Ljava/lang/ClassNotFoundException;", n);
-    }
-    rt::Class* c = nullptr;
-    try {
-      c = rt.lookup_class(java_to_class_descriptor(n));
-    } catch (const rt::JavaThrow&) {
-      c = nullptr;
-    }
-    if (!c || c->primitive) rt.throw_new("Ljava/lang/ClassNotFoundException;", n);
+    rt::Class* c = class_for_name(rt, a.h(0), a.h(2));
     if (a.z(1)) rt.ensure_initialized(c);
     return rt.class_mirror(c);
-  }, S::kPartial, "un seul espace de classes : le chargeur est ignoré");
+  }, S::kPartial, "un seul espace de classes (ADR-006 J2)");
 
   // Class.extData (dalvik.system.ClassExt), allocated on first use as in ART.
   r.bind(cls, "ensureExtDataPresent0", "()Ldalvik/system/ClassExt;", [](Runtime& rt, NativeArgs& a) -> uint64_t {

@@ -33,7 +33,7 @@ le nombre de fichiers.
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
 | G2    | Vraie libcore d'AOSP (Android 17)                           | 92 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 44 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J1 faits (code d'hôte Java, `ServiceManager` local) |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 47 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J2 faits (code d'hôte Java, `ServiceManager` local, vrais chargeurs de classes) |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
 | **Total** | **Android natif sur Windows**                          | **≈ 38 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
@@ -49,7 +49,7 @@ G5 ░░░░░░░░░░   0 %
    ███▊░░░░░░ ≈ 38 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 34 suites de tests et 113 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 34 suites de tests et 115 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.
@@ -89,6 +89,14 @@ G5 ░░░░░░░░░░   0 %
   `ServiceManagerProxy.getNativeServiceManager` renvoient le gestionnaire de services de l'hôte
   (`aa.host.services.LocalServiceManager`, qui étend `IServiceManager.Stub`) ; le vrai
   `ServiceManager` du framework y enregistre et y retrouve les services, sans `Parcel`.
+- **Vrais chargeurs de classes** (jalon J2) : l'APK est servi en lecture seule sous
+  `/data/app/<paquet>/base.apk`. Les natives `DexFile` (`openDexFileNative`,
+  `defineClassNative`, `getClassNameList`…) font fonctionner les vrais `PathClassLoader` et
+  `DexClassLoader` de libcore. Une classe d'application rapporte le chargeur qui l'a définie
+  (`getClassLoader`), et `Class.forName` passe par le chargeur demandé. Comme ART, la VM résout
+  directement les chargeurs standard, sans une `ClassNotFoundException` par classe. Il n'y a qu'un
+  seul espace de classes : une classe déjà définie est partagée entre les chargeurs, et l'espace
+  d'amorçage gagne toujours.
 - **Système de fichiers virtuel** ([ADR-005](adr/ADR-005-systeme-de-fichiers-virtuel.md)).
   `/system` et `/apex` sont servis depuis l'image, et `/data` et `/sdcard` sont isolés dans un bac
   à sable. Le processus émulé ne voit ni les fichiers ni le nom d'utilisateur de l'hôte.
@@ -142,7 +150,7 @@ Le plan de G3 est fixé par [ADR-006](adr/ADR-006-demarrage-applications.md) : p
 `system_server`, des services système locaux en Java (javac + D8) appelés sans `Parcel`, et les
 vrais gestionnaires d'`ActivityThread`.
 
-1. **J0-J2** : outillage Java/D8 et DEX d'hôte, `ServiceManager` local, vrais chargeurs de classes.
+1. **J0-J2** (faits) : outillage Java/D8 et DEX d'hôte, `ServiceManager` local, vrais chargeurs de classes.
 2. **J3-J5** : services système v1, puis démarrage d'une application jusqu'à `onResume`, d'abord
    en direct puis par `handleBindApplication` … `handleResumeActivity`.
 3. **J6-J8** : texte, rendu logiciel du vrai framework (`drawSoftware`, moteur 2D choisi par

@@ -175,6 +175,9 @@ struct DexCache {
   const dex::DexFile* dex = nullptr;
   bool boot = false;  // boot class path (libcore, framework)
   bool host = false;  // AnyAndroid's host code (ADR-006), after the boot class path
+  // Class loader that registered this application DEX file (DexFile natives,
+  // ADR-006 J2): the defining loader of its classes. kNull until one does.
+  Handle loader = kNull;
   std::vector<Class*> types;
   std::vector<Field*> fields;
   std::vector<Method*> methods;  // static/direct resolution
@@ -397,6 +400,21 @@ class Runtime {
   // --- Classes -------------------------------------------------------------
   Class* find_class(std::string_view descriptor);    // NoClassDefFoundError if absent
   Class* lookup_class(std::string_view descriptor);  // nullptr if absent
+  // Class already defined, without loading it.
+  Class* loaded_class(std::string_view descriptor) const;
+  // Class of the boot space (VM core, boot class path, host DEX, bridge),
+  // loaded if needed; nullptr when only application DEX files define it.
+  Class* lookup_boot_class(std::string_view descriptor);
+  // Defines (without initialising) a class from an application DEX file, as
+  // DexFile.defineClassNative does. There is one class namespace (ADR-006 J2):
+  // the boot space wins and a class already defined is returned as is.
+  Class* define_class(const dex::DexFile* dex, std::string_view descriptor);
+  // Classes defined by the boot space rather than by application DEX files
+  // (arrays: by their element type).
+  static bool in_boot_space(const Class* cls);
+  // Application DEX files (add_dex), in order, and their caches.
+  std::vector<const dex::DexFile*> app_dex_files() const;
+  DexCache* find_dex_cache(const dex::DexFile* dex);
   void ensure_initialized(Class* cls);
   bool is_assignable(const Class* from, const Class* to) const;
   bool instance_of(Handle h, const Class* to);
@@ -530,6 +548,7 @@ class Runtime {
   };
 
   Class* load_class(std::string_view descriptor);
+  bool defined_in_boot_space(std::string_view descriptor) const;
   Class* define_from_registry(const NativeClassSpec& spec);
   void merge_boot_bytecode(Class* cls);
   Class* define_from_dex(DexCache& cache, uint32_t class_def_idx);

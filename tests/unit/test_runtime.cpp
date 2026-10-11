@@ -645,3 +645,41 @@ TEST(host_classes_answer_neutral_values_for_unimplemented_methods) {
   }
   CHECK_EQ(thrown, std::string("java.lang.AbstractMethodError"));
 }
+
+// ADR-006 J2: one class namespace in which the boot space wins; a class loader
+// defines a class from one given application DEX file.
+TEST(class_loaders_define_from_their_dex_and_the_boot_space_wins) {
+  auto cls = [](const char* name) {
+    std::string s = std::string(".class public ") + name + "\n.super Ljava/lang/Object;\n";
+    return tool::assemble_smali(s, "c.smali");
+  };
+  auto boot = dex::DexFile::open(tool::write_dex({cls("LShared;"), cls("LBootOnly;")}), "boot.dex");
+  auto second = dex::DexFile::open(tool::write_dex({cls("LApp2;")}), "classes2.dex");
+  Vm vm({cls("LShared;"), cls("LApp1;")});
+  vm.rt->add_boot_dex(boot.get());
+  vm.rt->add_dex(second.get());
+  const dex::DexFile* first = vm.dex.get();
+
+  std::vector<const dex::DexFile*> app = vm.rt->app_dex_files();
+  CHECK_EQ(app.size(), size_t(2));
+  CHECK(app[0] == first && app[1] == second.get());
+  // The boot space neither sees nor loads application classes.
+  CHECK(vm.rt->lookup_boot_class("LApp1;") == nullptr);
+  CHECK(vm.rt->lookup_boot_class("[[LApp1;") == nullptr);
+  CHECK(vm.rt->loaded_class("LApp1;") == nullptr);
+  rt::Class* boot_only = vm.rt->lookup_boot_class("LBootOnly;");
+  CHECK(boot_only != nullptr && rt::Runtime::in_boot_space(boot_only));
+  CHECK(vm.rt->lookup_boot_class("[I") != nullptr);
+  // A class is defined from the DEX file asked for, and only from it.
+  CHECK(vm.rt->define_class(second.get(), "LApp1;") == nullptr);
+  rt::Class* app1 = vm.rt->define_class(first, "LApp1;");
+  CHECK(app1 != nullptr && !rt::Runtime::in_boot_space(app1));
+  CHECK(app1->dex_cache == vm.rt->find_dex_cache(first));
+  CHECK(vm.rt->define_class(second.get(), "LApp1;") == app1);  // already defined: shared
+  CHECK(!rt::Runtime::in_boot_space(vm.rt->find_class("[LApp1;")));
+  // An application DEX file cannot replace a class of the boot space.
+  rt::Class* shared = vm.rt->define_class(first, "LShared;");
+  CHECK(shared != nullptr && rt::Runtime::in_boot_space(shared));
+  CHECK(vm.rt->define_class(first, "Lbad") == nullptr);
+  CHECK(vm.rt->find_dex_cache(second.get())->loader == rt::kNull);
+}

@@ -18,6 +18,7 @@
 // The Android tree is assembled from mounts, matched by longest prefix:
 //  - the system image, read-only, as the base layer ("/");
 //  - APEX modules under /apex/<name>, opened on demand from /system/apex;
+//  - the application's APK under /data/app/<package>, read-only, from memory;
 //  - a host directory per application for writable areas (/data, /sdcard),
 //    sandboxed: Linux names are encoded, reparse points refused;
 //  - /dev (null, zero, random, urandom).
@@ -88,6 +89,9 @@ std::unique_ptr<Mount> apex_mount(std::shared_ptr<image::SystemImage> system);
 // Read-only directory whose entries are regular files of an image under other
 // names: `files` maps an entry name to a path in `fs` (missing ones are skipped).
 std::unique_ptr<Mount> alias_mount(std::shared_ptr<image::FileSystem> fs, const std::map<std::string, std::string>& files);
+// Read-only flat directory of files held in memory (`files` maps an entry
+// name to its bytes), such as an application's APK under /data/app/<package>.
+std::unique_ptr<Mount> memory_mount(std::map<std::string, std::shared_ptr<const std::vector<uint8_t>>> files);
 // A host directory (created if needed). Writable unless read_only.
 std::unique_ptr<Mount> host_mount(const std::filesystem::path& dir, bool read_only);
 // /dev: null, zero, random, urandom.
@@ -158,13 +162,15 @@ class Vfs {
 
 // Standard layout of an Android process: base layer (system image or a
 // read-only host directory such as an extracted boot class path), APEX
-// modules, /data/data/<package>, /data/user/0/<package>, /data/local/tmp,
+// modules, /data/app/<package>, /data/data/<package>, /data/user/0/<package>, /data/local/tmp,
 // /sdcard and /dev, the writable areas living under `data_root`.
 struct LayoutOptions {
   std::shared_ptr<image::SystemImage> system;  // optional
   std::filesystem::path base_dir;              // used when no system image
   std::filesystem::path data_root;             // host directory for writable areas
   std::string package = "exec";
+  // Files of /data/app/<package> (base.apk), served read-only from memory.
+  std::map<std::string, std::shared_ptr<const std::vector<uint8_t>>> app_files;
 };
 std::shared_ptr<Vfs> make_android_vfs(const LayoutOptions& options);
 

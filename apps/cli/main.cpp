@@ -483,8 +483,12 @@ int cmd_exec(const Args& a) {
   std::vector<std::unique_ptr<dex::DexFile>> owned;
   std::vector<const dex::DexFile*> dex_files;
   std::string package = "exec";
+  // In libcore mode the file is also served as /data/app/<package>/base.apk,
+  // the class path of the system class loader (ADR-006 J2).
+  std::shared_ptr<const std::vector<uint8_t>> app_bytes;
   try {
     auto bytes = read_file(path_from_utf8(file), 512u << 20);
+    if (a.has("--bootclasspath")) app_bytes = std::make_shared<const std::vector<uint8_t>>(bytes);
     if (bytes.size() >= 4 && bytes[0] == 'd' && bytes[1] == 'e' && bytes[2] == 'x' && bytes[3] == '\n') {
       for (auto& d : dex::DexFile::open_all(std::move(bytes), file)) {
         owned.push_back(std::move(d));
@@ -558,6 +562,7 @@ int cmd_exec(const Args& a) {
     try {
       vfs::LayoutOptions lo;
       lo.package = package;
+      lo.app_files["base.apk"] = app_bytes;
       fs::path bcp_dir = path_from_utf8(a.get("--bootclasspath"));
       if (a.has("--system-image")) {
         image::OpenedImage img = image::open_image(path_from_utf8(a.get("--system-image")));

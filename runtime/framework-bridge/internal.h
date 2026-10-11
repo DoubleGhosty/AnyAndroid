@@ -64,6 +64,18 @@ int64_t map_fd_copy(rt::Runtime& rt, int32_t fd, uint64_t offset, uint64_t lengt
 void register_libcore_nio(rt::NativeRegistry& r);
 void register_libcore_zip(rt::NativeRegistry& r);
 void register_libcore_crypto(rt::NativeRegistry& r);
+void register_libcore_dex(rt::NativeRegistry& r);
+
+// Class loaders (libcore_dex.cpp, ADR-006 J2). The defining loader of a class
+// as Class.getClassLoader() reports it (boot space: BootClassLoader, or null
+// when boot_as_null, as ART's internal view).
+rt::Handle class_loader_of(rt::Runtime& rt, rt::Class* cls, bool boot_as_null);
+// VMClassLoader.findLoadedClass: the class `loader` would answer for a binary
+// name without running Java code, or nullptr.
+rt::Class* find_loaded_class(rt::Runtime& rt, rt::Handle loader, const std::string& name);
+// Class.classForName: through `loader` (null or BootClassLoader: boot space).
+// Throws ClassNotFoundException.
+rt::Class* class_for_name(rt::Runtime& rt, rt::Handle name, rt::Handle loader);
 
 // Helpers of the libcore natives (libcore_natives.cpp).
 rt::Field* find_field(rt::Class* cls, std::string_view name, std::string_view type);

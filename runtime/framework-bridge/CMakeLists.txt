@@ -11,6 +11,7 @@ add_library(aa_bridge STATIC
   java_util.cpp
   libcore_charsets.cpp
   libcore_crypto.cpp
+  libcore_dex.cpp
   libcore_files.cpp
   libcore_natives.cpp
   libcore_nio.cpp

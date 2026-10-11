@@ -649,13 +649,11 @@ void register_vm(rt::NativeRegistry& r) {
   r.bind("Ljava/lang/VMClassLoader;", "findLoadedClass",
          "(Ljava/lang/ClassLoader;Ljava/lang/String;)Ljava/lang/Class;",
          [](Runtime& rt, NativeArgs& a) -> uint64_t {
-           Handle name_h = a.h(1);
-           if (!name_h) return kNull;
-           std::string name = rt.string_utf8(name_h);
-           std::string desc = text::java_to_descriptor(name);
-           rt::Class* c = rt.lookup_class(desc);
+           if (a.h(1) == kNull) return kNull;
+           rt::Class* c = find_loaded_class(rt, a.h(0), rt.string_utf8(a.h(1)));
            return c ? rt.class_mirror(c) : kNull;
-         });
+         },
+         S::kPartial, "un seul espace de classes (ADR-006 J2)");
   r.bind(vm, "addressOf", "(Ljava/lang/Object;)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     return uint64_t(native_address_of(rt, a.h(1)));
   }, S::kPartial, "adresse de la mémoire native émulée (native_memory.h)");
@@ -672,10 +670,20 @@ void register_vm(rt::NativeRegistry& r) {
   };
   r.bind(st, "getStackClass1", "()Ljava/lang/Class;", stack_class(2));
   r.bind(st, "getStackClass2", "()Ljava/lang/Class;", stack_class(3));
-  r.bind(st, "getCallingClassLoader", "()Ljava/lang/ClassLoader;", [](Runtime&, NativeArgs&) -> uint64_t { return kNull; },
-         S::kPartial, "chargeur d'amorçage (null) : un seul espace de classes");
-  r.bind(st, "getClosestUserClassLoader", "()Ljava/lang/ClassLoader;",
-         [](Runtime&, NativeArgs&) -> uint64_t { return kNull; }, S::kPartial);
+  // Loaders as ART sees them internally: null for the boot space.
+  r.bind(st, "getCallingClassLoader", "()Ljava/lang/ClassLoader;", [](Runtime& rt, NativeArgs&) -> uint64_t {
+    const auto& frames = rt.current_thread()->frames;
+    if (frames.size() < 3) return kNull;
+    return class_loader_of(rt, frames[frames.size() - 3].method->owner, true);
+  });
+  r.bind(st, "getClosestUserClassLoader", "()Ljava/lang/ClassLoader;", [](Runtime& rt, NativeArgs&) -> uint64_t {
+    const auto& frames = rt.current_thread()->frames;
+    for (size_t i = frames.size(); i-- > 0;) {
+      rt::Class* owner = frames[i].method->owner;
+      if (!rt::Runtime::in_boot_space(owner)) return class_loader_of(rt, owner, true);
+    }
+    return kNull;
+  });
 }
 
 // --- libcore.io.Linux, android.system.OsConstants -----------------------------------------------
@@ -1443,6 +1451,7 @@ void register_libcore_natives(rt::NativeRegistry& r) {
   register_libcore_nio(r);
   register_libcore_zip(r);
   register_libcore_crypto(r);
+  register_libcore_dex(r);
   register_framework_natives(r);
 }
 

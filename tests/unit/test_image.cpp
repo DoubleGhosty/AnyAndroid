@@ -1381,6 +1381,45 @@ TEST(vfs_sandboxed_data_areas) {
   std::filesystem::remove_all(root);
 }
 
+// ADR-006 J2: the application's APK under /data/app/<package>, read-only; the
+// package name (from an untrusted manifest) is a path component, so it must be
+// a Java package name.
+TEST(vfs_serves_the_apk_and_checks_the_package_name) {
+  auto root = fresh_dir("vfs-app");
+  vfs::LayoutOptions lo;
+  lo.data_root = root;
+  lo.package = "com.example.app";
+  lo.app_files["base.apk"] = std::make_shared<const std::vector<uint8_t>>(bytes("PK-apk"));
+  lo.app_files["../evil"] = std::make_shared<const std::vector<uint8_t>>(bytes("x"));  // dropped
+  auto v = vfs::make_android_vfs(lo);
+  CHECK_EQ(str(v->read_file("/data/app/com.example.app/base.apk")), std::string("PK-apk"));
+  vfs::VStat st = v->stat("/data/app/com.example.app/base.apk");
+  CHECK(st.type == vfs::NodeType::kFile);
+  CHECK_EQ(st.size, uint64_t(6));
+  CHECK(v->stat("/data/app/com.example.app").type == vfs::NodeType::kDirectory);
+  auto names = v->list("/data/app/com.example.app");
+  CHECK_EQ(names.size(), size_t(1));
+  CHECK_EQ(vfs_errno([&] { v->open("/data/app/com.example.app/base.apk", vfs::kO_RDWR, 0); }), vfs::kEROFS);
+  CHECK_EQ(vfs_errno([&] { v->write_file("/data/app/com.example.app/other.apk", bytes("x")); }), vfs::kEROFS);
+  CHECK_EQ(vfs_errno([&] { v->read_file("/data/app/com.example.app/absent.apk"); }), vfs::kENOENT);
+
+  for (std::string bad : {"", "../../system", "a/b", "a..b", ".a", "a.", "1a", "a.1b", "a b", "a\\b"}) {
+    lo.package = bad;
+    bool refused = false;
+    try {
+      vfs::make_android_vfs(lo);
+    } catch (const std::invalid_argument&) {
+      refused = true;
+    }
+    CHECK(refused);
+  }
+  for (std::string good : {"exec", "com.example.app", "a_b.C1"}) {
+    lo.package = good;
+    CHECK(vfs::make_android_vfs(lo) != nullptr);
+  }
+  std::filesystem::remove_all(root);
+}
+
 TEST(vfs_serves_the_system_image_and_apex_modules) {
   // APEX module with an EROFS payload.
   ErofsBuilder payload;

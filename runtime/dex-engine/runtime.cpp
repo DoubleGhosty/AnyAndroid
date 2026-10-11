@@ -193,6 +193,66 @@ Class* Runtime::lookup_class(std::string_view descriptor) {
   return load_class(descriptor);
 }
 
+Class* Runtime::loaded_class(std::string_view descriptor) const {
+  auto it = classes_.find(std::string(descriptor));
+  return it == classes_.end() ? nullptr : it->second.get();
+}
+
+bool Runtime::in_boot_space(const Class* cls) {
+  while (cls->component) cls = cls->component;
+  return !cls->dex_cache || cls->dex_cache->boot;
+}
+
+bool Runtime::defined_in_boot_space(std::string_view descriptor) const {
+  if (registry_.find(descriptor)) return true;
+  for (const auto& cache : dex_caches_) {
+    if (!cache->boot) break;
+    if (cache->dex->find_class_def(descriptor)) return true;
+  }
+  return false;
+}
+
+Class* Runtime::lookup_boot_class(std::string_view descriptor) {
+  size_t dims = descriptor.find_first_not_of('[');
+  if (dims == std::string_view::npos) return nullptr;
+  std::string_view base = descriptor.substr(dims);
+  if (base.size() > 1) {
+    if (Class* c = loaded_class(base)) {
+      if (!in_boot_space(c)) return nullptr;
+    } else if (!defined_in_boot_space(base)) {
+      return nullptr;
+    }
+  }
+  return lookup_class(descriptor);
+}
+
+Class* Runtime::define_class(const dex::DexFile* dex, std::string_view descriptor) {
+  if (Class* c = loaded_class(descriptor)) return c;
+  if (descriptor.size() < 3 || descriptor.front() != 'L' || descriptor.back() != ';') return nullptr;
+  if (defined_in_boot_space(descriptor)) return lookup_class(descriptor);
+  DexCache* cache = find_dex_cache(dex);
+  if (!cache || cache->boot) return nullptr;
+  auto idx = dex->find_class_def(descriptor);
+  if (!idx) return nullptr;
+  if (loading_.count(std::string(descriptor))) throw_new("Ljava/lang/ClassCircularityError;", java(descriptor));
+  return define_from_dex(*cache, *idx);
+}
+
+std::vector<const dex::DexFile*> Runtime::app_dex_files() const {
+  std::vector<const dex::DexFile*> out;
+  for (const auto& cache : dex_caches_) {
+    if (!cache->boot) out.push_back(cache->dex);
+  }
+  return out;
+}
+
+DexCache* Runtime::find_dex_cache(const dex::DexFile* dex) {
+  for (auto& cache : dex_caches_) {
+    if (cache->dex == dex) return cache.get();
+  }
+  return nullptr;
+}
+
 Class* Runtime::find_class(std::string_view descriptor) {
   if (Class* c = lookup_class(descriptor)) return c;
   std::string d(descriptor);
