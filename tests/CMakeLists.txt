@@ -117,6 +117,10 @@ if(AA_LIBCORE_DIR)
       aa_e2e(host-services CODE 0 GOLDEN host-services.txt
         ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
              --trace-services ${S}/basic-activity.apk aa.host.ServicesProbe com.anyandroid.samples.basic)
+      # J4: direct application launch through the real framework, lifecycle up to onResume.
+      aa_e2e(launch CODE 0 GOLDEN launch.txt
+        ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
+             ${S}/basic-activity.apk aa.host.Launcher com.anyandroid.samples.basic)
     endif()
     # G3 entry point: utility classes of the real framework.jar.
     aa_e2e(framework-demo CODE 0 GOLDEN framework-demo.txt
