@@ -466,6 +466,36 @@ std::vector<EncodedValue> DexFile::encoded_array(uint32_t offset) const {
   return out;
 }
 
+std::vector<Annotation> DexFile::class_annotations(const ClassDef& def) const {
+  std::vector<Annotation> out;
+  if (def.annotations_off == 0) return out;
+  auto data = std::span<const uint8_t>(data_);
+  ByteReader dir(data, def.annotations_off);
+  uint32_t set_off = dir.u32();
+  if (set_off == 0) return out;
+  ByteReader set(data, set_off);
+  uint32_t size = set.u32();
+  if (size > set.remaining() / 4) throw_format("annotation_set_item hors limites");
+  for (uint32_t i = 0; i < size; ++i) {
+    ByteReader item(data, set.u32());
+    Annotation a;
+    a.visibility = item.u8();
+    a.type_idx = item.uleb128();
+    if (a.type_idx >= header_.type_ids_size) throw_format("annotation : type invalide");
+    uint32_t count = item.uleb128();
+    if (count > item.remaining()) throw_format("annotation : taille invalide");
+    for (uint32_t k = 0; k < count; ++k) {
+      uint32_t name = item.uleb128();
+      if (name >= header_.string_ids_size) throw_format("annotation : nom invalide");
+      EncodedValue v;
+      read_encoded_value(item, v, 0);
+      a.elements.emplace_back(name, std::move(v));
+    }
+    out.push_back(std::move(a));
+  }
+  return out;
+}
+
 std::string DexFile::pretty_field(uint32_t idx) const {
   const FieldId& f = field(idx);
   return type_descriptor(f.class_idx) + "->" + string(f.name_idx) + ":" + type_descriptor(f.type_idx);

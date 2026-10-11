@@ -4,6 +4,7 @@ add_library(aa_common STATIC
   hash.cpp
   json.cpp
   log.cpp
-  text.cpp)
+  text.cpp
+  unicode.cpp)
 target_include_directories(aa_common PUBLIC ${AA_RUNTIME_DIR})
 target_link_libraries(aa_common PUBLIC aa_compile_options)

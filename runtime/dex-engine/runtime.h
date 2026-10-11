@@ -4,11 +4,13 @@
 #include <condition_variable>
 #include <csetjmp>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -184,6 +186,17 @@ struct DexCache {
   std::vector<Handle> strings;
 };
 
+// System annotations of a class (dalvik.annotation.*), read from its DEX file.
+struct ClassAnnotations {
+  bool inner = false;      // InnerClass: a member, local or anonymous class
+  bool anonymous = false;  // InnerClass with a null name
+  std::string inner_name;  // simple name of a member or local class
+  int32_t inner_flags = 0;
+  std::string enclosing_class;               // EnclosingClass (descriptor), or empty
+  std::optional<uint32_t> enclosing_method;  // EnclosingMethod: method index in the class's DEX
+  std::vector<std::string> member_classes;   // MemberClasses (descriptors)
+};
+
 struct Class {
   enum class State { kLinked, kInitializing, kInitialized, kFailed };
 
@@ -216,6 +229,14 @@ struct Class {
   Method* declared_method(std::string_view name, std::string_view sig) const;
   Field* declared_field(std::string_view name, std::string_view type) const;
   std::string java_name() const;
+  // System annotations (read once; none for array, primitive and VM classes).
+  const ClassAnnotations& annotations();
+  // Class.getSimpleName(): "" for an anonymous class, the InnerClass name for
+  // a member or local class, "T[]" for arrays.
+  std::string simple_name();
+
+ private:
+  std::unique_ptr<ClassAnnotations> annotations_;
 };
 
 // A Java exception in flight, propagated with C++ exceptions.
@@ -312,6 +333,10 @@ struct RuntimeOptions {
   size_t gc_min_objects = 200'000;
   size_t gc_min_bytes = 32u << 20;
   bool verbose_gc = false;
+  // ADR-006: when set, each call from the framework into an object of the
+  // host DEX (a local system service) is written here, one line per call
+  // ("service : PackageService.getApplicationInfo"), for reference traces.
+  std::FILE* service_trace = nullptr;
 };
 
 // Arguments of a native method, as raw 32-bit registers.
@@ -558,6 +583,7 @@ class Runtime {
   void compute_ref_slots(Class* cls);
   void initialize_statics(Class* cls);
   void note_native_call(Method& m);
+  void trace_service_call(VmThread* t, Method* m, Handle self, bool implemented);
   Handle store(std::unique_ptr<Object> obj, size_t bytes);
 
   uint64_t execute(Method* method, const uint32_t* args, uint32_t nargs);

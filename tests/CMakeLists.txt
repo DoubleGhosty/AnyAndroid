@@ -11,10 +11,11 @@ add_executable(aa_unit_tests
   unit/test_libcore.cpp
   unit/test_native_memory.cpp
   unit/test_zip.cpp
+  unit/test_regex.cpp
   unit/test_resources.cpp
   unit/test_res_compiler.cpp)
 target_include_directories(aa_unit_tests PRIVATE unit)
-target_link_libraries(aa_unit_tests PRIVATE aa_tooling aa_bridge aa_dex aa_apk aa_image aa_vfs)
+target_link_libraries(aa_unit_tests PRIVATE aa_tooling aa_bridge aa_dex aa_apk aa_image aa_vfs aa_regex)
 add_test(NAME unit COMMAND aa_unit_tests)
 # Every HandleTable has its own kind tag (framework-bridge/handles.h).
 add_test(NAME handle-kinds COMMAND ${CMAKE_COMMAND} -DROOT=${PROJECT_SOURCE_DIR}
@@ -111,6 +112,11 @@ if(AA_LIBCORE_DIR)
       aa_e2e(host-probe CODE 0 GOLDEN host-probe.txt
         ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
              ${S}/hello-dex.apk aa.host.Probe)
+      # J3: local system services ("package" through the framework's PackageParser), and the
+      # trace of the framework's calls to them.
+      aa_e2e(host-services CODE 0 GOLDEN host-services.txt
+        ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
+             --trace-services ${S}/basic-activity.apk aa.host.ServicesProbe com.anyandroid.samples.basic)
     endif()
     # G3 entry point: utility classes of the real framework.jar.
     aa_e2e(framework-demo CODE 0 GOLDEN framework-demo.txt

@@ -9,6 +9,7 @@
 
 #include "common/log.h"
 #include "common/text.h"
+#include "common/unicode.h"
 #include "dex-engine/jlang.h"
 #include "dex-engine/runtime.h"
 
@@ -61,19 +62,9 @@ int32_t java_string_hash(std::u16string_view s) {
   return int32_t(h);
 }
 
-char16_t java_to_upper(char16_t c) {
-  if (c >= u'a' && c <= u'z') return char16_t(c - 32);
-  if (c >= 0xE0 && c <= 0xFE && c != 0xF7) return char16_t(c - 32);
-  if (c == 0xFF) return 0x178;
-  return c;
-}
+char16_t java_to_upper(char16_t c) { return char16_t(unicode::to_upper(c)); }
 
-char16_t java_to_lower(char16_t c) {
-  if (c >= u'A' && c <= u'Z') return char16_t(c + 32);
-  if (c >= 0xC0 && c <= 0xDE && c != 0xD7) return char16_t(c + 32);
-  if (c == 0x178) return 0xFF;
-  return c;
-}
+char16_t java_to_lower(char16_t c) { return char16_t(unicode::to_lower(c)); }
 
 namespace {
 
@@ -508,11 +499,7 @@ void register_class(NativeRegistry& r) {
       .method("getSimpleName", "()Ljava/lang/String;",
               [](Runtime& rt, NativeArgs& a) -> uint64_t {
                 Class* c = rt.mirror_class(a.h(0));
-                std::string n = c ? c->java_name() : "?";
-                size_t p = n.find_last_of(".$");
-                n = p == std::string::npos ? n : n.substr(p + 1);
-                if (!n.empty() && std::isdigit(static_cast<unsigned char>(n[0]))) n.clear();  // anonymous
-                return rt.new_string_utf8(n);
+                return rt.new_string_utf8(c ? c->simple_name() : "?");
               })
       .method("toString", "()Ljava/lang/String;",
               [](Runtime& rt, NativeArgs& a) -> uint64_t {

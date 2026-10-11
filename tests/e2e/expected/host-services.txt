@@ -1,0 +1,11 @@
+service : LocalServiceManager.addService
+service : LocalServiceManager.addService
+service : LocalServiceManager.checkService2
+service : LocalServiceManager.checkService2
+service : PermissionService.getSplitPermissions
+application : com.anyandroid.samples.basic, uid 10000, cible 34, processus com.anyandroid.samples.basic
+  code /data/app/com.anyandroid.samples.basic/base.apk, données /data/user/0/com.anyandroid.samples.basic
+lanceur : com.anyandroid.samples.basic.MainActivity
+activité : com.anyandroid.samples.basic.MainActivity, exportée true, application com.anyandroid.samples.basic
+service : PackageService.getInstallerPackageName (non implémentée)
+inconnus : null, uid -1, installeur null

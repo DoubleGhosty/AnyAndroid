@@ -33,7 +33,7 @@ le nombre de fichiers.
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
 | G2    | Vraie libcore d'AOSP (Android 17)                           | 92 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 47 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J2 faits (code d'hôte Java, `ServiceManager` local, vrais chargeurs de classes) |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 50 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J2 faits, J3 commencé (services `package` et `permissionmgr`) |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
 | **Total** | **Android natif sur Windows**                          | **≈ 38 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
@@ -49,7 +49,7 @@ G5 ░░░░░░░░░░   0 %
    ███▊░░░░░░ ≈ 38 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 34 suites de tests et 115 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 35 suites de tests et 121 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.
@@ -97,6 +97,22 @@ G5 ░░░░░░░░░░   0 %
   directement les chargeurs standard, sans une `ClassNotFoundException` par classe. Il n'y a qu'un
   seul espace de classes : une classe déjà définie est partagée entre les chargeurs, et l'espace
   d'amorçage gagne toujours.
+- **Services système locaux** (jalon J3, en cours). Le service `package` s'appuie sur le vrai
+  `PackageParser` d'Android 17, qui analyse l'APK servi par le VFS. Il fournit `ApplicationInfo`,
+  `PackageInfo`, `ActivityInfo` et la résolution des intents (activité de lancement). Le service
+  `permissionmgr` est aussi en place. `exec --trace-services` écrit chaque appel du framework à
+  un service ; une méthode non implémentée y apparaît, renvoie une valeur neutre et ne bloque
+  pas l'exécution (test `host-services`).
+- **Expressions régulières** (`runtime/regex`). C'est un moteur compatible ICU, celui
+  qu'utilise le `java.util.regex` d'Android : classes avec `&&` et `--`, propriétés
+  `\p{…}`, groupes nommés, assertions avant et arrière, quantificateurs possessifs, régions,
+  `hitEnd` et `requireEnd`. Il a été validé contre `java.util.regex` sur plus de 200 cas, et
+  borne les pas et la pile de retour, puisque les motifs viennent de code non fiable.
+- **Annotations système des DEX** : `getEnclosingClass`, `getDeclaringClass`, `getSimpleName`,
+  `isAnonymousClass` et `getDeclaredClasses` sont lus dans les annotations `InnerClass`,
+  `EnclosingClass`, `EnclosingMethod` et `MemberClasses`. La casse Unicode
+  (`Character.toUpperCase`…) vient des tables du système, et plus de la locale « C » de la
+  bibliothèque C, qui ne convertissait que l'ASCII.
 - **Système de fichiers virtuel** ([ADR-005](adr/ADR-005-systeme-de-fichiers-virtuel.md)).
   `/system` et `/apex` sont servis depuis l'image, et `/data` et `/sdcard` sont isolés dans un bac
   à sable. Le processus émulé ne voit ni les fichiers ni le nom d'utilisateur de l'hôte.

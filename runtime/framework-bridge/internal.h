@@ -65,6 +65,7 @@ void register_libcore_nio(rt::NativeRegistry& r);
 void register_libcore_zip(rt::NativeRegistry& r);
 void register_libcore_crypto(rt::NativeRegistry& r);
 void register_libcore_dex(rt::NativeRegistry& r);
+void register_libcore_regex(rt::NativeRegistry& r);
 
 // Class loaders (libcore_dex.cpp, ADR-006 J2). The defining loader of a class
 // as Class.getClassLoader() reports it (boot space: BootClassLoader, or null

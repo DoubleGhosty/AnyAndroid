@@ -250,6 +250,17 @@ rt::Field* find_field(rt::Class* c, const std::string& name, bool public_only, b
   return nullptr;
 }
 
+// Mirror of a class named by a DEX annotation, or null when it cannot be loaded.
+Handle mirror_or_null(Runtime& rt, const std::string& descriptor) {
+  rt::Class* c = nullptr;
+  try {
+    c = rt.lookup_class(descriptor);
+  } catch (const rt::JavaThrow&) {
+    c = nullptr;
+  }
+  return c ? rt.class_mirror(c) : kNull;
+}
+
 std::string java_to_class_descriptor(const std::string& name) {
   if (!name.empty() && name[0] == '[') {
     std::string d = name;
@@ -421,8 +432,23 @@ void register_class_reflection(rt::NativeRegistry& r) {
   c.unsupported("getAnnotation", "(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;", kNoAnnotations);
   c.unsupported("getAnnotations", "()[Ljava/lang/annotation/Annotation;", kNoAnnotations);
   c.unsupported("isAnnotationPresent", "(Ljava/lang/Class;)Z", kNoAnnotations);
-  c.unsupported("getEnclosingClass", "()Ljava/lang/Class;", "attributs InnerClass/EnclosingClass non lus");
-  c.unsupported("getDeclaringClass", "()Ljava/lang/Class;", "attributs InnerClass/EnclosingClass non lus");
+  // From the system annotations of the DEX (as ART's annotations::GetEnclosingClass,
+  // GetDeclaringClass): a local or anonymous class is enclosed by its method's class.
+  c.method("getEnclosingClass", "()Ljava/lang/Class;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Class* cls = class_arg(rt, a.h(0), "Class");
+    const rt::ClassAnnotations& an = cls->annotations();
+    if (!an.enclosing_class.empty()) return mirror_or_null(rt, an.enclosing_class);
+    if (an.enclosing_method) {
+      const dex::DexFile& dex = *cls->dex_cache->dex;
+      return mirror_or_null(rt, dex.type_descriptor(dex.method(*an.enclosing_method).class_idx));
+    }
+    return kNull;
+  });
+  c.method("getDeclaringClass", "()Ljava/lang/Class;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    const rt::ClassAnnotations& an = class_arg(rt, a.h(0), "Class")->annotations();
+    if (an.anonymous || an.enclosing_class.empty()) return kNull;
+    return mirror_or_null(rt, an.enclosing_class);
+  });
 
   auto loader = r.define("Ljava/lang/ClassLoader;", "Ljava/lang/Object;", {}, 0x1, S::kPartial,
                          "un seul chargeur (classes de l'application) ; pas de chargement dynamique de DEX");
@@ -703,10 +729,8 @@ void register_art_reflection_natives(rt::NativeRegistry& r) {
     return rt.intern(text::utf8_to_utf16(class_arg(rt, a.h(0), "Class")->java_name()));
   });
   r.bind(cls, "getSimpleNameNative", "()Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    std::string n = class_arg(rt, a.h(0), "Class")->java_name();
-    size_t cut = n.find_last_of(".$");
-    return rt.new_string_utf8(cut == std::string::npos ? n : n.substr(cut + 1));
-  }, S::kPartial, "dérivé du nom binaire (attributs InnerClass non lus)");
+    return rt.new_string_utf8(class_arg(rt, a.h(0), "Class")->simple_name());
+  });
   r.bind(cls, "getInterfacesInternal", "()[Ljava/lang/Class;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     rt::Class* c = class_arg(rt, a.h(0), "Class");
     if (c->interfaces.empty()) return kNull;  // ART returns null when there are none
@@ -784,15 +808,46 @@ void register_art_reflection_natives(rt::NativeRegistry& r) {
     return ext;
   });
 
-  // Annotation-backed metadata: DEX annotations are not read yet; these
-  // answers describe a class without annotations and are logged as stubs.
+  // Annotation-backed metadata. The system annotations that place a class
+  // (InnerClass, EnclosingClass, EnclosingMethod, MemberClasses) are read
+  // below; the other annotations are not yet, and these answers describe a
+  // class without them (logged as stubs).
   const char* none = "annotations DEX non lues : réponse « aucune »";
   auto null_result = [](Runtime&, NativeArgs&) -> uint64_t { return kNull; };
   auto false_result = [](Runtime&, NativeArgs&) -> uint64_t { return 0; };
+  // EnclosingMethod: the method or constructor a local or anonymous class is in.
+  auto enclosing = [](bool constructor) {
+    return [constructor](Runtime& rt, NativeArgs& a) -> uint64_t {
+      rt::Class* local = class_arg(rt, a.h(0), "Class");
+      const rt::ClassAnnotations& an = local->annotations();
+      if (!an.enclosing_method) return kNull;
+      const dex::DexFile& dex = *local->dex_cache->dex;
+      const dex::MethodId& mid = dex.method(*an.enclosing_method);
+      const std::string& name = dex.string(mid.name_idx);
+      if ((name == "<init>") != constructor || name == "<clinit>") return kNull;
+      rt::Class* owner = rt.lookup_class(dex.type_descriptor(mid.class_idx));
+      rt::Method* m = owner ? owner->declared_method(name, dex.proto_signature(mid.proto_idx)) : nullptr;
+      return m ? make_method_object(rt, m) : kNull;
+    };
+  };
+  r.bind(cls, "getEnclosingMethodNative", "()Ljava/lang/reflect/Method;", enclosing(false));
+  r.bind(cls, "getEnclosingConstructorNative", "()Ljava/lang/reflect/Constructor;", enclosing(true));
+  r.bind(cls, "isAnonymousClass", "()Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_bool(class_arg(rt, a.h(0), "Class")->annotations().anonymous);
+  });
+  r.bind(cls, "getInnerClassFlags", "(I)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    const rt::ClassAnnotations& an = class_arg(rt, a.h(0), "Class")->annotations();
+    return an.inner ? rt::ret_int(an.inner_flags) : a.raw(1);
+  });
+  r.bind(cls, "getDeclaredClasses", "()[Ljava/lang/Class;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::vector<Handle> objs;
+    for (const std::string& d : class_arg(rt, a.h(0), "Class")->annotations().member_classes) {
+      if (rt::Class* c = rt.lookup_class(d)) objs.push_back(rt.class_mirror(c));
+    }
+    return object_array(rt, "[Ljava/lang/Class;", objs);
+  });
   for (const auto& [name, sig] : std::initializer_list<std::pair<const char*, const char*>>{
            {"getSignatureAnnotation", "()[Ljava/lang/String;"},
-           {"getEnclosingMethodNative", "()Ljava/lang/reflect/Method;"},
-           {"getEnclosingConstructorNative", "()Ljava/lang/reflect/Constructor;"},
            {"getNestHostFromAnnotation", "()Ljava/lang/Class;"},
            {"getNestMembersFromAnnotation", "()[Ljava/lang/Class;"},
            {"getPermittedSubclassesFromAnnotation", "()[Ljava/lang/Class;"},
@@ -801,14 +856,10 @@ void register_art_reflection_natives(rt::NativeRegistry& r) {
     r.bind(cls, name, sig, null_result, S::kStub, none);
   }
   for (const auto& [name, sig] : std::initializer_list<std::pair<const char*, const char*>>{
-           {"isAnonymousClass", "()Z"}, {"isRecord0", "()Z"}, {"isValue", "()Z"},
+           {"isRecord0", "()Z"}, {"isValue", "()Z"},
            {"isDeclaredAnnotationPresent", "(Ljava/lang/Class;)Z"}}) {
     r.bind(cls, name, sig, false_result, S::kStub, none);
   }
-  r.bind(cls, "getInnerClassFlags", "(I)I", [](Runtime&, NativeArgs& a) -> uint64_t { return a.raw(1); }, S::kStub, none);
-  r.bind(cls, "getDeclaredClasses", "()[Ljava/lang/Class;", [](Runtime& rt, NativeArgs&) -> uint64_t {
-    return rt.new_array("[Ljava/lang/Class;", 0);
-  }, S::kStub, none);
   r.bind(cls, "getDeclaredAnnotations", "()[Ljava/lang/annotation/Annotation;", [](Runtime& rt, NativeArgs&) -> uint64_t {
     return rt.new_array("[Ljava/lang/annotation/Annotation;", 0);
   }, S::kStub, none);

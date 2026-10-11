@@ -19,6 +19,8 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -64,39 +66,39 @@ Tables& tables() {
 
 bool is_dex(const std::vector<uint8_t>& b) { return b.size() >= 4 && std::memcmp(b.data(), "dex\n", 4) == 0; }
 
-bool same_bytes(const dex::DexFile* d, const std::vector<uint8_t>& b) {
-  auto own = d->bytes();
-  return own.size() == b.size() && std::equal(own.begin(), own.end(), b.begin());
+bool same_bytes(std::span<const uint8_t> a, std::span<const uint8_t> b) {
+  return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin());
 }
 
-// Adds the DEX file(s) of `bytes` to the set, reusing a file the runtime
-// already has with the same bytes: the application's, added at start-up, or
-// one an earlier loader opened.
+// Adds the DEX file(s) of `bytes` to the set, reusing the files the runtime
+// already has for the same bytes: the application's, added at start-up, or
+// those an earlier loader opened. A DEX 041 container holds several files
+// that share its bytes (DexFile::bytes() is the whole container); they are
+// told apart by their section offset.
 void add_dex_bytes(Runtime& rt, DexSet& set, std::vector<uint8_t> bytes, const std::string& location) {
   std::vector<const dex::DexFile*> known = rt.app_dex_files();
+  std::vector<const dex::DexFile*> same;
   for (const dex::DexFile* d : known) {
-    if (same_bytes(d, bytes)) {
-      set.files.push_back(d);
-      return;
-    }
+    bool seen = std::any_of(same.begin(), same.end(), [&](const dex::DexFile* s) {
+      return s->section_offset() == d->section_offset();
+    });
+    if (!seen && same_bytes(d->bytes(), bytes)) same.push_back(d);
+  }
+  if (!same.empty()) {
+    std::sort(same.begin(), same.end(),
+              [](const dex::DexFile* x, const dex::DexFile* y) { return x->section_offset() < y->section_offset(); });
+    set.files.insert(set.files.end(), same.begin(), same.end());
+    return;
   }
   auto parts = dex::DexFile::open_all(std::move(bytes), location);  // FormatError on a malformed file
   Tables& t = tables();
+  std::lock_guard<std::mutex> guard(t.lock);
+  uint64_t size = parts.empty() ? 0 : parts.front()->bytes().size();  // the parts share one buffer
+  if (t.owned_bytes + size > kMaxOpenedBytes) {
+    throw std::runtime_error("[AnyAndroid] quota des fichiers DEX chargés atteint");
+  }
+  t.owned_bytes += size;
   for (auto& part : parts) {
-    auto own = part->bytes();
-    auto same = std::find_if(known.begin(), known.end(), [&](const dex::DexFile* d) {
-      auto b = d->bytes();
-      return b.size() == own.size() && std::equal(b.begin(), b.end(), own.begin());
-    });
-    if (same != known.end()) {
-      set.files.push_back(*same);
-      continue;
-    }
-    std::lock_guard<std::mutex> guard(t.lock);
-    if (t.owned_bytes + own.size() > kMaxOpenedBytes) {
-      throw std::runtime_error("[AnyAndroid] quota des fichiers DEX chargés atteint");
-    }
-    t.owned_bytes += own.size();
     rt.add_dex(part.get());
     set.files.push_back(part.get());
     t.owned.push_back(std::move(part));

@@ -82,6 +82,7 @@ void usage() {
       "      --system-image <system.img> : sert /system et /apex depuis l'image (ADR-005) ;\n"
       "      --data-dir <dossier> : bac à sable des zones inscriptibles (/data, /sdcard) ;\n"
       "      --profile : à la fin, les méthodes les plus coûteuses (instructions, appels) sur stderr.\n"
+      "      --trace-services : écrit sur stdout chaque appel du framework aux services de l'hôte.\n"
       "  libcore natives --bootclasspath <dossier> [--libcore-only] [--all] [--core]\n"
       "      Couverture des méthodes natives de la libcore par AnyAndroid ; --core liste les membres\n"
       "      des classes du cœur de la VM référencés mais absents.\n"
@@ -527,6 +528,7 @@ int cmd_exec(const Args& a) {
   rt::RuntimeOptions ro;
   ro.trace = a.has("--trace");
   ro.profile = a.has("--profile");
+  if (a.has("--trace-services")) ro.service_trace = stdout;
   rt::Runtime runtime(ro);
   for (const auto& d : boot.dex) runtime.add_boot_dex(d.get());
   // AnyAndroid's host code (system services, ADR-006), after the boot class path.
@@ -597,6 +599,14 @@ int cmd_exec(const Args& a) {
   runtime.on_exit_request = [&](int c) { exit_code = c; };
   try {
     bridge::start_libcore(runtime);  // no-op without a boot class path
+    // AnyAndroid's local system services (ADR-006), for the application at
+    // the class path; they need the framework (not with --libcore-only).
+    bool framework = std::find(boot.device_paths.begin(), boot.device_paths.end(),
+                               "/system/framework/framework.jar") != boot.device_paths.end();
+    if (host_dex && framework && runtime.lookup_class("Laa/host/SystemServer;")) {
+      rt::Handle apk_path = runtime.new_string_utf8(bridge::libcore_config().class_path);
+      runtime.call_static("Laa/host/SystemServer;", "start", "(Ljava/lang/String;)V", {apk_path});
+    }
     rt::Class* c = runtime.find_class(desc);
     runtime.ensure_initialized(c);
     rt::Method* main = runtime.find_static(c, "main", "([Ljava/lang/String;)V");

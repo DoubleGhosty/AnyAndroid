@@ -153,6 +153,14 @@ struct EncodedValue {
   std::vector<EncodedValue> array;
 };
 
+// An annotation_item: visibility (0 build, 1 runtime, 2 system), type and
+// elements (name string index, value). Nested annotation values are skipped.
+struct Annotation {
+  uint8_t visibility = 0;
+  uint32_t type_idx = 0;
+  std::vector<std::pair<uint32_t, EncodedValue>> elements;
+};
+
 class DexFile {
  public:
   // Opens a single DEX file (035 to 040, or a DEX 041 container holding one
@@ -193,6 +201,10 @@ class DexFile {
   CodeItem code_item(uint32_t offset) const;
   std::vector<uint32_t> type_list(uint32_t offset) const;
   std::vector<EncodedValue> encoded_array(uint32_t offset) const;
+  // Annotations of the class itself (annotations_directory_item), such as the
+  // system annotations dalvik.annotation.InnerClass, EnclosingClass,
+  // EnclosingMethod and MemberClasses.
+  std::vector<Annotation> class_annotations(const ClassDef& def) const;
 
   // Human-readable references: "Lcom/x/A;->f:I", "Lcom/x/A;->m(I)V".
   std::string pretty_field(uint32_t idx) const;

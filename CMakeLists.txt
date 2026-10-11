@@ -51,6 +51,7 @@ endif()
 set(AA_RUNTIME_DIR ${PROJECT_SOURCE_DIR}/runtime)
 
 add_subdirectory(runtime/common)
+add_subdirectory(runtime/regex)
 add_subdirectory(runtime/apk-inspector)
 add_subdirectory(runtime/image)
 add_subdirectory(runtime/vfs)

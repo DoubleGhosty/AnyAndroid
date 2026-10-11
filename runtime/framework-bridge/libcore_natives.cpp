@@ -19,6 +19,7 @@
 
 #include "common/log.h"
 #include "common/text.h"
+#include "common/unicode.h"
 #include "dex-engine/jlang.h"
 #include "framework-bridge/internal.h"
 #include "framework-bridge/native_memory.h"
@@ -503,15 +504,16 @@ void register_strings(rt::NativeRegistry& r) {
       return rt::ret_bool(bmp(a) && pred(wc(a)) != 0);
     }, S::kPartial, "plan multilingue de base, tables Unicode de la bibliothèque C");
   }
-  r.bind(ch, "toLowerCaseImpl", "(I)I", [wc, bmp](Runtime&, NativeArgs& a) -> uint64_t {
-    return rt::ret_int(bmp(a) ? int32_t(std::towlower(wc(a))) : a.i32(0));
-  }, S::kPartial);
-  r.bind(ch, "toUpperCaseImpl", "(I)I", [wc, bmp](Runtime&, NativeArgs& a) -> uint64_t {
-    return rt::ret_int(bmp(a) ? int32_t(std::towupper(wc(a))) : a.i32(0));
-  }, S::kPartial);
-  r.bind(ch, "toTitleCaseImpl", "(I)I", [wc, bmp](Runtime&, NativeArgs& a) -> uint64_t {
-    return rt::ret_int(bmp(a) ? int32_t(std::towupper(wc(a))) : a.i32(0));
-  }, S::kPartial);
+  // Simple case mapping of the system's Unicode tables (not the C locale's).
+  auto mapped = [](char32_t (*map)(char32_t)) {
+    return [map](Runtime&, NativeArgs& a) -> uint64_t {
+      int32_t c = a.i32(0);
+      return rt::ret_int(c >= 0 && c <= 0x10FFFF ? int32_t(map(char32_t(c))) : c);
+    };
+  };
+  r.bind(ch, "toLowerCaseImpl", "(I)I", mapped(unicode::to_lower), S::kPartial, "correspondance simple (sans règles de locale)");
+  r.bind(ch, "toUpperCaseImpl", "(I)I", mapped(unicode::to_upper), S::kPartial, "correspondance simple (sans règles de locale)");
+  r.bind(ch, "toTitleCaseImpl", "(I)I", mapped(unicode::to_upper), S::kPartial, "majuscule (casse de titre approchée)");
   // libcore.icu.ICU: versions of the ICU data shipped by the i18n module of
   // Android 17 (icudt78l.dat); fixed default locale, never the host's.
   const char* icu = "Llibcore/icu/ICU;";
@@ -1452,6 +1454,7 @@ void register_libcore_natives(rt::NativeRegistry& r) {
   register_libcore_zip(r);
   register_libcore_crypto(r);
   register_libcore_dex(r);
+  register_libcore_regex(r);
   register_framework_natives(r);
 }
 

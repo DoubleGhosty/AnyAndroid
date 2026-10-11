@@ -15,7 +15,8 @@ add_library(aa_bridge STATIC
   libcore_files.cpp
   libcore_natives.cpp
   libcore_nio.cpp
+  libcore_regex.cpp
   libcore_zip.cpp
   native_memory.cpp)
-target_link_libraries(aa_bridge PRIVATE aa_miniz)
+target_link_libraries(aa_bridge PRIVATE aa_miniz aa_regex)
 target_link_libraries(aa_bridge PUBLIC aa_dex aa_vfs aa_res)

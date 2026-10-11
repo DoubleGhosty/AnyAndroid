@@ -64,6 +64,62 @@ std::string Class::java_name() const {
   return java(descriptor);
 }
 
+const ClassAnnotations& Class::annotations() {
+  if (annotations_) return *annotations_;
+  annotations_ = std::make_unique<ClassAnnotations>();
+  if (!dex_cache || is_array() || primitive) return *annotations_;
+  const dex::DexFile& dex = *dex_cache->dex;
+  ClassAnnotations& out = *annotations_;
+  try {
+    for (const dex::Annotation& a : dex.class_annotations(dex.class_def(class_def_idx))) {
+      if (a.visibility != 2) continue;  // system annotations only
+      const std::string& type = dex.type_descriptor(a.type_idx);
+      auto value = [&](std::string_view name) -> const dex::EncodedValue* {
+        for (const auto& [n, v] : a.elements) {
+          if (dex.string(n) == name) return &v;
+        }
+        return nullptr;
+      };
+      using V = dex::EncodedValue;
+      if (type == "Ldalvik/annotation/InnerClass;") {
+        out.inner = true;
+        const V* name = value("name");
+        out.anonymous = !name || name->type == V::kNull;
+        if (name && name->type == V::kString && name->bits < dex.num_strings()) out.inner_name = dex.string(uint32_t(name->bits));
+        const V* flags = value("accessFlags");
+        if (flags && flags->type == V::kInt) out.inner_flags = int32_t(flags->bits);
+      } else if (type == "Ldalvik/annotation/EnclosingClass;") {
+        const V* v = value("value");
+        if (v && v->type == V::kType && v->bits < dex.num_types()) out.enclosing_class = dex.type_descriptor(uint32_t(v->bits));
+      } else if (type == "Ldalvik/annotation/EnclosingMethod;") {
+        const V* v = value("value");
+        if (v && v->type == V::kMethod && v->bits < dex.num_methods()) out.enclosing_method = uint32_t(v->bits);
+      } else if (type == "Ldalvik/annotation/MemberClasses;") {
+        const V* v = value("value");
+        if (v && v->type == V::kArray) {
+          for (const V& e : v->array) {
+            if (e.type == V::kType && e.bits < dex.num_types()) out.member_classes.push_back(dex.type_descriptor(uint32_t(e.bits)));
+          }
+        }
+      }
+    }
+  } catch (const FormatError& e) {
+    log::warn("runtime", "annotations illisibles pour " + java_name() + " : " + e.what());
+    out = ClassAnnotations{};
+  }
+  return out;
+}
+
+std::string Class::simple_name() {
+  if (component) return component->simple_name() + "[]";
+  const ClassAnnotations& a = annotations();
+  if (a.anonymous) return "";
+  if (a.inner) return a.inner_name;
+  std::string n = java_name();
+  size_t dot = n.find_last_of('.');
+  return dot == std::string::npos ? n : n.substr(dot + 1);
+}
+
 // --- NativeArgs --------------------------------------------------------------
 
 uint32_t NativeArgs::raw(uint32_t i) const {
@@ -899,6 +955,9 @@ uint64_t Runtime::invoke(Method* m, const uint32_t* args, uint32_t nargs) {
   if (m->access & dex::kAccSynchronized) {
     sync = std::make_unique<MonitorGuard>(*this, m->is_static() ? class_mirror(m->owner) : args[0]);
   }
+  if (options_.service_trace && !m->is_static() && nargs > 0) {
+    trace_service_call(t, m, args[0], m->code_off != 0 || m->native);
+  }
   if (m->native) {
     note_native_call(*m);
     t->frames.push_back({m, kNativePc, args, nargs});
@@ -929,6 +988,20 @@ uint64_t Runtime::invoke(Method* m, const uint32_t* args, uint32_t nargs) {
     throw_new("Ljava/lang/AbstractMethodError;", m->pretty());
   }
   return execute(m, args, nargs);
+}
+
+void Runtime::trace_service_call(VmThread* t, Method* m, Handle self, bool implemented) {
+  Object* o = object(self);
+  if (!o || !o->klass->host || m->name == "<init>") return;
+  // Only the framework's calls: not the host's own, nor the Binder plumbing
+  // inherited from the boot class path (queryLocalInterface, asBinder...).
+  if (!t->frames.empty() && t->frames.back().method->owner->host) return;
+  if (!m->owner->host && implemented) return;
+  std::string cls = o->klass->java_name();
+  cls = cls.substr(cls.find_last_of('.') + 1);
+  std::string line = "service : " + cls + "." + m->name + (implemented ? "" : " (non implémentée)") + "\n";
+  std::fwrite(line.data(), 1, line.size(), options_.service_trace);
+  std::fflush(options_.service_trace);
 }
 
 void Runtime::note_native_call(Method& m) {
