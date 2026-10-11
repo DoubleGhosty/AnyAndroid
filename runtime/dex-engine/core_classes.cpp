@@ -660,6 +660,10 @@ void register_thread(NativeRegistry& r) {
   // Read and written directly by libcore's ThreadLocal / InheritableThreadLocal.
   t.field("threadLocals", "Ljava/lang/ThreadLocal$ThreadLocalMap;");
   t.field("inheritableThreadLocals", "Ljava/lang/ThreadLocal$ThreadLocalMap;");
+  // Read and written by libcore's get/setContextClassLoader (java.util.logging, JCA providers).
+  t.field("contextClassLoader", "Ljava/lang/ClassLoader;");
+  // Read by libcore's Runtime.addShutdownHook; mirrors ThreadPeer::started.
+  t.field("started", "Z");
   auto init = [](Runtime& rt, NativeArgs& a, Handle target, std::u16string name) -> uint64_t {
     auto p = std::make_unique<ThreadPeer>();
     p->target = target;
@@ -686,6 +690,12 @@ void register_thread(NativeRegistry& r) {
     ThreadPeer& p = thread_peer(rt, a.h(0));
     if (p.started) rt.throw_new("Ljava/lang/IllegalThreadStateException;", "thread déjà démarré");
     p.started = true;
+    for (Class* c = a.self().klass; c; c = c->super) {
+      if (Field* f = c->declared_field("started", "Z"); f && !f->is_static()) {
+        a.self().fields.at(f->slot) = 1;
+        break;
+      }
+    }
     p.vm = rt.start_thread(a.h(0), text::utf16_to_utf8(p.name), p.daemon);
     if (p.pending_interrupt) rt.interrupt(p.vm);
     return 0;
