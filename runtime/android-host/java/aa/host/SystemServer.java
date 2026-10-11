@@ -1,8 +1,12 @@
 package aa.host;
 
+import aa.host.services.AccessibilityService;
+import aa.host.services.DisplayService;
+import aa.host.services.InputMethodService;
 import aa.host.services.PackageService;
 import aa.host.services.PermissionService;
 import aa.host.services.SystemFeatures;
+import aa.host.services.WindowService;
 import android.content.pm.SystemFeaturesCache;
 import android.os.ServiceManager;
 import com.android.internal.os.ApplicationSharedMemory;
@@ -26,5 +30,9 @@ public final class SystemServer {
     PackageService packages = new PackageService(apkPath);
     ServiceManager.addService("package", packages);
     ServiceManager.addService("permissionmgr", new PermissionService(packages));
+    ServiceManager.addService("window", new WindowService());
+    ServiceManager.addService("display", new DisplayService());
+    ServiceManager.addService("input_method", new InputMethodService());
+    ServiceManager.addService("accessibility", new AccessibilityService());
   }
 }
