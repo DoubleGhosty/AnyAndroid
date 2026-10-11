@@ -11,3 +11,7 @@
 # for byte the generator's output; stored with LF so that regenerating it never
 # shows up as a whole-file diff.
 docs/compatibility/api-matrix.md text eol=crlf
+
+# Upstream license of a third-party component, kept byte for byte (CRLF, as in
+# miniz's repository).
+runtime/third_party/miniz/LICENSE -text

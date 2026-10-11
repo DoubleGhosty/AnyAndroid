@@ -1,11 +1,11 @@
-# miniz 3.1.2 (MIT, see LICENSE): raw/zlib deflate and inflate, CRC-32 and
-# Adler-32 behind the java.util.zip natives. Only the zlib-style stream API is
-# built; the ZIP archive API (miniz_zip.c) is left out.
+# miniz 3.1.2 + 12 commits (2948eeb, MIT: see LICENSE and README.md): raw/zlib
+# deflate and inflate, CRC-32 and Adler-32 behind the java.util.zip natives.
+# Only the zlib-style stream API is built; the ZIP archive API is compiled out
+# (MINIZ_NO_ARCHIVE_APIS: miniz_zip.h is still included by miniz.h, but its
+# implementation, miniz_zip.c, is not vendored).
 #
-# The root project only enables C++, so C is enabled here for this target.
-# Third-party code: built without the project's warning flags (and -Werror).
-enable_language(C)
-
+# C is enabled by the root project. Third-party code: built without the
+# project's warning flags (and -Werror).
 add_library(aa_miniz STATIC
   miniz.c
   miniz_tdef.c

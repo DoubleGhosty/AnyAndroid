@@ -9,11 +9,15 @@ add_executable(aa_unit_tests
   unit/test_jni.cpp
   unit/test_image.cpp
   unit/test_libcore.cpp
+  unit/test_zip.cpp
   unit/test_resources.cpp
   unit/test_res_compiler.cpp)
 target_include_directories(aa_unit_tests PRIVATE unit)
 target_link_libraries(aa_unit_tests PRIVATE aa_tooling aa_bridge aa_dex aa_apk aa_image aa_vfs)
 add_test(NAME unit COMMAND aa_unit_tests)
+# Every HandleTable has its own kind tag (framework-bridge/handles.h).
+add_test(NAME handle-kinds COMMAND ${CMAKE_COMMAND} -DROOT=${PROJECT_SOURCE_DIR}
+  -P ${CMAKE_CURRENT_SOURCE_DIR}/check_handle_kinds.cmake)
 
 add_executable(aa_fuzz fuzz/fuzz_apk.cpp)
 target_link_libraries(aa_fuzz PRIVATE aa_apk aa_dex)
@@ -81,6 +85,9 @@ if(AA_LIBCORE_DIR)
     ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --libcore-only ${S}/threads-demo.apk com.anyandroid.samples.threads.Main)
   aa_e2e(libcore-demo CODE 0 GOLDEN libcore-demo.txt
     ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --libcore-only ${S}/libcore-demo.apk com.anyandroid.samples.libcore.Main)
+  # java.util.zip (Deflater, Inflater, GZIP, CRC32, Adler32) on miniz.
+  aa_e2e(zip-demo CODE 0 GOLDEN zip-demo.txt
+    ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --libcore-only ${S}/zip-demo.apk com.anyandroid.samples.zip.Main)
   # Same program, its file system served from the system image (ADR-005).
   set(AA_SYSTEM_IMAGE "" CACHE FILEPATH "system.img d'Android (tests G2 facultatifs)")
   if(AA_SYSTEM_IMAGE)

@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.21)
 project(AnyAndroid
   VERSION 0.1.0
   DESCRIPTION "Runtime de compatibilité Android pour Windows (prototype de recherche)"
-  LANGUAGES CXX)
+  LANGUAGES C CXX)
 
 if(NOT WIN32)
   message(WARNING "AnyAndroid cible Windows : le backend Win32 et la CLI ne seront pas construits.")
