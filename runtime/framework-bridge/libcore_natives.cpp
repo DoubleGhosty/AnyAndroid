@@ -1404,7 +1404,8 @@ uint64_t direct_get(Runtime& rt, NativeArgs& a) {
   DirectBuffer b = direct_buffer(rt, a.h(0));
   int32_t i = a.i32(1);
   constexpr int32_t nb = int32_t(sizeof(T));
-  if (nb == 1 ? (i < 0 || i >= b.limit) : (i < 0 || nb > b.limit - i)) {
+  // 64-bit: `limit` is a field the application can set to anything.
+  if (i < 0 || int64_t(i) + nb > int64_t(b.limit)) {
     std::string msg = "index=" + std::to_string(i) + " out of bounds (limit=" + std::to_string(b.limit);
     if (nb > 1) msg += ", nb=" + std::to_string(nb);
     rt.throw_new("Ljava/lang/IndexOutOfBoundsException;", msg + ")");
@@ -1459,6 +1460,13 @@ void start_libcore(rt::Runtime& rt) {
   // initialisation reaches System again (System.arraycopy), which is only
   // harmless in this order.
   rt.ensure_initialized(rt.find_class("Ljava/lang/System;"));
+  // ART then makes the system class loader the main thread's context class
+  // loader (Runtime::Start); threads created later inherit it.
+  rt::Handle loader = rt.call_static("Ljava/lang/ClassLoader;", "getSystemClassLoader", "()Ljava/lang/ClassLoader;");
+  rt::Object& main_thread = rt.nonnull(rt.current_thread_peer(), "Thread");
+  if (rt::Field* f = rt.find_class("Ljava/lang/Thread;")->declared_field("contextClassLoader", "Ljava/lang/ClassLoader;")) {
+    main_thread.fields.at(f->slot) = loader;
+  }
 }
 
 }  // namespace aa::bridge

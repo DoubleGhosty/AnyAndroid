@@ -285,3 +285,92 @@ TEST(zip_live_streams_are_capped) {
     for (int64_t h : live) vm.end(cls, h);
   }
 }
+
+// zlib's and Deflater.deflate's contract: a SYNC_FLUSH returning less than the
+// room offered has written the whole flush, so everything given so far can be
+// inflated. miniz stops after copying out output left by earlier calls.
+TEST(zip_sync_flush_short_return_is_complete) {
+  ZipVm vm;
+  constexpr int32_t kInput = 100000, kRoom = 512, kOut = 1 << 20;
+  std::string text(kInput, ' ');
+  uint32_t seed = 12345;
+  for (char& c : text) {
+    seed = seed * 1103515245u + 12345u;
+    c = "abcdefgh ijkl\n"[(seed >> 16) % 14];
+  }
+  rt::Handle in = vm.bytes(text);
+  rt::Handle out = vm.rt->new_array("[B", kOut);
+  int64_t h = vm.new_deflater();
+  int32_t size = 0;
+  // One byte at a time, each call deflating until the byte is taken but never
+  // draining the compressor (OpenJDK's DeflaterOutputStream.write pattern):
+  // miniz keeps output pending between calls.
+  // Feeding stops right after a byte that made miniz emit a block larger than
+  // the room offered: the rest of that block is still pending.
+  int32_t fed = 0;
+  bool pending = false;
+  while (fed < kInput && !pending) {
+    for (uint32_t taken = 0; taken == 0;) {
+      CHECK(size + kRoom <= kOut);
+      Step s = vm.deflate(h, in, fed, 1, out, size, kRoom, kNoFlush);
+      taken = s.read;
+      size += int32_t(s.written);
+      pending = taken == 1 && s.written == uint32_t(kRoom);
+    }
+    ++fed;
+  }
+  CHECK(pending);
+  for (int round = 0;; ++round) {
+    CHECK(round < 4096);
+    Step s = vm.deflate(h, in, 0, 0, out, size, kRoom, kSyncFlush);
+    size += int32_t(s.written);
+    if (s.written < uint32_t(kRoom)) break;  // flush complete, per the contract
+  }
+  vm.end(kDeflater, h);
+  int64_t inf = vm.new_inflater();
+  rt::Handle plain = vm.rt->new_array("[B", kInput + 16);
+  Step s = vm.inflate(inf, out, size, plain, kInput + 16);
+  vm.end(kInflater, inf);
+  CHECK(!s.finished);
+  CHECK_EQ(s.written, uint32_t(fed));
+  CHECK(std::memcmp(vm.rt->array(plain, "b").data.data(), text.data(), size_t(fed)) == 0);
+}
+
+// Streams never ended are freed with the Inflater that used them (its Cleaner
+// on Android): opening more than the cap does not run out.
+TEST(zip_unended_streams_are_freed_with_their_owner) {
+  ZipVm vm;
+  rt::Handle gz = vm.bytes(std::string("\x78\x9c\x4b\x4c\x4a\x06\x00\x02\x4d\x01\x27", 11));  // zlib("abc")
+  rt::GlobalRef keep(*vm.rt, gz);
+  rt::Handle out = vm.rt->new_array("[B", 16);
+  rt::GlobalRef keep_out(*vm.rt, out);
+  for (int i = 0; i < 1100; ++i) {
+    int64_t h = vm.new_inflater();
+    rt::Handle owner = vm.rt->alloc(vm.rt->find_class("Ljava/lang/Object;"));
+    Step s = unpack(vm.call(kInflater, "inflateBytesBytes", "(J[BII[BII)J",
+                            {owner, lo(h), hi(h), gz, 0, 11, out, 0, 16}));
+    CHECK(s.finished);
+    CHECK_EQ(s.written, 3u);
+  }
+}
+
+// zlib never updates adler on raw (nowrap) streams: 1 for a Deflater, 0 for
+// an Inflater.
+TEST(zip_nowrap_streams_keep_zlib_adler) {
+  ZipVm vm;
+  int64_t d = int64_t(vm.call(kDeflater, "init", "(IIZ)J", {uint32_t(-1), 0, 1}));
+  rt::Handle in = vm.bytes("abc");
+  rt::Handle out = vm.rt->new_array("[B", 64);
+  Step s = vm.deflate(d, in, 0, 3, out, 0, 64, kFinish);
+  CHECK(s.finished);
+  CHECK_EQ(int32_t(vm.call(kDeflater, "getAdler", "(J)I", {lo(d), hi(d)})), 1);
+  vm.end(kDeflater, d);
+  int64_t i = int64_t(vm.call(kInflater, "init", "(Z)J", {1}));
+  CHECK_EQ(int32_t(vm.call(kInflater, "getAdler", "(J)I", {lo(i), hi(i)})), 0);
+  rt::Handle plain = vm.rt->new_array("[B", 16);
+  Step t = vm.inflate(i, out, int32_t(s.written), plain, 16);
+  CHECK(t.finished);
+  CHECK_EQ(t.written, 3u);
+  CHECK_EQ(int32_t(vm.call(kInflater, "getAdler", "(J)I", {lo(i), hi(i)})), 0);
+  vm.end(kInflater, i);
+}

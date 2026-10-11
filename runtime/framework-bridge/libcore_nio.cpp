@@ -129,8 +129,13 @@ HandleTable<DirStream>& dir_streams() {
 
 int64_t open_dir_stream(Runtime& rt, std::vector<std::string> names, int32_t fd) {
   static std::mutex open_lock;  // keeps the cap exact under concurrent opens
-  std::lock_guard<std::mutex> guard(open_lock);
-  if (dir_streams().live() >= kMaxOpenDirs) throw_unix(rt, vfs::kEMFILE);
+  std::unique_lock<std::mutex> guard(open_lock);
+  if (dir_streams().live() >= kMaxOpenDirs) {
+    // Never hold a host lock while Java code runs (the exception's
+    // constructor): it may yield the GIL to a thread waiting on this lock.
+    guard.unlock();
+    throw_unix(rt, vfs::kEMFILE);
+  }
   auto s = std::make_shared<DirStream>();
   s->names.reserve(names.size() + 2);
   s->names.push_back(".");

@@ -8,6 +8,14 @@
 # FRESH_DIR (the --data-dir of the command) is emptied before the run.
 
 string(REPLACE "|" ";" command "${CMD}")
+# Programs on AOSP's real libcore (FRESH_DIR set) load the framework from the
+# system image: allow them more time, especially under a parallel ctest.
+if(DEFINED FRESH_DIR)
+  set(timeout 300)
+else()
+  set(timeout 60)
+endif()
+
 if(DEFINED FRESH_DIR)
   file(REMOVE_RECURSE "${FRESH_DIR}")
   file(MAKE_DIRECTORY "${FRESH_DIR}")
@@ -19,7 +27,7 @@ execute_process(COMMAND ${command}
   OUTPUT_VARIABLE out
   ERROR_VARIABLE err
   ENCODING UTF8
-  TIMEOUT 60)
+  TIMEOUT ${timeout})
 string(REPLACE "\r\n" "\n" out "${out}")
 
 if(DEFINED ACTUAL)

@@ -65,14 +65,21 @@ G5 ░░░░░░░░░░   0 %
   caractères, `VarHandle`, et **NIO.2 (`sun.nio.fs`, `FileDispatcherImpl`, `FileChannel`) sur VFS**.
   - **`java.util.zip`** (`Deflater`, `Inflater`, flux GZIP, `CRC32`, `Adler32`) sur
     [miniz](../runtime/third_party/miniz/README.md) intégré, avec le comportement de zlib pour les
-    vidages répétés et un nombre plafonné de flux vivants (exemple `zip-demo`).
+    vidages (répétés, ou dans un tampon trop petit) et un nombre plafonné de flux vivants ; les
+    flux jamais fermés sont libérés avec leur `Inflater`/`Deflater` par le ramasse-miettes
+    (exemple `zip-demo`).
   - **`MessageDigest`** (MD5, SHA-1, SHA-224, SHA-256, SHA-384, SHA-512) par le fournisseur
     `AndroidOpenSSL` de conscrypt, dont les natives de condensé sont réécrites (contextes en
     identifiants bornés). Pas de chiffrement ni de TLS.
   - **Mémoire native émulée** : `Unsafe.allocateMemory` et les accès par adresse,
     `libcore.io.Memory`, `ByteBuffer` directs, `Os.mmap` (anonyme, ou copie privée d'un fichier)
     et `FileChannel.map`. Les adresses sont des valeurs étiquetées vérifiées à chaque accès, jamais
-    des pointeurs de l'hôte, dans un budget global de 1 Gio.
+    des pointeurs de l'hôte, dans un budget global de 1 Gio. Limite : les projections
+    (`FileChannel.map`, `Os.mmap`) ne sont libérées que par `munmap` explicite, jamais par le
+    ramasse-miettes (AnyAndroid n'exécute pas les `Cleaner`).
+  - **Bibliothèques natives** : `System.loadLibrary` réussit sans rien charger (chargeur ELF prévu
+    en G4) ; l'absence n'apparaît qu'au premier appel d'une méthode native non fournie
+    (`UnsatisfiedLinkError`).
 - **Système de fichiers virtuel** ([ADR-005](adr/ADR-005-systeme-de-fichiers-virtuel.md)).
   `/system` et `/apex` sont servis depuis l'image, et `/data` et `/sdcard` sont isolés dans un bac
   à sable. Le processus émulé ne voit ni les fichiers ni le nom d'utilisateur de l'hôte.

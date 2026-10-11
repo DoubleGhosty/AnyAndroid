@@ -870,9 +870,17 @@ void register_references(NativeRegistry& r) {
 }  // namespace
 
 void init_thread_object(Runtime& rt, Handle thread) {
-  Field* f = rt.find_class("Ljava/lang/Thread;")->declared_field("blockerLock", "Ljava/lang/Object;");
+  Class* cls = rt.find_class("Ljava/lang/Thread;");
+  Field* f = cls->declared_field("blockerLock", "Ljava/lang/Object;");
   Object& o = rt.nonnull(thread, "Thread");
   if (f && o.fields.at(f->slot) == kNull) o.fields.at(f->slot) = rt.alloc(rt.find_class("Ljava/lang/Object;"));
+  // As in ART, a new thread inherits its creator's context class loader (the
+  // main thread gets the system class loader from start_libcore).
+  Field* ccl = cls->declared_field("contextClassLoader", "Ljava/lang/ClassLoader;");
+  Handle creator = rt.current_thread_peer();  // the new main thread's peer is itself
+  if (ccl && creator != kNull && creator != thread) {
+    o.fields.at(ccl->slot) = rt.nonnull(creator, "Thread").fields.at(ccl->slot);
+  }
 }
 
 void register_core_classes(NativeRegistry& r) {

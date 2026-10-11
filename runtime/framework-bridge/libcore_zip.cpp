@@ -81,20 +81,39 @@ std::shared_ptr<ZStream> need(Runtime& rt, const HandleTable<ZStream>& table, in
 std::shared_ptr<ZStream> inflater(Runtime& rt, int64_t h) { return need(rt, tables().inflaters, h, "Inflater"); }
 std::shared_ptr<ZStream> deflater(Runtime& rt, int64_t h) { return need(rt, tables().deflaters, h, "Deflater"); }
 
+// Attached to the Inflater/Deflater that first uses a stream: frees the stream
+// when the collector frees that object, as its Cleaner does on Android
+// (AnyAndroid never runs Cleaners). A stream never used stays until end().
+struct StreamOwner final : rt::NativePeer {
+  StreamOwner(bool is_deflater, int64_t h) : deflate(is_deflater), handle(h) {}
+  ~StreamOwner() override { (deflate ? tables().deflaters : tables().inflaters).remove(handle); }
+  bool deflate;
+  int64_t handle;
+};
+
+void adopt(Runtime& rt, Handle owner, bool deflate, int64_t h) {
+  rt::Object* o = rt.object(owner);  // never null from Java (instance natives)
+  if (o && !o->peer) o->peer = std::make_unique<StreamOwner>(deflate, h);
+}
+
 // Inflater/Deflater.init: the handle of the stream `make` creates, or
-// OutOfMemoryError when the cap is reached (checked before miniz allocates).
+// OutOfMemoryError when the cap is still reached after a collection (which
+// frees the streams of unreachable Inflaters and Deflaters). No host lock is
+// held while Java code runs (exception constructors may yield the GIL).
 template <typename Make>
 int64_t open_stream(Runtime& rt, bool deflate, Make make) {
   Tables& t = tables();
   HandleTable<ZStream>& table = deflate ? t.deflaters : t.inflaters;
   size_t max = deflate ? kMaxDeflaters : kMaxInflaters;
-  std::lock_guard<std::mutex> guard(t.open_lock);
-  if (table.live() >= max) {
-    rt.throw_new("Ljava/lang/OutOfMemoryError;", std::string(deflate ? "Deflater" : "Inflater") +
-                                                     " : trop de flux zlib ouverts (" + std::to_string(max) +
-                                                     ") ; end() libère les flux inutilisés");
+  if (table.live() >= max) rt.collect_garbage();
+  std::shared_ptr<ZStream> z = make();
+  {
+    std::lock_guard<std::mutex> guard(t.open_lock);
+    if (table.live() < max) return table.add(std::move(z));
   }
-  return table.add(make());
+  rt.throw_new("Ljava/lang/OutOfMemoryError;", std::string(deflate ? "Deflater" : "Inflater") +
+                                                   " : trop de flux zlib ouverts (" + std::to_string(max) +
+                                                   ") ; end() libère les flux inutilisés");
 }
 
 // --- Java memory -------------------------------------------------------------------------
@@ -282,7 +301,23 @@ uint64_t do_deflate(Runtime& rt, ZStream& z, std::span<const uint8_t> in, std::s
   int ret;
   {
     Window w(z.strm, in, out);
-    ret = set_params ? deflate_params(z, params >> 3, (params >> 1) & 3) : mz_deflate(&z.strm, flush);
+    if (set_params) {
+      ret = deflate_params(z, params >> 3, (params >> 1) & 3);
+    } else {
+      // miniz returns once it has copied out output left by an earlier call,
+      // before writing the flush block zlib would write in the same call. Call
+      // again while that was the case and room is left, so that a SYNC/FULL
+      // flush returning less than the room offered is complete (zlib's and
+      // Deflater.deflate's contract).
+      auto* d = reinterpret_cast<const tdefl_compressor*>(z.strm.state);
+      for (int round = 0; round < 8; ++round) {
+        bool had_pending = d && d->m_output_flush_remaining != 0;
+        uint32_t room = z.strm.avail_out;
+        ret = mz_deflate(&z.strm, flush);
+        bool flushing = flush == MZ_SYNC_FLUSH || flush == MZ_FULL_FLUSH;
+        if (!flushing || ret != MZ_OK || !had_pending || z.strm.avail_out == 0 || z.strm.avail_out == room) break;
+      }
+    }
     read = w.read();
     written = w.written();
   }
@@ -339,7 +374,9 @@ void register_libcore_zip(rt::NativeRegistry& r) {
   });
 
   r.bind(inf, "getAdler", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    return rt::ret_int(int32_t(inflater(rt, a.i64(0))->strm.adler));
+    // zlib never updates adler for raw (nowrap) streams: 0 for an Inflater.
+    auto z = inflater(rt, a.i64(0));
+    return rt::ret_int(z->window_bits < 0 ? 0 : int32_t(z->strm.adler));
   });
 
   r.bind(inf, "setDictionary", "(J[BII)V", [](Runtime& rt, NativeArgs&) -> uint64_t {
@@ -351,6 +388,7 @@ void register_libcore_zip(rt::NativeRegistry& r) {
 
   r.bind(inf, "inflateBytesBytes", "(J[BII[BII)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto z = inflater(rt, a.i64(1));
+    adopt(rt, a.h(0), false, a.i64(1));
     auto in = byte_range(rt, a.h(3), a.i32(4), a.i32(5), "inflate (entrée)");
     auto out = byte_range(rt, a.h(6), a.i32(7), a.i32(8), "inflate (sortie)");
     return do_inflate(rt, a.h(0), *z, in, out);
@@ -358,6 +396,7 @@ void register_libcore_zip(rt::NativeRegistry& r) {
 
   r.bind(inf, "inflateBytesBuffer", "(J[BIIJI)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto z = inflater(rt, a.i64(1));
+    adopt(rt, a.h(0), false, a.i64(1));
     auto in = byte_range(rt, a.h(3), a.i32(4), a.i32(5), "inflate (entrée)");
     auto out = native_range(rt, a.i64(6), a.i32(8), true, "inflate (sortie)");
     return do_inflate(rt, a.h(0), *z, in, out);
@@ -365,6 +404,7 @@ void register_libcore_zip(rt::NativeRegistry& r) {
 
   r.bind(inf, "inflateBufferBytes", "(JJI[BII)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto z = inflater(rt, a.i64(1));
+    adopt(rt, a.h(0), false, a.i64(1));
     auto in = native_range(rt, a.i64(3), a.i32(5), false, "inflate (entrée)");
     auto out = byte_range(rt, a.h(6), a.i32(7), a.i32(8), "inflate (sortie)");
     return do_inflate(rt, a.h(0), *z, in, out);
@@ -372,6 +412,7 @@ void register_libcore_zip(rt::NativeRegistry& r) {
 
   r.bind(inf, "inflateBufferBuffer", "(JJIJI)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto z = inflater(rt, a.i64(1));
+    adopt(rt, a.h(0), false, a.i64(1));
     auto in = native_range(rt, a.i64(3), a.i32(5), false, "inflate (entrée)");
     auto out = native_range(rt, a.i64(6), a.i32(8), true, "inflate (sortie)");
     return do_inflate(rt, a.h(0), *z, in, out);
@@ -410,7 +451,9 @@ void register_libcore_zip(rt::NativeRegistry& r) {
   });
 
   r.bind(def, "getAdler", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    return rt::ret_int(int32_t(deflater(rt, a.i64(0))->strm.adler));
+    // zlib never updates adler for raw (nowrap) streams: 1 for a Deflater.
+    auto z = deflater(rt, a.i64(0));
+    return rt::ret_int(z->window_bits < 0 ? 1 : int32_t(z->strm.adler));
   });
 
   r.bind(def, "setDictionary", "(J[BII)V", [](Runtime& rt, NativeArgs&) -> uint64_t {
@@ -423,6 +466,7 @@ void register_libcore_zip(rt::NativeRegistry& r) {
   // (this, stream, input, output, flush, params)
   r.bind(def, "deflateBytesBytes", "(J[BII[BIIII)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto z = deflater(rt, a.i64(1));
+    adopt(rt, a.h(0), true, a.i64(1));
     auto in = byte_range(rt, a.h(3), a.i32(4), a.i32(5), "deflate (entrée)");
     auto out = byte_range(rt, a.h(6), a.i32(7), a.i32(8), "deflate (sortie)");
     return do_deflate(rt, *z, in, out, a.i32(9), a.i32(10));
@@ -430,6 +474,7 @@ void register_libcore_zip(rt::NativeRegistry& r) {
 
   r.bind(def, "deflateBytesBuffer", "(J[BIIJIII)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto z = deflater(rt, a.i64(1));
+    adopt(rt, a.h(0), true, a.i64(1));
     auto in = byte_range(rt, a.h(3), a.i32(4), a.i32(5), "deflate (entrée)");
     auto out = native_range(rt, a.i64(6), a.i32(8), true, "deflate (sortie)");
     return do_deflate(rt, *z, in, out, a.i32(9), a.i32(10));
@@ -437,6 +482,7 @@ void register_libcore_zip(rt::NativeRegistry& r) {
 
   r.bind(def, "deflateBufferBytes", "(JJI[BIIII)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto z = deflater(rt, a.i64(1));
+    adopt(rt, a.h(0), true, a.i64(1));
     auto in = native_range(rt, a.i64(3), a.i32(5), false, "deflate (entrée)");
     auto out = byte_range(rt, a.h(6), a.i32(7), a.i32(8), "deflate (sortie)");
     return do_deflate(rt, *z, in, out, a.i32(9), a.i32(10));
@@ -444,6 +490,7 @@ void register_libcore_zip(rt::NativeRegistry& r) {
 
   r.bind(def, "deflateBufferBuffer", "(JJIJIII)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto z = deflater(rt, a.i64(1));
+    adopt(rt, a.h(0), true, a.i64(1));
     auto in = native_range(rt, a.i64(3), a.i32(5), false, "deflate (entrée)");
     auto out = native_range(rt, a.i64(6), a.i32(8), true, "deflate (sortie)");
     return do_deflate(rt, *z, in, out, a.i32(9), a.i32(10));
