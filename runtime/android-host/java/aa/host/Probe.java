@@ -1,6 +1,9 @@
 package aa.host;
 
+import android.os.Binder;
 import android.os.Build;
+import android.os.IBinder;
+import android.os.ServiceManager;
 import android.view.View;
 import java.lang.reflect.Method;
 
@@ -30,5 +33,13 @@ public final class Probe {
     System.out.println("écouteur : " + listener.last + ", méthode absente -> " + result);
     Runnable lambda = () -> System.out.println("lambda : ok");
     lambda.run();
+
+    // J1: the framework's ServiceManager reaches AnyAndroid's local service manager.
+    IBinder demo = new Binder("aa.demo");
+    ServiceManager.addService("aa.demo", demo);
+    IBinder found = ServiceManager.getService("aa.demo");
+    System.out.println("services : aa.demo " + (found == demo ? "-> même objet" : "-> " + found)
+        + ", absent -> " + ServiceManager.getService("aa.absent")
+        + ", liste " + String.join(",", ServiceManager.listServices()));
   }
 }

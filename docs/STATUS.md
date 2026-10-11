@@ -33,7 +33,7 @@ le nombre de fichiers.
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
 | G2    | Vraie libcore d'AOSP (Android 17)                           | 92 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 43 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0 fait (code d'hôte Java) |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 44 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J1 faits (code d'hôte Java, `ServiceManager` local) |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
 | **Total** | **Android natif sur Windows**                          | **≈ 38 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
@@ -85,6 +85,10 @@ G5 ░░░░░░░░░░   0 %
   `-DAA_R8_JAR`), chargé après le chemin d'amorçage. Une méthode abstraite du framework qu'une
   classe d'hôte n'implémente pas répond une valeur neutre et est journalisée, au lieu
   d'`AbstractMethodError` (test `host-probe`).
+- **`ServiceManager` local** (jalon J1) : `BinderInternal.getContextObject` et
+  `ServiceManagerProxy.getNativeServiceManager` renvoient le gestionnaire de services de l'hôte
+  (`aa.host.services.LocalServiceManager`, qui étend `IServiceManager.Stub`) ; le vrai
+  `ServiceManager` du framework y enregistre et y retrouve les services, sans `Parcel`.
 - **Système de fichiers virtuel** ([ADR-005](adr/ADR-005-systeme-de-fichiers-virtuel.md)).
   `/system` et `/apex` sont servis depuis l'image, et `/data` et `/sdcard` sont isolés dans un bac
   à sable. Le processus émulé ne voit ni les fichiers ni le nom d'utilisateur de l'hôte.

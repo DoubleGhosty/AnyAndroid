@@ -316,6 +316,25 @@ void register_system_properties(rt::NativeRegistry& r) {
 
 constexpr int32_t kAppUid = 10000;
 
+// ADR-006: the process's service manager is AnyAndroid's host object
+// aa.host.services.LocalServiceManager, created once. ServiceManager reaches it
+// through BinderInternal.getContextObject / ServiceManagerProxy.getNativeServiceManager,
+// then IServiceManager.Stub.asInterface finds it as a local interface: calls are
+// direct Java calls, without Parcel.
+Handle local_service_manager(Runtime& rt) {
+  auto& cache = rt.object_cache();
+  if (auto it = cache.find("host:servicemanager"); it != cache.end()) return it->second;
+  constexpr const char* kClass = "Laa/host/services/LocalServiceManager;";
+  rt::Class* c = rt.lookup_class(kClass);
+  if (!c || !c->host) {  // never a class of the application's own DEX
+    rt.throw_new("Ljava/lang/IllegalStateException;",
+                 "[AnyAndroid] services système indisponibles : DEX d'hôte absent (ADR-006, option --host-dex)");
+  }
+  Handle h = construct(rt, kClass, "()V", {});
+  cache["host:servicemanager"] = h;
+  return h;
+}
+
 void register_process_binder(rt::NativeRegistry& r) {
   const char* proc = "Landroid/os/Process;";
   r.bind(proc, "getElapsedCpuTime", "()J", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_long(process_cpu_millis()); });
@@ -370,6 +389,12 @@ void register_process_binder(rt::NativeRegistry& r) {
   r.bind(binder, "markVintfStability", "()V", noop);
   r.bind(binder, "forceDowngradeToSystemStability", "()V", noop);
   r.bind(binder, "setExtensionNative", "(Landroid/os/IBinder;)V", noop, S::kStub, "extensions de Binder ignorées");
+
+  auto service_manager = [](Runtime& rt, NativeArgs&) -> uint64_t { return local_service_manager(rt); };
+  r.bind("Lcom/android/internal/os/BinderInternal;", "getContextObject", "()Landroid/os/IBinder;", service_manager,
+         S::kPartial, "gestionnaire de services local d'AnyAndroid (ADR-006)");
+  r.bind("Landroid/os/ServiceManagerProxy;", "getNativeServiceManager", "()Landroid/os/IBinder;", service_manager,
+         S::kPartial, "gestionnaire de services local d'AnyAndroid (ADR-006)");
 }
 
 }  // namespace

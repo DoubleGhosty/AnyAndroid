@@ -1,3 +1,4 @@
 hôte : sdk 37, AnyAndroid
 écouteur : attaché, méthode absente -> null
 lambda : ok
+services : aa.demo -> même objet, absent -> null, liste aa.demo
