@@ -10,4 +10,6 @@ public class Point {
     this.x = x;
     this.y = y;
   }
+
+  public void set(int x, int y) {}
 }

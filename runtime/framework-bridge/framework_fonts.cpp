@@ -1,0 +1,495 @@
+// android.graphics.Typeface and android.graphics.fonts natives (G3, ADR-006
+// J4), each signature checked against the framework.jar of Android 17,
+// written from what the real start-up path asks for. Typeface's static
+// initialisation and Typeface.loadPreinstalledSystemFontMap read the system
+// font configuration (/system/etc/fonts.xml) in Java; the native side builds
+// minikin's objects (Font, FontFamily, FontCollection behind a Typeface) and
+// keeps its registries, with the rules of HWUI (hwui/Typeface.cpp) and
+// minikin for styles, weights and fallback.
+//
+// The font data stays where Java mapped it (a direct ByteBuffer, kept alive
+// by the font): it is not parsed before the text engine (J7), which will
+// also check it, so a font file is read only when text needs it. What needs
+// the font tables (metrics, glyph bounds, supported axes, coverage) is left
+// unbound until then.
+#include "framework-bridge/internal.h"
+
+#include <atomic>
+#include <cmath>
+#include <cstring>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "framework-bridge/handles.h"
+#include "framework-bridge/native_memory.h"
+
+namespace aa::bridge {
+
+namespace {
+
+using rt::Handle;
+using rt::kNull;
+using rt::NativeArgs;
+using rt::Runtime;
+using S = rt::ApiStatus;
+
+// minikin's LocaleListCache, keyed by the list's language tags.
+struct LocaleLists {
+  std::mutex lock;
+  std::vector<std::u16string> lists{u""};
+};
+
+LocaleLists& locale_lists() {
+  static auto* l = new LocaleLists;
+  return *l;
+}
+
+struct Axis {
+  int32_t tag = 0;
+  float value = 0;
+};
+
+// minikin::Font over the font data of a direct ByteBuffer.
+struct FontData {
+  rt::GlobalRef buffer;  // keeps the mapping alive
+  int64_t address = 0;   // emulated native address of the data
+  int32_t size = 0;
+  std::string path;  // "" when the font does not come from a file
+  int32_t source_id = 0;
+};
+
+struct Font {
+  std::shared_ptr<const FontData> data;
+  std::u16string locales;
+  int32_t weight = 400;
+  bool italic = false;
+  int32_t ttc_index = 0;
+  std::vector<Axis> axes;
+};
+
+struct FontBuilder {
+  std::mutex lock;
+  std::vector<Axis> axes;
+};
+
+struct Family {
+  std::vector<std::shared_ptr<const Font>> fonts;
+  std::u16string lang_tags;
+  int32_t variant = 0;
+  bool custom_fallback = false, default_fallback = false;
+  int32_t variation_family_type = 0;
+};
+
+struct FamilyBuilder {
+  std::mutex lock;
+  std::vector<std::shared_ptr<const Font>> fonts;
+};
+
+using Collection = std::vector<std::shared_ptr<const Family>>;
+
+// HWUI's Typeface: a font collection, its base weight, the style asked
+// through the API (NORMAL, BOLD, ITALIC, BOLD_ITALIC) and the minikin style.
+struct Typeface {
+  std::shared_ptr<const Collection> collection;
+  int32_t base_weight = 400;
+  int32_t api_style = 0;
+  int32_t weight = 400;
+  bool italic = false;
+};
+
+constexpr int32_t kBold = 1, kItalic = 2;
+constexpr int32_t kResolveByFontTable = -1;
+
+// Kind tags: unique across the runtime (tests/check_handle_kinds.cmake).
+struct Tables {
+  HandleTable<FontBuilder> font_builders{0x1104};
+  HandleTable<const Font> fonts{0x1105};
+  HandleTable<FamilyBuilder> family_builders{0x1106};
+  HandleTable<const Family> families{0x1107};
+  HandleTable<const Typeface> typefaces{0x1108};
+  std::atomic<int32_t> next_source_id{1};
+  std::mutex lock;  // the registries below
+  std::shared_ptr<const Typeface> default_typeface;
+  std::vector<std::pair<std::u16string, std::shared_ptr<const Collection>>> generic_families;
+  std::vector<std::shared_ptr<const Collection>> font_map;
+};
+
+Tables& tables() {
+  static auto* t = new Tables;  // never destroyed: handles may be freed at exit
+  return *t;
+}
+
+template <typename T>
+std::shared_ptr<T> get(Runtime& rt, HandleTable<T>& table, int64_t h, const char* what) {
+  auto v = table.get(h);
+  if (!v) rt.throw_new("Ljava/lang/IllegalStateException;", std::string("[AnyAndroid] ") + what + " invalide");
+  return v;
+}
+
+// A builder is consumed by the native that builds from it (HWUI deletes it).
+template <typename T>
+std::shared_ptr<T> take(Runtime& rt, HandleTable<T>& table, int64_t h, const char* what) {
+  auto v = get(rt, table, h, what);
+  table.remove(h);
+  return v;
+}
+
+std::u16string optional_string(Runtime& rt, Handle h) { return h == kNull ? std::u16string() : rt.string_value(h); }
+
+int64_t long_of(const rt::Object& o, const rt::Field& f) {
+  return int64_t(uint64_t(o.fields.at(f.slot)) | (uint64_t(o.fields.at(f.slot + 1)) << 32));
+}
+
+// JNI GetDirectBufferAddress / GetDirectBufferCapacity on `buffer`.
+std::shared_ptr<FontData> font_data(Runtime& rt, Handle buffer, std::string path) {
+  rt::Object& o = rt.nonnull(buffer, "buffer");
+  rt::Field* address = find_field(o.klass, "address", "J");
+  rt::Field* capacity = find_field(o.klass, "capacity", "I");
+  int64_t at = address && !address->is_static() ? long_of(o, *address) : 0;
+  if (!is_native_address(at) || !capacity || capacity->is_static()) {
+    rt.throw_new("Ljava/lang/IllegalArgumentException;", "Not a direct buffer");
+  }
+  int32_t size = int32_t(o.fields.at(capacity->slot));
+  if (size <= 0) rt.throw_new("Ljava/lang/IllegalArgumentException;", "buffer size must not be zero or negative");
+  auto d = std::make_shared<FontData>();
+  d->buffer = rt::GlobalRef(rt, buffer);
+  d->address = at;
+  d->size = size;
+  d->path = std::move(path);
+  d->source_id = tables().next_source_id++;
+  return d;
+}
+
+int32_t clamp_weight(int32_t w) { return std::max(1, std::min(1000, w)); }
+
+// HWUI's computeAPIStyle.
+int32_t api_style(int32_t weight, bool italic) {
+  if (weight < 600) return italic ? kItalic : 0;
+  return italic ? kBold | kItalic : kBold;
+}
+
+// minikin's FontFamily::getClosestMatch score.
+int32_t match_score(const Font& f, int32_t weight, bool italic) {
+  int32_t score = std::abs(f.weight / 100 - weight / 100);
+  if (f.italic != italic) score += 2;
+  return score;
+}
+
+std::shared_ptr<const Typeface> resolve_default(Runtime& rt, int64_t h) {
+  if (h != 0) return get(rt, tables().typefaces, h, "Typeface");
+  std::lock_guard<std::mutex> guard(tables().lock);
+  if (!tables().default_typeface) {
+    rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] pas de Typeface par défaut (setDefault non appelé)");
+  }
+  return tables().default_typeface;
+}
+
+uint64_t add_typeface(Typeface&& t) {
+  return uint64_t(tables().typefaces.add(std::make_shared<const Typeface>(std::move(t))));
+}
+
+// HWUI's computeRelativeStyle.
+void set_relative_style(Typeface& t, int32_t base_weight, int32_t style) {
+  t.weight = clamp_weight((style & kBold) ? base_weight + 300 : base_weight);
+  t.italic = (style & kItalic) != 0;
+}
+
+void register_fonts(rt::NativeRegistry& r) {
+  const char* fb = "Landroid/graphics/fonts/Font$Builder;";
+  r.bind(fb, "nInitBuilder", "()J", [](Runtime&, NativeArgs&) -> uint64_t {
+    return uint64_t(tables().font_builders.add(std::make_shared<FontBuilder>()));
+  });
+  r.bind(fb, "nAddAxis", "(JIF)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto b = get(rt, tables().font_builders, a.i64(0), "Font.Builder");
+    std::lock_guard<std::mutex> guard(b->lock);
+    if (b->axes.size() >= 64) rt.throw_new("Ljava/lang/IllegalArgumentException;", "trop d'axes de variation");
+    b->axes.push_back({a.i32(2), a.f32(3)});
+    return 0;
+  });
+  r.bind(fb, "nBuild", "(JLjava/nio/ByteBuffer;Ljava/lang/String;Ljava/lang/String;IZI)J",
+         [](Runtime& rt, NativeArgs& a) -> uint64_t {
+           if (a.h(2) == kNull) rt.throw_npe("buffer");
+           auto b = take(rt, tables().font_builders, a.i64(0), "Font.Builder");
+           auto f = std::make_shared<Font>();
+           f->data = font_data(rt, a.h(2), a.h(3) == kNull ? std::string() : rt.string_utf8(a.h(3)));
+           f->locales = optional_string(rt, a.h(4));
+           minikin_locale_list_id(rt, f->locales);
+           f->weight = a.i32(5);
+           f->italic = a.z(6);
+           f->ttc_index = a.i32(7);
+           std::lock_guard<std::mutex> guard(b->lock);
+           f->axes = b->axes;
+           return uint64_t(tables().fonts.add(std::move(f)));
+         }, S::kPartial, "données de police conservées, analysées par le moteur de texte (J7)");
+  // A font over the same data with other parameters (Font.Builder(Font)).
+  r.bind(fb, "nClone", "(JJIZI)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto src = get(rt, tables().fonts, a.i64(0), "Font");
+    auto b = take(rt, tables().font_builders, a.i64(2), "Font.Builder");
+    auto f = std::make_shared<Font>(*src);
+    f->weight = a.i32(4);
+    f->italic = a.z(5);
+    f->ttc_index = a.i32(6);
+    std::lock_guard<std::mutex> guard(b->lock);
+    f->axes = b->axes;
+    return uint64_t(tables().fonts.add(std::move(f)));
+  });
+
+  const char* fo = "Landroid/graphics/fonts/Font;";
+  static const int64_t font_free = register_free_function([](int64_t h) { tables().fonts.remove(h); });
+  r.bind(fo, "nGetReleaseNativeFont", "()J", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_long(font_free); });
+  r.bind(fo, "nCloneFont", "(J)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return uint64_t(tables().fonts.add(get(rt, tables().fonts, a.i64(0), "Font")));
+  });
+  r.bind(fo, "nGetFontPath", "(J)Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto f = get(rt, tables().fonts, a.i64(0), "Font");
+    return f->data->path.empty() ? kNull : rt::ret_obj(rt.new_string_utf8(f->data->path));
+  });
+  r.bind(fo, "nGetLocaleList", "(J)Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_obj(rt.new_string(get(rt, tables().fonts, a.i64(0), "Font")->locales));
+  });
+  r.bind(fo, "nGetIndex", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_int(get(rt, tables().fonts, a.i64(0), "Font")->ttc_index);
+  });
+  // Weight in the low 16 bits, italic in bit 16.
+  r.bind(fo, "nGetPackedStyle", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto f = get(rt, tables().fonts, a.i64(0), "Font");
+    return rt::ret_int((f->weight & 0xFFFF) | (f->italic ? 1 << 16 : 0));
+  });
+  r.bind(fo, "nGetAxisCount", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_int(int32_t(get(rt, tables().fonts, a.i64(0), "Font")->axes.size()));
+  });
+  // The axis tag in the high 32 bits, the bits of its float value below.
+  r.bind(fo, "nGetAxisInfo", "(JI)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto f = get(rt, tables().fonts, a.i64(0), "Font");
+    int32_t i = a.i32(2);
+    if (i < 0 || size_t(i) >= f->axes.size()) rt.throw_new("Ljava/lang/IndexOutOfBoundsException;", "axe");
+    uint32_t bits;
+    std::memcpy(&bits, &f->axes[size_t(i)].value, 4);
+    return rt::ret_long(int64_t((uint64_t(uint32_t(f->axes[size_t(i)].tag)) << 32) | bits));
+  });
+  r.bind(fo, "nGetBufferAddress", "(J)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_long(get(rt, tables().fonts, a.i64(0), "Font")->data->address);
+  });
+  r.bind(fo, "nGetSourceId", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_int(get(rt, tables().fonts, a.i64(0), "Font")->data->source_id);
+  });
+}
+
+void register_families(rt::NativeRegistry& r) {
+  const char* fb = "Landroid/graphics/fonts/FontFamily$Builder;";
+  static const int64_t family_free = register_free_function([](int64_t h) { tables().families.remove(h); });
+  r.bind(fb, "nGetReleaseNativeFamily", "()J", [](Runtime&, NativeArgs&) -> uint64_t {
+    return rt::ret_long(family_free);
+  });
+  r.bind(fb, "nInitBuilder", "()J", [](Runtime&, NativeArgs&) -> uint64_t {
+    return uint64_t(tables().family_builders.add(std::make_shared<FamilyBuilder>()));
+  });
+  r.bind(fb, "nAddFont", "(JJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto b = get(rt, tables().family_builders, a.i64(0), "FontFamily.Builder");
+    auto f = get(rt, tables().fonts, a.i64(2), "Font");
+    std::lock_guard<std::mutex> guard(b->lock);
+    if (b->fonts.size() >= 1024) rt.throw_new("Ljava/lang/IllegalArgumentException;", "trop de polices dans la famille");
+    b->fonts.push_back(std::move(f));
+    return 0;
+  });
+  r.bind(fb, "nBuild", "(JLjava/lang/String;IZZI)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto b = take(rt, tables().family_builders, a.i64(0), "FontFamily.Builder");
+    auto f = std::make_shared<Family>();
+    f->lang_tags = optional_string(rt, a.h(2));
+    minikin_locale_list_id(rt, f->lang_tags);
+    f->variant = a.i32(3);
+    f->custom_fallback = a.z(4);
+    f->default_fallback = a.z(5);
+    f->variation_family_type = a.i32(6);
+    {
+      std::lock_guard<std::mutex> guard(b->lock);
+      f->fonts = b->fonts;
+    }
+    // minikin rejects a family without coverage; with no font there is none.
+    if (f->fonts.empty()) {
+      rt.throw_new("Ljava/lang/IllegalArgumentException;", "Failed to create internal object. maybe invalid font data");
+    }
+    return uint64_t(tables().families.add(std::move(f)));
+  }, S::kPartial, "couverture des caractères calculée par le moteur de texte (J7)");
+
+  const char* fa = "Landroid/graphics/fonts/FontFamily;";
+  // A new native font object each time (Java wraps and registers it).
+  r.bind(fa, "nGetFont", "(JI)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto f = get(rt, tables().families, a.i64(0), "FontFamily");
+    int32_t i = a.i32(2);
+    if (i < 0 || size_t(i) >= f->fonts.size()) rt.throw_new("Ljava/lang/IndexOutOfBoundsException;", "police");
+    return uint64_t(tables().fonts.add(f->fonts[size_t(i)]));
+  });
+  r.bind(fa, "nGetFontSize", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_int(int32_t(get(rt, tables().families, a.i64(0), "FontFamily")->fonts.size()));
+  });
+  r.bind(fa, "nGetLangTags", "(J)Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_obj(rt.new_string(get(rt, tables().families, a.i64(0), "FontFamily")->lang_tags));
+  });
+  r.bind(fa, "nGetVariant", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_int(get(rt, tables().families, a.i64(0), "FontFamily")->variant);
+  });
+}
+
+void register_typefaces(rt::NativeRegistry& r) {
+  const char* tf = "Landroid/graphics/Typeface;";
+  static const int64_t typeface_free = register_free_function([](int64_t h) { tables().typefaces.remove(h); });
+  r.bind(tf, "nativeGetReleaseFunc", "()J", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_long(typeface_free); });
+  // HWUI maps the file into its font data cache ahead of use: an optimisation
+  // with no observable effect, so nothing to do.
+  r.bind(tf, "nativeWarmUpCache", "(Ljava/lang/String;)V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
+  r.bind(tf, "nativeRegisterLocaleList", "(Ljava/lang/String;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    minikin_locale_list_id(rt, optional_string(rt, a.h(0)));
+    return 0;
+  });
+
+  // Typeface::createFromFamilies: the families, then the fallback's.
+  r.bind(tf, "nativeCreateFromArray", "([JJII)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (a.h(0) == kNull) rt.throw_npe("familyArray");
+    rt::ArrayObject& arr = rt.array(a.h(0), "long[]");
+    if (arr.width != 8) rt.throw_new("Ljava/lang/IllegalArgumentException;", "long[] attendu");
+    auto collection = std::make_shared<Collection>();
+    for (uint32_t i = 0; i < arr.length; ++i) {
+      int64_t h;
+      std::memcpy(&h, arr.data.data() + size_t(i) * 8, 8);
+      collection->push_back(get(rt, tables().families, h, "FontFamily"));
+    }
+    if (int64_t fallback = a.i64(1)) {
+      auto fb = get(rt, tables().typefaces, fallback, "Typeface");
+      collection->insert(collection->end(), fb->collection->begin(), fb->collection->end());
+    }
+    int32_t weight = a.i32(3), italic = a.i32(4);
+    if (weight == kResolveByFontTable || italic == kResolveByFontTable) {
+      // The style of the first family's font closest to the default one.
+      int32_t font_weight = 400;
+      bool font_italic = false;
+      if (!collection->empty() && !collection->front()->fonts.empty()) {
+        const Font* best = nullptr;
+        for (const auto& f : collection->front()->fonts) {
+          if (!best || match_score(*f, 400, false) < match_score(*best, 400, false)) best = f.get();
+        }
+        font_weight = best->weight;
+        font_italic = best->italic;
+      }
+      if (weight == kResolveByFontTable) weight = font_weight;
+      if (italic == kResolveByFontTable) italic = font_italic;
+    }
+    Typeface t;
+    t.collection = std::move(collection);
+    t.base_weight = weight;
+    t.api_style = api_style(weight, italic == 1);
+    t.weight = clamp_weight(weight);
+    t.italic = italic == 1;
+    return add_typeface(std::move(t));
+  });
+  // Typeface::createRelative.
+  r.bind(tf, "nativeCreateFromTypeface", "(JI)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto src = resolve_default(rt, a.i64(0));
+    Typeface t;
+    t.collection = src->collection;
+    t.base_weight = src->base_weight;
+    t.api_style = a.i32(2);
+    set_relative_style(t, t.base_weight, t.api_style);
+    return add_typeface(std::move(t));
+  });
+  // Typeface::createAbsolute.
+  r.bind(tf, "nativeCreateFromTypefaceWithExactStyle", "(JIZ)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto src = resolve_default(rt, a.i64(0));
+    Typeface t;
+    t.collection = src->collection;
+    t.base_weight = src->base_weight;
+    t.api_style = api_style(a.i32(2), a.z(3));
+    t.weight = clamp_weight(a.i32(2));
+    t.italic = a.z(3);
+    return add_typeface(std::move(t));
+  });
+  // Typeface::createWithDifferentBaseWeight.
+  r.bind(tf, "nativeCreateWeightAlias", "(JI)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto src = resolve_default(rt, a.i64(0));
+    Typeface t;
+    t.collection = src->collection;
+    t.base_weight = a.i32(2);
+    t.api_style = src->api_style;
+    set_relative_style(t, t.base_weight, t.api_style);
+    return add_typeface(std::move(t));
+  });
+  r.bind(tf, "nativeGetStyle", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_int(get(rt, tables().typefaces, a.i64(0), "Typeface")->api_style);
+  });
+  r.bind(tf, "nativeGetWeight", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_int(get(rt, tables().typefaces, a.i64(0), "Typeface")->weight);
+  });
+
+  // minikin's SystemFonts registries.
+  r.bind(tf, "nativeSetDefault", "(J)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto t = get(rt, tables().typefaces, a.i64(0), "Typeface");
+    std::lock_guard<std::mutex> guard(tables().lock);
+    tables().default_typeface = std::move(t);
+    return 0;
+  });
+  r.bind(tf, "nativeRegisterGenericFamily", "(Ljava/lang/String;J)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::u16string name = optional_string(rt, a.h(0));
+    auto t = get(rt, tables().typefaces, a.i64(1), "Typeface");
+    std::lock_guard<std::mutex> guard(tables().lock);
+    auto& families = tables().generic_families;
+    for (auto& [n, c] : families) {
+      if (n == name) {
+        c = t->collection;
+        return 0;
+      }
+    }
+    families.emplace_back(std::move(name), t->collection);
+    return 0;
+  });
+  r.bind(tf, "nativeAddFontCollections", "(J)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto t = get(rt, tables().typefaces, a.i64(0), "Typeface");
+    std::lock_guard<std::mutex> guard(tables().lock);
+    tables().font_map.push_back(t->collection);
+    return 0;
+  });
+  // Sets one of Typeface's static final fields (DEFAULT, SANS_SERIF...).
+  r.bind(tf, "nativeForceSetStaticFinalField", "(Ljava/lang/String;Landroid/graphics/Typeface;)V",
+         [](Runtime& rt, NativeArgs& a) -> uint64_t {
+           if (a.h(0) == kNull) rt.throw_npe("fieldName");
+           rt::Class* c = rt.find_class("Landroid/graphics/Typeface;");
+           rt::Field* f = c ? c->declared_field(rt.string_utf8(a.h(0)), "Landroid/graphics/Typeface;") : nullptr;
+           if (!f || !f->is_static()) rt.throw_new("Ljava/lang/RuntimeException;", "Unable to find field");
+           c->statics.at(f->slot) = a.h(1);
+           return 0;
+         });
+}
+
+}  // namespace
+
+int32_t minikin_locale_list_id(rt::Runtime& rt, const std::u16string& tags) {
+  LocaleLists& l = locale_lists();
+  {
+    std::lock_guard<std::mutex> guard(l.lock);
+    for (size_t i = 0; i < l.lists.size(); ++i) {
+      if (l.lists[i] == tags) return int32_t(i);
+    }
+    // The lists come from the application: bound the registry.
+    if (l.lists.size() < 4096) {
+      l.lists.push_back(tags);
+      return int32_t(l.lists.size() - 1);
+    }
+  }
+  rt.throw_new("Ljava/lang/IllegalArgumentException;", "trop de listes de locales distinctes");
+}
+
+bool minikin_locale_list_valid(int32_t id) {
+  LocaleLists& l = locale_lists();
+  std::lock_guard<std::mutex> guard(l.lock);
+  return id >= 0 && size_t(id) < l.lists.size();
+}
+
+void register_framework_fonts(rt::NativeRegistry& r) {
+  register_fonts(r);
+  register_families(r);
+  register_typefaces(r);
+}
+
+}  // namespace aa::bridge

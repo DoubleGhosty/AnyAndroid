@@ -12,6 +12,7 @@ import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.IPackageManager;
 import android.content.pm.ResolveInfo;
+import android.graphics.Typeface;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.IBinder;
@@ -41,6 +42,10 @@ public final class Launcher {
     Reflect.set(thread, "mConfigurationController",
         Reflect.newInstance(Reflect.type("android.app.ConfigurationController"), thread));
     log("démarrage : ActivityThread prêt");
+    // handleBindApplication: without a font map serialized by system_server,
+    // the application loads the preinstalled one (/system/etc/fonts.xml).
+    Typeface.loadPreinstalledSystemFontMap();
+    log("polices système chargées");
 
     IPackageManager pm = ActivityThread.getPackageManager();
     ApplicationInfo ai = pm.getApplicationInfo(pkg, 0, 0);

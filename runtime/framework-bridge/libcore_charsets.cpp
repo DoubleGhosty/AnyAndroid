@@ -6,9 +6,11 @@
 //
 // Contract of encode/decode (from CharsetEncoderICU / CharsetDecoderICU):
 //  - data[0], data[1]: input and output offsets on entry; on return data[0]
-//    is the number of input units consumed, data[1] the absolute output end;
-//  - on an error the offending units are consumed and counted in data[2],
-//    which the Java side backs out;
+//    is the number of input units consumed, and data[1] the absolute output
+//    end for encode but the number of chars written for decode (the two Java
+//    classes read it differently: libcore's NativeConverter.cpp);
+//  - on an error the offending units are consumed and counted in data[2]
+//    (the encoder's Java side backs them out of the input position);
 //  - result: 0 (U_ZERO_ERROR), 15 (U_BUFFER_OVERFLOW_ERROR), 10
 //    (U_INVALID_CHAR_FOUND: unmappable), 12 (U_ILLEGAL_CHAR_FOUND: malformed)
 //    or 11 (U_TRUNCATED_CHAR_FOUND: incomplete input at flush).
@@ -469,7 +471,7 @@ uint64_t run_codec(Runtime& rt, NativeArgs& a, bool encoding) {
   Result r = encoding ? encode(c, reinterpret_cast<const char16_t*>(in.data), d[0], in_end, out.data, d[1], out_end, flush)
                       : decode(c, in.data, d[0], in_end, reinterpret_cast<char16_t*>(out.data), d[1], out_end, flush);
   d[0] = r.consumed;
-  d[1] = r.out;
+  d[1] = encoding ? r.out : r.out - d[1];
   if (r.invalid) d[2] = r.invalid;
   std::memcpy(rt.array(a.h(6), "data").data.data(), d, 12);
   return rt::ret_int(r.code);

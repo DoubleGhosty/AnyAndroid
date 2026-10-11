@@ -228,6 +228,7 @@ uint64_t invoke_wrapped(Runtime& rt, rt::Method* m, std::vector<uint32_t>& words
 
 void collect_methods(rt::Class* c, bool public_only, bool inherited, bool constructors, std::vector<rt::Method*>& out) {
   std::set<std::string> seen;
+  std::vector<rt::Class*> interfaces;
   for (rt::Class* k = c; k; k = inherited ? k->super : nullptr) {
     for (const auto& m : k->methods) {
       bool is_ctor = m->name == "<init>";
@@ -237,6 +238,21 @@ void collect_methods(rt::Class* c, bool public_only, bool inherited, bool constr
       out.push_back(m.get());
     }
     if (constructors) break;
+    if (inherited) interfaces.insert(interfaces.end(), k->interfaces.begin(), k->interfaces.end());
+  }
+  // Then the superinterfaces (Class.getMethod searches them after the
+  // superclasses), without their static methods, which are not inherited.
+  std::set<rt::Class*> visited;
+  for (size_t i = 0; i < interfaces.size(); ++i) {
+    rt::Class* k = interfaces[i];
+    if (!k || !visited.insert(k).second) continue;
+    for (const auto& m : k->methods) {
+      if (m->name == "<clinit>" || (m->access & dex::kAccStatic)) continue;
+      if (public_only && !(m->access & dex::kAccPublic)) continue;
+      if (!seen.insert(m->name + m->signature).second) continue;
+      out.push_back(m.get());
+    }
+    interfaces.insert(interfaces.end(), k->interfaces.begin(), k->interfaces.end());
   }
 }
 
@@ -331,8 +347,7 @@ void register_class_reflection(rt::NativeRegistry& r) {
     };
   };
   c.method("getDeclaredMethods", "()[Ljava/lang/reflect/Method;", methods(false, false));
-  c.method("getMethods", "()[Ljava/lang/reflect/Method;", methods(true, true),
-           S::kPartial, "méthodes publiques des superclasses incluses, celles des interfaces non");
+  c.method("getMethods", "()[Ljava/lang/reflect/Method;", methods(true, true));
   auto find_method = [](bool public_only, bool inherited) {
     return [public_only, inherited](Runtime& rt, NativeArgs& a) -> uint64_t {
       rt::Class* cls = class_arg(rt, a.h(0), "Class");
@@ -519,6 +534,14 @@ void register_members(rt::NativeRegistry& r) {
     b.method("isVarArgs", "()Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
       return rt::ret_bool(method_of(rt, a.h(0))->access & dex::kAccVarargs);
     });
+    b.method("isSynthetic", "()Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      return rt::ret_bool(method_of(rt, a.h(0))->access & dex::kAccSynthetic);
+    });
+    if (!ctor) {
+      b.method("isBridge", "()Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+        return rt::ret_bool(method_of(rt, a.h(0))->access & dex::kAccBridge);
+      });
+    }
     b.method("equals", "(Ljava/lang/Object;)Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
       auto* other = rt.peer<MethodPeer>(a.h(1));
       return rt::ret_bool(other && other->method == method_of(rt, a.h(0)));

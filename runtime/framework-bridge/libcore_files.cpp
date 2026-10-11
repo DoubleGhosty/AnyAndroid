@@ -30,10 +30,11 @@ namespace {
 
 FILE* std_stream(int32_t fd) { return fd == 1 ? stdout : fd == 2 ? stderr : nullptr; }
 
+constexpr uint64_t kMaxMapping = uint64_t(2) << 30;
+
 // Zeroed bytes for a mapping of `length` bytes, or ENOMEM (size limit, budget
 // of the emulated native memory, host memory) before anything is published.
 std::vector<uint8_t> mapping_bytes(uint64_t length) {
-  constexpr uint64_t kMaxMapping = uint64_t(2) << 30;
   if (length > kMaxMapping || !native_memory_fits(length)) throw vfs::VfsError{vfs::kENOMEM, "mmap"};
   std::vector<uint8_t> data;
   try {
@@ -76,13 +77,27 @@ vfs::VStat fstat_fd(int32_t fd) {
 int64_t map_fd_copy(rt::Runtime& rt, int32_t fd, uint64_t offset, uint64_t length, bool writable) {
   if (fd >= 0 && fd <= 2) throw vfs::VfsError{vfs::kEACCES, "mmap"};  // not a regular file
   libcore_vfs().fstat(fd);  // EBADF before allocating
-  std::vector<uint8_t> data = mapping_bytes(length);
-  size_t done = 0;
-  while (done < data.size()) {
-    size_t n = libcore_vfs().pread(fd, std::span<uint8_t>(data).subspan(done), offset + done);
-    if (n == 0) break;  // past the end of the file the mapping reads as zeros
-    done += n;
+  if ((libcore_vfs().open_flags(fd) & vfs::kO_ACCMODE) == vfs::kO_WRONLY) throw vfs::VfsError{vfs::kEACCES, "mmap"};
+  // Past the end of the file the mapping reads as zeros.
+  auto fill = [offset](vfs::OpenFile& file, std::vector<uint8_t>& data) {
+    size_t done = 0;
+    while (done < data.size()) {
+      size_t n = file.read(offset + done, std::span<uint8_t>(data).subspan(done));
+      if (n == 0) break;
+      done += n;
+    }
+  };
+  std::shared_ptr<vfs::OpenFile> file = libcore_vfs().open_file(fd);  // outlives a close of fd
+  if (!writable) {
+    if (length > kMaxMapping) throw vfs::VfsError{vfs::kENOMEM, "mmap"};
+    return native_wrap_lazy(rt, length, [file, length, fill] {
+      std::vector<uint8_t> data(size_t(length), 0);
+      fill(*file, data);
+      return data;
+    });
   }
+  std::vector<uint8_t> data = mapping_bytes(length);
+  fill(*file, data);
   return native_wrap(rt, std::move(data), writable);
 }
 

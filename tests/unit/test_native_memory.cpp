@@ -508,3 +508,36 @@ TEST(native_memory_mmap_anonymous_and_munmap_errno) {
   call(rt, fci, "unmap0", "(JJ)I", {lo(ro), hi(ro), 64, 0});
   CHECK_EQ(thrown(rt, [&] { bridge::native_span(rt, ro, 1); }), kIllegalArgument);
 }
+
+TEST(native_memory_read_only_file_mapping_is_lazy) {
+  Vm vm;
+  rt::Runtime& rt = *vm.rt;
+  auto& cfg = bridge::libcore_config();
+  auto saved = cfg.vfs;
+  auto content = std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{1, 2, 3, 4, 5, 6, 7, 8});
+  cfg.vfs = std::make_shared<vfs::Vfs>();
+  cfg.vfs->mount("/m", vfs::memory_mount({{"f", content}}));
+  int32_t fd = cfg.vfs->open("/m/f", vfs::kO_RDONLY, 0);
+  uint64_t before = bridge::native_memory_stats().used;
+  // Mapped past the end of the file (zeros there), then the descriptor is
+  // closed before the first access, as Java code commonly does.
+  int64_t addr = bridge::map_fd_copy(rt, fd, 4, 10, false);
+  cfg.vfs->close(fd);
+  CHECK_EQ(bridge::native_memory_stats().used, before);  // nothing read yet
+  auto bytes = bridge::native_span(rt, addr, 10);
+  const uint8_t expected[10] = {5, 6, 7, 8, 0, 0, 0, 0, 0, 0};
+  CHECK(std::memcmp(bytes.data(), expected, 10) == 0);
+  CHECK(bridge::native_memory_stats().used >= before + 10);
+  CHECK_EQ(thrown(rt, [&] { bridge::native_span(rt, addr, 1, true); }), kReadOnly);
+  CHECK_EQ(thrown(rt, [&] { bridge::native_span(rt, addr + 8, 4); }), kOutOfBounds);
+  bridge::native_free(rt, addr);
+  CHECK_EQ(bridge::native_memory_stats().used, before);
+
+  // Never touched: freed without being read.
+  fd = cfg.vfs->open("/m/f", vfs::kO_RDONLY, 0);
+  int64_t untouched = bridge::map_fd_copy(rt, fd, 0, 8, false);
+  cfg.vfs->close(fd);
+  bridge::native_free(rt, untouched);
+  CHECK_EQ(bridge::native_memory_stats().used, before);
+  cfg.vfs = saved;
+}

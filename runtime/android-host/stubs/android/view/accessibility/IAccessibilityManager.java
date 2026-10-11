@@ -4,10 +4,12 @@ import android.os.Binder;
 
 public interface IAccessibilityManager {
   abstract class Stub extends Binder implements IAccessibilityManager {
+    public Stub(android.os.PermissionEnforcer enforcer) {}
+
     public static IAccessibilityManager asInterface(android.os.IBinder obj) {
       throw new RuntimeException("stub");
     }
   }
 
-  int addClient(Object client, int userId);
+  long addClient(IAccessibilityManagerClient client, int userId);
 }

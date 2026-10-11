@@ -9,6 +9,7 @@ add_executable(aa_unit_tests
   unit/test_jni.cpp
   unit/test_image.cpp
   unit/test_libcore.cpp
+  unit/test_graphics.cpp
   unit/test_native_memory.cpp
   unit/test_zip.cpp
   unit/test_regex.cpp

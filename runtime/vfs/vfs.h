@@ -136,6 +136,8 @@ class Vfs {
   void fsync(int32_t fd);
   int32_t open_flags(int32_t fd);
   std::string fd_path(int32_t fd);
+  // The open file behind `fd`; stays usable after close (file mappings).
+  std::shared_ptr<OpenFile> open_file(int32_t fd);
 
   // Whole-file helpers (tests, host code).
   std::vector<uint8_t> read_file(std::string_view path, uint64_t max_size = 64u << 20);

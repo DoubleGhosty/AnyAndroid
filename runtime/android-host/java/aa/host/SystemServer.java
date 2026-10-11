@@ -1,6 +1,7 @@
 package aa.host;
 
 import aa.host.services.AccessibilityService;
+import aa.host.services.ActivityTaskService;
 import aa.host.services.DisplayService;
 import aa.host.services.InputMethodService;
 import aa.host.services.PackageService;
@@ -34,5 +35,6 @@ public final class SystemServer {
     ServiceManager.addService("display", new DisplayService());
     ServiceManager.addService("input_method", new InputMethodService());
     ServiceManager.addService("accessibility", new AccessibilityService());
+    ServiceManager.addService("activity_task", new ActivityTaskService());
   }
 }

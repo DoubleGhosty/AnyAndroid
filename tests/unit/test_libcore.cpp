@@ -583,6 +583,15 @@ TEST(libcore_charset_converters) {
   const uint8_t expected[] = {'A', 0xC3, 0xA9, 0xE2, 0x82, 0xAC, 0xF0, 0x9F, 0x98, 0x80};
   CHECK(std::memcmp(rt.array(bytes, "b").data.data(), expected, sizeof expected) == 0);
 
+  // From a later output offset, the encoder reports the absolute end.
+  set_data(0, 2);
+  CHECK_EQ(encode(utf8, int32_t(text.size()), 16, true), 0);
+  CHECK_EQ(data_at(0), 5);
+  CHECK_EQ(data_at(1), 12);
+  CHECK(std::memcmp(rt.array(bytes, "b").data.data() + 2, expected, sizeof expected) == 0);
+  set_data(0, 0);
+  CHECK_EQ(encode(utf8, int32_t(text.size()), 16, true), 0);
+
   // Overflow: stops before a character that does not fit.
   set_data(0, 0);
   CHECK_EQ(encode(utf8, int32_t(text.size()), 4, false), 15);
@@ -606,6 +615,13 @@ TEST(libcore_charset_converters) {
   CHECK_EQ(decode(utf8, 10), 0);
   CHECK_EQ(data_at(1), 5);
   CHECK(std::memcmp(rt.array(out, "o").data.data(), text.data(), text.size() * 2) == 0);
+  // From a later output offset, the decoder reports the chars written (as
+  // CharsetDecoderICU adds it to the buffer's position), not the end.
+  set_data(1, 3);
+  CHECK_EQ(decode(utf8, 10), 0);
+  CHECK_EQ(data_at(0), 9);
+  CHECK_EQ(data_at(1), 4);
+  CHECK(std::memcmp(rt.array(out, "o").data.data() + 6, text.data() + 1, 4 * 2) == 0);
   rt.array(bytes, "b").data[1] = 0xFF;
   set_data(0, 0);
   CHECK_EQ(decode(utf8, 10), 12);

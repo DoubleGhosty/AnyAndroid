@@ -29,6 +29,9 @@ struct Region {
   bool writable = true;
   uint32_t next_free = kNoSlot;      // FIFO of free slots
   std::vector<uint8_t> bytes;        // owned regions
+  // Lazy regions (native_wrap_lazy): the loader until the bytes are loaded.
+  std::shared_ptr<const std::function<std::vector<uint8_t>()>> loader;
+  uint64_t lazy_size = 0;
   uint64_t charged = 0;              // bytes counted against the budget
   rt::ArrayObject* array = nullptr;  // regions over a Java array (see ArrayRegion)
 };
@@ -189,6 +192,7 @@ struct Found {
   uint32_t offset = 0;
   bool writable = true;
   bool owned = true;
+  bool lazy = false;  // not loaded yet: data is empty
 };
 
 std::optional<Found> lookup(int64_t address) {
@@ -203,12 +207,62 @@ std::optional<Found> lookup(int64_t address) {
   f.offset = d->offset;
   f.writable = r->writable;
   f.owned = r->array == nullptr;
+  f.lazy = r->loader != nullptr;
   return f;
+}
+
+// Loads a lazy region (the lock is not held while its loader runs: another
+// thread may load it too, the first result is kept).
+void load(rt::Runtime& rt, int64_t address) {
+  Decoded d = *decode(address);
+  Memory& m = memory();
+  std::shared_ptr<const std::function<std::vector<uint8_t>()>> loader;
+  uint64_t size = 0;
+  {
+    std::lock_guard<std::mutex> guard(m.lock);
+    Region* r = find(m, d);
+    if (!r || !r->loader) return;
+    loader = r->loader;
+    size = r->lazy_size;
+  }
+  std::vector<uint8_t> bytes;
+  std::string failure;
+  try {
+    bytes = (*loader)();
+    if (bytes.size() != size) failure = "taille inattendue";
+  } catch (const std::bad_alloc&) {
+    out_of_memory(rt, "mmap");
+  } catch (const std::exception& e) {
+    failure = e.what();
+  }
+  if (!failure.empty()) {
+    rt.throw_new("Ljava/lang/InternalError;", "défaut lors d'un accès à une projection de fichier : " + failure);
+  }
+  bool budget = true;
+  {
+    std::lock_guard<std::mutex> guard(m.lock);
+    Region* r = find(m, d);
+    if (!r || !r->loader) return;  // freed, or loaded by another thread
+    uint64_t charged = bytes.capacity();
+    if (fits(m, charged)) {
+      r->bytes = std::move(bytes);
+      r->charged = charged;
+      m.used += charged;
+      r->loader = nullptr;
+    } else {
+      budget = false;
+    }
+  }
+  if (!budget) out_of_memory(rt, "mmap");
 }
 
 // The whole region behind `address` and the offset in it, or an exception.
 Found region_of(rt::Runtime& rt, int64_t address, bool write) {
   auto f = lookup(address);
+  if (f && f->lazy) {
+    load(rt, address);
+    f = lookup(address);
+  }
   if (!f) unknown(rt, address);
   if (write && !f->writable) rt.throw_new("Ljava/nio/ReadOnlyBufferException;", "");
   return *f;
@@ -297,6 +351,33 @@ int64_t native_address_of(rt::Runtime& rt, rt::Handle array) {
 int64_t native_wrap(rt::Runtime& rt, std::vector<uint8_t> data, bool writable) {
   if (data.size() > kMaxRegionSize) rt.throw_new("Ljava/lang/OutOfMemoryError;", "bloc trop grand");
   return add_owned(rt, std::move(data), writable, "mmap");
+}
+
+int64_t native_wrap_lazy(rt::Runtime& rt, uint64_t size, std::function<std::vector<uint8_t>()> load) {
+  if (size > kMaxRegionSize) rt.throw_new("Ljava/lang/OutOfMemoryError;", "bloc trop grand");
+  auto loader = std::make_shared<const std::function<std::vector<uint8_t>()>>(std::move(load));
+  bool full = false, no_memory = false;
+  int64_t address = 0;
+  {
+    Memory& m = memory();
+    std::lock_guard<std::mutex> guard(m.lock);
+    try {
+      if (auto id = take_slot(m)) {
+        Region& r = m.regions[*id];
+        r.writable = false;
+        r.loader = std::move(loader);
+        r.lazy_size = size;
+        address = encode(*id, r.gen, 0);
+      } else {
+        full = true;
+      }
+    } catch (const std::bad_alloc&) {
+      no_memory = true;
+    }
+  }
+  if (full) no_slot(rt);
+  if (no_memory) out_of_memory(rt, "mmap");
+  return address;
 }
 
 std::span<uint8_t> native_span(rt::Runtime& rt, int64_t address, uint64_t size, bool write) {

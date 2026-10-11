@@ -4,6 +4,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 #include "dex-engine/runtime.h"
 #include "framework-bridge/bridge.h"
@@ -43,6 +44,21 @@ void register_libcore_charsets(rt::NativeRegistry& r);
 void register_libcore_files(rt::NativeRegistry& r);
 void register_framework_natives(rt::NativeRegistry& r);
 void register_framework_graphics(rt::NativeRegistry& r);
+// Paint (framework_paint.cpp), registered by register_framework_graphics.
+void register_framework_paint(rt::NativeRegistry& r);
+// Path (framework_path.cpp), registered by register_framework_graphics.
+void register_framework_path(rt::NativeRegistry& r);
+// The verbs (SkPath::Verb), point coordinates and conic weights of a Path
+// (unit tests).
+void path_contents(rt::Runtime& rt, int64_t handle, std::vector<uint8_t>& verbs, std::vector<float>& coords,
+                   std::vector<float>& weights);
+// Typeface and fonts (framework_fonts.cpp), registered by register_framework_graphics.
+void register_framework_fonts(rt::NativeRegistry& r);
+// Minikin's locale list ids (LocaleListCache): 0 is the empty list, then ids
+// in order of first use of a list of language tags (a bounded registry:
+// IllegalArgumentException when full).
+int32_t minikin_locale_list_id(rt::Runtime& rt, const std::u16string& tags);
+bool minikin_locale_list_valid(int32_t id);
 void register_parcel_natives(rt::NativeRegistry& r);
 void register_appmem_natives(rt::NativeRegistry& r);
 void register_resource_natives(rt::NativeRegistry& r);
@@ -60,7 +76,8 @@ size_t read_fd(int32_t fd, std::span<uint8_t> out);
 size_t write_fd(int32_t fd, std::span<const uint8_t> data);
 vfs::VStat fstat_fd(int32_t fd);
 // Private copy of `length` bytes of a file from `offset`, in emulated native
-// memory (mmap without MAP_SHARED); ENOMEM beyond 2 GiB, checked first.
+// memory (mmap without MAP_SHARED); ENOMEM beyond 2 GiB, checked first. A
+// read-only mapping is read when first touched, as the pages of a real one.
 int64_t map_fd_copy(rt::Runtime& rt, int32_t fd, uint64_t offset, uint64_t length, bool writable);
 
 void register_libcore_nio(rt::NativeRegistry& r);

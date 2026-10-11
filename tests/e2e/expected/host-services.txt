@@ -1,5 +1,10 @@
 service : LocalServiceManager.addService
 service : LocalServiceManager.addService
+service : LocalServiceManager.addService
+service : LocalServiceManager.addService
+service : LocalServiceManager.addService
+service : LocalServiceManager.addService
+service : LocalServiceManager.addService
 service : LocalServiceManager.checkService2
 service : LocalServiceManager.checkService2
 service : PermissionService.getSplitPermissions
@@ -9,3 +14,12 @@ lanceur : com.anyandroid.samples.basic.MainActivity
 activité : com.anyandroid.samples.basic.MainActivity, exportée true, application com.anyandroid.samples.basic
 service : PackageService.getInstallerPackageName (non implémentée)
 inconnus : null, uid -1, installeur null
+service : LocalServiceManager.listServices
+service : LocalServiceManager.checkService2
+service : LocalServiceManager.checkService2
+service : LocalServiceManager.checkService2
+service : LocalServiceManager.checkService2
+service : LocalServiceManager.checkService2
+service : LocalServiceManager.checkService2
+service : LocalServiceManager.checkService2
+surcharges : 36 méthodes dans 9 classes, toutes reconnues

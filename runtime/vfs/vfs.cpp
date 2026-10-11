@@ -992,6 +992,8 @@ void Vfs::fsync(int32_t fd) { fd_entry(fd).file->sync(); }
 int32_t Vfs::open_flags(int32_t fd) { return fd_entry(fd).flags; }
 std::string Vfs::fd_path(int32_t fd) { return fd_entry(fd).path; }
 
+std::shared_ptr<OpenFile> Vfs::open_file(int32_t fd) { return fd_entry(fd).file; }
+
 std::vector<uint8_t> Vfs::read_file(std::string_view path, uint64_t max_size) {
   int32_t fd = open(path, kO_RDONLY, 0);
   std::vector<uint8_t> out;

@@ -46,7 +46,7 @@ std::optional<int64_t> LooperDriver::advance_to_next_message() {
 
   auto it = pending_wakes_.begin();
   int64_t deadline = it->first;
-  int64_t queue_id = it->second;
+
   pending_wakes_.erase(it);
 
   // Advance virtual clock to deadline

@@ -5,10 +5,10 @@
 
 | Statut | Signification | Membres |
 |---|---|---|
-| Supportée | comportement testé et documenté pour le périmètre annoncé | 788 |
-| Partielle | chemin courant pris en charge, limites connues | 64 |
+| Supportée | comportement testé et documenté pour le périmètre annoncé | 794 |
+| Partielle | chemin courant pris en charge, limites connues | 63 |
 | Stub | API reconnue mais sans effet réel | 24 |
-| Non supportée | reconnue mais refusée avec une erreur explicite | 28 |
+| Non supportée | reconnue mais refusée avec une erreur explicite | 26 |
 
 ## `android.app.Activity`
 
@@ -601,9 +601,9 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `getSuperclass()Ljava/lang/Class;` | Supportée |  |
 | `newInstance()Ljava/lang/Object;` | Partielle | constructeur sans argument uniquement, sans contrôle d'accès |
 | `forName(Ljava/lang/String;)Ljava/lang/Class;` (statique) | Supportée |  |
-| `forName(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;` (statique) | Partielle | chargeur de classes ignoré (un seul espace de classes) |
+| `forName(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;` (statique) | Partielle | un seul espace de classes (ADR-006 J2) ; sans libcore, le chargeur est ignoré |
 | `getDeclaredMethods()[Ljava/lang/reflect/Method;` | Supportée |  |
-| `getMethods()[Ljava/lang/reflect/Method;` | Partielle | méthodes publiques des superclasses incluses, celles des interfaces non |
+| `getMethods()[Ljava/lang/reflect/Method;` | Supportée |  |
 | `getDeclaredMethod(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;` | Supportée |  |
 | `getMethod(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;` | Supportée |  |
 | `getDeclaredConstructors()[Ljava/lang/reflect/Constructor;` | Supportée |  |
@@ -625,8 +625,8 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `getAnnotation(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;` | Non supportée | annotations DEX non lues dans cette version (prévu en G2) |
 | `getAnnotations()[Ljava/lang/annotation/Annotation;` | Non supportée | annotations DEX non lues dans cette version (prévu en G2) |
 | `isAnnotationPresent(Ljava/lang/Class;)Z` | Non supportée | annotations DEX non lues dans cette version (prévu en G2) |
-| `getEnclosingClass()Ljava/lang/Class;` | Non supportée | attributs InnerClass/EnclosingClass non lus |
-| `getDeclaringClass()Ljava/lang/Class;` | Non supportée | attributs InnerClass/EnclosingClass non lus |
+| `getEnclosingClass()Ljava/lang/Class;` | Supportée |  |
+| `getDeclaringClass()Ljava/lang/Class;` | Supportée |  |
 
 ## `java.lang.ClassCastException`
 
@@ -1397,6 +1397,7 @@ Classe : **Partielle** — conservée tant que le prototype n'a pas de notion de
 | `getParameterCount()I` | Supportée |  |
 | `getExceptionTypes()[Ljava/lang/Class;` | Partielle | clause throws non lue (annotations) |
 | `isVarArgs()Z` | Supportée |  |
+| `isSynthetic()Z` | Supportée |  |
 | `equals(Ljava/lang/Object;)Z` | Supportée |  |
 | `hashCode()I` | Supportée |  |
 | `toString()Ljava/lang/String;` | Supportée |  |
@@ -1451,6 +1452,8 @@ Classe : **Partielle** — conservée tant que le prototype n'a pas de notion de
 | `getParameterCount()I` | Supportée |  |
 | `getExceptionTypes()[Ljava/lang/Class;` | Partielle | clause throws non lue (annotations) |
 | `isVarArgs()Z` | Supportée |  |
+| `isSynthetic()Z` | Supportée |  |
+| `isBridge()Z` | Supportée |  |
 | `equals(Ljava/lang/Object;)Z` | Supportée |  |
 | `hashCode()I` | Supportée |  |
 | `toString()Ljava/lang/String;` | Supportée |  |

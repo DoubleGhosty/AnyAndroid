@@ -1,6 +1,6 @@
 hôte : sdk 37, AnyAndroid
 écouteur : attaché, méthode absente -> null
 lambda : ok
-services : aa.demo -> même objet, absent -> null, liste aa.demo,package,permissionmgr
+services : aa.demo -> même objet, absent -> null, liste aa.demo,accessibility,activity_task,display,input_method,package,permissionmgr,window
 chargeurs : /data/app/com.anyandroid.samples.hello/base.apk
   Hello -> son PathClassLoader, forName même classe, amorçage ne la voit pas, Probe -> BootClassLoader, entrées com.anyandroid.samples.hello.Hello

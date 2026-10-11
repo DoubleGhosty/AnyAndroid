@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <string>
 #include <vector>
@@ -42,6 +43,12 @@ int64_t native_realloc(rt::Runtime& rt, int64_t address, uint64_t size);
 int64_t native_address_of(rt::Runtime& rt, rt::Handle array);
 // Region holding `data` (mappings: Os.mmap, FileChannel.map).
 int64_t native_wrap(rt::Runtime& rt, std::vector<uint8_t> data, bool writable);
+// Read-only region of `size` bytes produced by `load` on first access, as the
+// pages of a file mapping are read when touched (and only then counted
+// against the budget). `load` returns exactly `size` bytes or throws; a
+// failure is reported to the accessing Java code as InternalError, as a
+// fault in an unsafe memory access.
+int64_t native_wrap_lazy(rt::Runtime& rt, uint64_t size, std::function<std::vector<uint8_t>()> load);
 
 bool is_native_address(int64_t address);
 // `size` bytes at `address`; throws (IllegalArgumentException for an unknown

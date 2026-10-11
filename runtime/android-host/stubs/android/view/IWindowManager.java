@@ -4,6 +4,8 @@ import android.os.Binder;
 
 public interface IWindowManager {
   abstract class Stub extends Binder implements IWindowManager {
+    public Stub(android.os.PermissionEnforcer enforcer) {}
+
     public static IWindowManager asInterface(android.os.IBinder obj) {
       throw new RuntimeException("stub");
     }
@@ -11,8 +13,8 @@ public interface IWindowManager {
 
   boolean hasNavigationBar(int displayId);
   IWindowSession openSession(IWindowSessionCallback callback);
-  int getInitialDisplaySize(int displayId, android.graphics.Point size);
+  void getInitialDisplaySize(int displayId, android.graphics.Point size);
+  void getBaseDisplaySize(int displayId, android.graphics.Point size);
+  int getInitialDisplayDensity(int displayId);
   int getBaseDisplayDensity(int displayId);
-  void getInitialDisplayDensity(int displayId, android.util.MutableInt density);
-  void getStableInsets(int displayId, android.graphics.Rect outInsets);
 }
