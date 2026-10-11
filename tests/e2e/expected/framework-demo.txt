@@ -11,3 +11,4 @@ horloge : ok
 parcel : 42 été v a.b.C 7
 binder : true true a.b.IDemo
 digest : AndroidOpenSSL 900150983cd24fb0d6963f7d28e17f72 ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad 49a1475c9cd8ca897ca1fe82825a25d52c1c6ae8
+resources : Cancel android:string/cancel 200 ff008577
