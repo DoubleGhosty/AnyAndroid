@@ -13,6 +13,7 @@
 
 #include "common/text.h"
 #include "framework-bridge/internal.h"
+#include "framework-bridge/looper_driver.h"
 #include "image/aosp.h"
 #include "vfs/vfs.h"
 
@@ -29,14 +30,7 @@ using rt::Runtime;
 using S = rt::ApiStatus;
 
 int64_t monotonic_nanos() {
-  static const int64_t freq = [] {
-    LARGE_INTEGER f;
-    QueryPerformanceFrequency(&f);
-    return int64_t(f.QuadPart);
-  }();
-  LARGE_INTEGER c;
-  QueryPerformanceCounter(&c);
-  return int64_t(c.QuadPart / freq * 1000000000 + (c.QuadPart % freq) * 1000000000 / freq);
+  return VirtualClock::instance().now_nanos();
 }
 
 int64_t thread_cpu_nanos() {
@@ -144,11 +138,28 @@ void register_message_queue(rt::NativeRegistry& r) {
   r.bind(mq, "nativePollOnce", "(JI)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     NativeQueue& q = queue(rt, a.i64(1));
     int32_t timeout = a.i32(3);
+    int64_t queue_id = a.i64(1);
+
+    // Cancel any pending wakes for this queue (new poll cycle starting)
+    if (LooperDriver::instance().is_host_driven()) {
+      LooperDriver::instance().cancel_wakes(queue_id);
+    }
+
     if (q.woken) {
       q.woken = false;
       return 0;
     }
     if (timeout == 0) return 0;
+
+    // In host-driven mode, register the wake instead of actually sleeping
+    if (LooperDriver::instance().is_host_driven() && timeout != 0) {
+      int64_t deadline = timeout < 0 ? INT64_MAX : monotonic_nanos() + int64_t(timeout) * 1000000;
+      LooperDriver::instance().register_wake(queue_id, deadline);
+      // Don't actually park in host-driven mode - the host will advance time
+      return 0;
+    }
+
+    // Normal mode: park the thread until timeout or wake
     q.poller = rt.current_thread_peer();
     q.polling = true;
     // park_current: relative nanoseconds, 0 = until unparked.
@@ -164,7 +175,7 @@ void register_message_queue(rt::NativeRegistry& r) {
     q.polling = false;
     q.woken = false;
     return 0;
-  }, S::kPartial, "attente sans descripteurs de fichiers surveillés");
+  }, S::kPartial, "attente sans descripteurs de fichiers surveillés (mode piloté en J5)");
   r.bind(mq, "nativeWake", "(J)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     NativeQueue& q = queue(rt, a.i64(0));
     q.woken = true;
@@ -179,6 +190,35 @@ void register_message_queue(rt::NativeRegistry& r) {
                          "surveillance de descripteurs par la file de messages non prise en charge");
   }, S::kUnsupported, "surveillance de descripteurs non prise en charge");
   r.bind(mq, "nativeSetSkipEpollWaitForZeroTimeout", "(J)V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
+
+  // J5: Host-driven Looper control natives for deterministic tests
+  r.bind(mq, "nativeEnableHostDriven", "(Z)V", [](Runtime&, NativeArgs& a) -> uint64_t {
+    bool enabled = a.i32(0) != 0;
+    LooperDriver::instance().enable_host_driven(enabled);
+    if (enabled) {
+      VirtualClock::instance().set_mode(VirtualClock::Mode::kVirtual);
+    }
+    return 0;
+  }, S::kPartial, "active le mode piloté par l'hôte (J5)");
+
+  r.bind(mq, "nativeIsHostDriven", "()Z", [](Runtime&, NativeArgs&) -> uint64_t {
+    return rt::ret_bool(LooperDriver::instance().is_host_driven());
+  });
+
+  r.bind(mq, "nativeAdvanceTimeByNanos", "(J)J", [](Runtime&, NativeArgs& a) -> uint64_t {
+    int64_t delta = a.i64(0);
+    int64_t new_time = LooperDriver::instance().advance_time_by(delta);
+    return rt::ret_long(new_time);
+  }, S::kPartial, "avance le temps virtuel (J5)");
+
+  r.bind(mq, "nativeRunUntilIdle", "()I", [](Runtime&, NativeArgs&) -> uint64_t {
+    int count = LooperDriver::instance().run_until_idle();
+    return rt::ret_int(count);
+  }, S::kPartial, "exécute tous les messages en attente (J5)");
+
+  r.bind(mq, "nativeGetVirtualTimeNanos", "()J", [](Runtime&, NativeArgs&) -> uint64_t {
+    return rt::ret_long(VirtualClock::instance().now_nanos());
+  }, S::kPartial, "obtient le temps virtuel actuel (J5)");
 }
 
 // --- android.os.SystemProperties ---------------------------------------------------------------------
