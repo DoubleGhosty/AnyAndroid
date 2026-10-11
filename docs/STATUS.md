@@ -33,20 +33,20 @@ le nombre de fichiers.
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
 | G2    | Vraie libcore d'AOSP (Android 17)                           | 92 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 50 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J2 faits, J3 commencé (services `package` et `permissionmgr`) |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 55 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J2 faits, J3 et J4 en cours (l'`onCreate` d'une vraie activité s'exécute) |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
-| **Total** | **Android natif sur Windows**                          | **≈ 38 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
+| **Total** | **Android natif sur Windows**                          | **≈ 42 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
 
 ```
 G0 ██████████ 100 %
 G1 ██████████ 100 %
 G2 █████████░  92 %
-G3 ████░░░░░░  42 %
+G3 █████▌░░░░  55 %
 G4 ░░░░░░░░░░   0 %
 G5 ░░░░░░░░░░   0 %
    ───────────────
-   ███▊░░░░░░ ≈ 38 % vers « Android natif sur Windows »
+   ████▏░░░░░ ≈ 42 % vers « Android natif sur Windows »
 ```
 
 ## Ce qui marche aujourd'hui (vérifié par 35 suites de tests et 121 tests unitaires)
@@ -160,6 +160,50 @@ ses mises en page.
 - En mode pont, `Context`, `Activity`, `TextView`, `Toast` et `LayoutInflater` sont branchés sur
   les ressources de l'APK (`android_res.cpp`).
 
+## Reprise : où en est le travail (fin de session du 2026-10-11)
+
+**Jalon en cours : J4, démarrage direct d'une application** (ADR-006). Le lanceur Java d'hôte
+`aa.host.Launcher` (`runtime/android-host/java/aa/host/Launcher.java`) reproduit
+`ActivityThread.attach` et le démarrage à la Robolectric. Pour le relancer :
+
+```
+anyandroid exec --bootclasspath <libcore17> --system-image <system.img> --trace-services \
+    build/samples/basic-activity.apk aa.host.Launcher com.anyandroid.samples.basic
+```
+
+Ce qui passe déjà, avec le vrai code d'Android 17 :
+- `ActivityThread` et `Instrumentation` sont créés, le `ServiceManager` local répond ;
+- `LoadedApk` construit le vrai `PathClassLoader` de l'APK, et l'`Application` est créée ;
+- `ContextImpl.createActivityContext` crée le contexte, puis `Instrumentation.newActivity` et
+  `Activity.attach` (avec sa `PhoneWindow`) préparent l'activité ;
+- `MainActivity.onCreate` démarre et construit ses vues (`new LinearLayout(this)`).
+
+**Blocage actuel** : `ViewConfiguration.<init>` appelle `IWindowManager.hasNavigationBar` ; le
+service `window` n'existe pas encore.
+
+**Suite prévue, dans l'ordre** :
+1. le service `window` (`IWindowManager.Stub` : `hasNavigationBar`, tailles d'écran, puis
+   `openSession` vers une `IWindowSession`) ;
+2. `display` (`IDisplayManager.getDisplayInfo` de l'écran 0 : taille logique, densité,
+   rafraîchissement) ;
+3. `input_method` (`InputMethodManager` l'exige), `accessibility`, `activity`, `activity_task` ;
+4. les natives graphiques que les vues demandent en chemin (`Paint`, `Typeface`, `RenderNode`
+   comme magasin de propriétés…) : d'abord des réponses cohérentes, le rendu viendra à J7 ;
+5. un test e2e `launch` dont la sortie de référence est le journal du cycle de vie
+   (`cycle : MainActivity.onCreate/onStart/onResume`) : il clôt J4.
+
+**À savoir pour la suite** :
+- la trace `--trace-services` ne liste que les appels du framework aux objets `Binder` de
+  l'hôte ; une méthode non implémentée y apparaît avec « (non implémentée) » et renvoie une
+  valeur neutre ;
+- le message `ERROR_PACKAGE_NOT_FOUND: com.android.scheduling.flags` vient du stockage aconfig :
+  seuls les conteneurs `system`, `system_ext` et `product` sont montés. Ceux des APEX restent à
+  servir sous `/metadata/aconfig` ;
+- le ramasse-miettes n'exécute pas les `Cleaner` de `NativeAllocationRegistry`. Les ressources
+  natives sont donc attachées à leur objet Java (pair natif libéré à la collecte), comme pour
+  les regex et zip ;
+- la casse Unicode suit les tables du système ; le signe Kelvin (U+212A) ne se replie pas sur `k`.
+
 ## Prochaines étapes, dans l'ordre
 
 Le plan de G3 est fixé par [ADR-006](adr/ADR-006-demarrage-applications.md) : pas de
@@ -167,7 +211,7 @@ Le plan de G3 est fixé par [ADR-006](adr/ADR-006-demarrage-applications.md) : p
 vrais gestionnaires d'`ActivityThread`.
 
 1. **J0-J2** (faits) : outillage Java/D8 et DEX d'hôte, `ServiceManager` local, vrais chargeurs de classes.
-2. **J3-J5** : services système v1, puis démarrage d'une application jusqu'à `onResume`, d'abord
+2. **J3-J5** (en cours) : services système v1, puis démarrage d'une application jusqu'à `onResume`, d'abord
    en direct puis par `handleBindApplication` … `handleResumeActivity`.
 3. **J6-J8** : texte, rendu logiciel du vrai framework (`drawSoftware`, moteur 2D choisi par
    l'ADR-007), fenêtre Win32 et entrées.

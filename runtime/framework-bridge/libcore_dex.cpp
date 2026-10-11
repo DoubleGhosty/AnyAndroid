@@ -300,6 +300,17 @@ void register_dex_file(rt::NativeRegistry& r) {
     dex_set(rt, a.h(0));
     return 0;
   }, S::kPartial, "pas de restriction des API cachées à lever");
+  // Class loader contexts are reported to dexopt only: nothing to report.
+  r.bind("Ldalvik/system/BaseDexClassLoader;", "computeClassLoaderContextsNative", "()[Ljava/lang/String;",
+         [](Runtime& rt, NativeArgs&) -> uint64_t { return string_array(rt, {}); }, S::kPartial,
+         "pas de dexopt : aucun contexte à signaler");
+  // The linker namespace of an application's native libraries (G4): none yet,
+  // which is a success (null).
+  r.bind("Lcom/android/internal/os/ClassLoaderFactory;", "createClassloaderNamespace",
+         "(Ljava/lang/ClassLoader;ILjava/lang/String;Ljava/lang/String;ZLjava/lang/String;Ljava/lang/String;)"
+         "Ljava/lang/String;",
+         [](Runtime&, NativeArgs&) -> uint64_t { return kNull; }, S::kPartial,
+         "pas encore d'espace de noms du lieur (bibliothèques natives : G4)");
   r.bind(df, "verifyInBackgroundNative", "(Ljava/lang/Object;Ljava/lang/ClassLoader;)V",
          [](Runtime& rt, NativeArgs& a) -> uint64_t {
            dex_set(rt, a.h(0));

@@ -43,6 +43,7 @@ void register_libcore_charsets(rt::NativeRegistry& r);
 void register_libcore_files(rt::NativeRegistry& r);
 void register_framework_natives(rt::NativeRegistry& r);
 void register_parcel_natives(rt::NativeRegistry& r);
+void register_appmem_natives(rt::NativeRegistry& r);
 void register_resource_natives(rt::NativeRegistry& r);
 // Android system properties of the emulated device (build.prop and
 // AnyAndroid's identity), as android.os.SystemProperties sees them.

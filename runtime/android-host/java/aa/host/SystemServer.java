@@ -2,7 +2,10 @@ package aa.host;
 
 import aa.host.services.PackageService;
 import aa.host.services.PermissionService;
+import aa.host.services.SystemFeatures;
+import android.content.pm.SystemFeaturesCache;
 import android.os.ServiceManager;
+import com.android.internal.os.ApplicationSharedMemory;
 
 /**
  * AnyAndroid's stand-in for system_server (ADR-006): registers the local system services in the
@@ -16,6 +19,10 @@ public final class SystemServer {
   private SystemServer() {}
 
   public static void start(String apkPath) {
+    // What ApplicationThread.bindApplication installs before anything else
+    // (the shared memory is the one system_server would have created).
+    ApplicationSharedMemory.setInstance(ApplicationSharedMemory.create());
+    SystemFeaturesCache.setInstance(new SystemFeaturesCache(SystemFeatures.list()));
     PackageService packages = new PackageService(apkPath);
     ServiceManager.addService("package", packages);
     ServiceManager.addService("permissionmgr", new PermissionService(packages));

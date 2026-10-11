@@ -211,7 +211,10 @@ void register_system(rt::NativeRegistry& r) {
     return rt.new_string(u"lib" + a.str(0) + u".so");
   });
   r.bind(sys, "specialProperties", "()[Ljava/lang/String;", [](Runtime& rt, NativeArgs&) -> uint64_t {
-    return string_array(rt, {"java.io.tmpdir=/data/local/tmp", "user.home=", "user.dir=/"});
+    // java.library.path: the default namespace of the 64-bit linker, as
+    // android_get_LD_LIBRARY_PATH reports it on a device.
+    return string_array(rt, {"java.io.tmpdir=/data/local/tmp", "user.home=", "user.dir=/",
+                             "java.library.path=/system/lib64:/system_ext/lib64"});
   });
   // System.setOut/setErr/setIn write the final static fields natively.
   for (const auto& [name, field, type] : std::initializer_list<std::tuple<const char*, const char*, const char*>>{
@@ -659,6 +662,35 @@ void register_vm(rt::NativeRegistry& r) {
   r.bind(vm, "addressOf", "(Ljava/lang/Object;)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     return uint64_t(native_address_of(rt, a.h(1)));
   }, S::kPartial, "adresse de la mémoire native émulée (native_memory.h)");
+
+  // VMDebug: the process registers its identity and debugging state; there is
+  // no debugger, method tracing nor allocation tracker in AnyAndroid.
+  const char* dbg = "Ldalvik/system/VMDebug;";
+  for (const auto& [name, sig] : std::initializer_list<std::pair<const char*, const char*>>{
+           {"addApplication", "(Ljava/lang/String;)V"}, {"removeApplication", "(Ljava/lang/String;)V"},
+           {"setCurrentProcessName", "(Ljava/lang/String;)V"}, {"setUserId", "(I)V"},
+           {"setWaitingForDebugger", "(Z)V"}, {"allowHiddenApiReflectionFrom", "(Ljava/lang/Class;)V"},
+           {"startAllocCounting", "()V"}, {"stopAllocCounting", "()V"}, {"resetAllocCount", "(I)V"},
+           {"setAllocTrackerStackDepth", "(I)V"}, {"dumpReferenceTables", "()V"}, {"printLoadedClasses", "(I)V"}}) {
+    r.bind(dbg, name, sig, noop, S::kStub, "pas de débogueur ni de traçage dans AnyAndroid");
+  }
+  r.bind(dbg, "isDebuggerConnected", "()Z", boolean(false));
+  r.bind(dbg, "isDebuggingEnabled", "()Z", boolean(false));
+  r.bind(dbg, "lastDebuggerActivity", "()J", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_long(-1); });
+  r.bind(dbg, "getMethodTracingMode", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
+  r.bind(dbg, "getAllocCount", "(I)I", [](Runtime&, NativeArgs&) -> uint64_t { return 0; }, S::kStub);
+  r.bind(dbg, "getLoadedClassCount", "()I", [](Runtime& rt, NativeArgs&) -> uint64_t {
+    return rt::ret_int(int32_t(rt.loaded_classes().size()));
+  });
+  r.bind(dbg, "getVmFeatureList", "()[Ljava/lang/String;",
+         [](Runtime& rt, NativeArgs&) -> uint64_t { return string_array(rt, {}); });
+  r.bind(dbg, "threadCpuTimeNanos", "()J", [](Runtime&, NativeArgs&) -> uint64_t {
+    FILETIME created, exited, kernel, user;
+    if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) return rt::ret_long(-1);
+    uint64_t k = (uint64_t(kernel.dwHighDateTime) << 32) | kernel.dwLowDateTime;
+    uint64_t u = (uint64_t(user.dwHighDateTime) << 32) | user.dwLowDateTime;
+    return rt::ret_long(int64_t((k + u) * 100));
+  });
 
   // VMStack: frames of the current thread, innermost last. Frame n-1 is the
   // native method itself, n-2 the method that called it.
@@ -1456,6 +1488,7 @@ void register_libcore_natives(rt::NativeRegistry& r) {
   register_libcore_dex(r);
   register_libcore_regex(r);
   register_framework_natives(r);
+  register_appmem_natives(r);
 }
 
 int64_t unsafe_field_offset(uint32_t slot) { return kFieldBase + 4 * int64_t(slot); }

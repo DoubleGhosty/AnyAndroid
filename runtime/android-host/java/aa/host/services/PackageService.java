@@ -189,12 +189,12 @@ public final class PackageService extends IPackageManager.Stub {
 
   @Override
   public boolean hasSystemFeature(String name, int version) {
-    return false;
+    return SystemFeatures.has(name);
   }
 
   @Override
   public ParceledListSlice getSystemAvailableFeatures() {
-    return ParceledListSlice.emptyList();
+    return new ParceledListSlice<>(SystemFeatures.list());
   }
 
   @Override

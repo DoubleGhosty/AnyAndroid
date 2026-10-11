@@ -41,4 +41,8 @@ public class Intent {
   public Intent setPackage(String packageName) {
     return this;
   }
+
+  public Intent setComponent(ComponentName component) {
+    return this;
+  }
 }

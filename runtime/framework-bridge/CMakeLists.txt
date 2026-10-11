@@ -3,6 +3,7 @@ add_library(aa_bridge STATIC
   android_res.cpp
   android_widget.cpp
   bridge.cpp
+  framework_appmem.cpp
   framework_natives.cpp
   framework_parcel.cpp
   framework_resources.cpp

@@ -993,6 +993,9 @@ uint64_t Runtime::invoke(Method* m, const uint32_t* args, uint32_t nargs) {
 void Runtime::trace_service_call(VmThread* t, Method* m, Handle self, bool implemented) {
   Object* o = object(self);
   if (!o || !o->klass->host || m->name == "<init>") return;
+  // Services only: host objects that are binders (not the host's callbacks).
+  Class* binder = loaded_class("Landroid/os/Binder;");
+  if (!binder || !is_assignable(o->klass, binder)) return;
   // Only the framework's calls: not the host's own, nor the Binder plumbing
   // inherited from the boot class path (queryLocalInterface, asBinder...).
   if (!t->frames.empty() && t->frames.back().method->owner->host) return;

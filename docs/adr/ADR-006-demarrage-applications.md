@@ -1,6 +1,6 @@
 # ADR-006 — Démarrer les applications par le vrai `ActivityThread`
 
-- **Statut** : accepté le 2026-10-11 (étape G3 de l'ADR-002) ; J0, J1 et J2 réalisés, J3 en cours
+- **Statut** : accepté le 2026-10-11 (étape G3 de l'ADR-002) ; J0, J1 et J2 réalisés, J3 et J4 en cours
 - **Contexte** : le vrai `framework.jar` d'Android 17 s'exécute déjà (exemple `framework-demo` :
   `Bundle`, `Parcel`, `Binder` local, `MessageDigest`, `Resources.getSystem()`…), mais aucune
   application ne démarre encore comme sur un téléphone. Les applications ne tournent que dans le

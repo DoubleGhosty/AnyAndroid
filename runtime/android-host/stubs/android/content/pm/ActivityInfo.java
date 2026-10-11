@@ -1,3 +1,7 @@
 package android.content.pm;
 
-public class ActivityInfo extends ComponentInfo {}
+public class ActivityInfo extends ComponentInfo {
+  public int getThemeResource() {
+    return 0;
+  }
+}
