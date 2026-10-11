@@ -78,7 +78,8 @@ void usage() {
       "      --bootclasspath : utilise la libcore d'AOSP extraite par `image bootclasspath` (G2) ;\n"
       "      --libcore-only : n'en garde que les modules ART et i18n (sans framework.jar).\n"
       "      --system-image <system.img> : sert /system et /apex depuis l'image (ADR-005) ;\n"
-      "      --data-dir <dossier> : bac à sable des zones inscriptibles (/data, /sdcard).\n"
+      "      --data-dir <dossier> : bac à sable des zones inscriptibles (/data, /sdcard) ;\n"
+      "      --profile : à la fin, les méthodes les plus coûteuses (instructions, appels) sur stderr.\n"
       "  libcore natives --bootclasspath <dossier> [--libcore-only] [--all] [--core]\n"
       "      Couverture des méthodes natives de la libcore par AnyAndroid ; --core liste les membres\n"
       "      des classes du cœur de la VM référencés mais absents.\n"
@@ -510,6 +511,7 @@ int cmd_exec(const Args& a) {
   }
   rt::RuntimeOptions ro;
   ro.trace = a.has("--trace");
+  ro.profile = a.has("--profile");
   rt::Runtime runtime(ro);
   for (const auto& d : boot.dex) runtime.add_boot_dex(d.get());
   for (const auto* d : dex_files) runtime.add_dex(d);

@@ -37,10 +37,21 @@ set(E ${CMAKE_CURRENT_SOURCE_DIR}/e2e)
 set(CLI ${CMAKE_CROSSCOMPILING_EMULATOR} $<TARGET_FILE:anyandroid>)
 
 # aa_e2e(<nom> CODE <n> [GOLDEN <fichier>] [MATCH <regex>] ARGS <arguments...>)
+# The `exec --bootclasspath` tests get their own data directory (--data-dir:
+# /data and /sdcard of the emulated process), emptied before each run, so that
+# they stay independent under `ctest -j` and a failed run leaves nothing behind.
 function(aa_e2e name)
   cmake_parse_arguments(T "" "CODE;GOLDEN;MATCH" "ARGS" ${ARGN})
-  string(REPLACE ";" "|" cmd "${CLI};${T_ARGS}")
-  set(defs -DCMD=${cmd} -DEXPECT_CODE=${T_CODE} -DACTUAL=${CMAKE_CURRENT_BINARY_DIR}/e2e-${name}.txt)
+  set(args ${T_ARGS})
+  set(defs "")
+  list(GET args 0 command)
+  if(command STREQUAL "exec" AND "--bootclasspath" IN_LIST args)
+    set(data ${CMAKE_CURRENT_BINARY_DIR}/e2e-data/${name})
+    list(INSERT args 1 --data-dir ${data})
+    list(APPEND defs -DFRESH_DIR=${data})
+  endif()
+  string(REPLACE ";" "|" cmd "${CLI};${args}")
+  list(APPEND defs -DCMD=${cmd} -DEXPECT_CODE=${T_CODE} -DACTUAL=${CMAKE_CURRENT_BINARY_DIR}/e2e-${name}.txt)
   if(T_GOLDEN)
     list(APPEND defs -DGOLDEN=${E}/expected/${T_GOLDEN})
   endif()
@@ -84,11 +95,8 @@ if(AA_LIBCORE_DIR)
     ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --libcore-only ${S}/hello-dex.apk com.anyandroid.samples.hello.Hello)
   aa_e2e(threads-libcore CODE 0 GOLDEN threads-exec.txt
     ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --libcore-only ${S}/threads-demo.apk com.anyandroid.samples.threads.Main)
-  # Each run that writes files gets its own data directory: tests run in
-  # parallel (ctest -j) and the default one is shared by every build.
   aa_e2e(libcore-demo CODE 0 GOLDEN libcore-demo.txt
-    ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --libcore-only --data-dir ${CMAKE_CURRENT_BINARY_DIR}/appdata-libcore-demo
-         ${S}/libcore-demo.apk com.anyandroid.samples.libcore.Main)
+    ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --libcore-only ${S}/libcore-demo.apk com.anyandroid.samples.libcore.Main)
   # java.util.zip (Deflater, Inflater, GZIP, CRC32, Adler32) on miniz.
   aa_e2e(zip-demo CODE 0 GOLDEN zip-demo.txt
     ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --libcore-only ${S}/zip-demo.apk com.anyandroid.samples.zip.Main)
@@ -97,7 +105,6 @@ if(AA_LIBCORE_DIR)
   if(AA_SYSTEM_IMAGE)
     aa_e2e(libcore-demo-image CODE 0 GOLDEN libcore-demo.txt
       ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --libcore-only --system-image ${AA_SYSTEM_IMAGE}
-           --data-dir ${CMAKE_CURRENT_BINARY_DIR}/appdata-libcore-demo-image
            ${S}/libcore-demo.apk com.anyandroid.samples.libcore.Main)
     # G3 entry point: utility classes of the real framework.jar.
     aa_e2e(framework-demo CODE 0 GOLDEN framework-demo.txt

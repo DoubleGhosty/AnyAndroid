@@ -468,6 +468,87 @@ uint64_t native_call(rt::Runtime& rt, const char* cls, const char* name, const c
 
 }  // namespace
 
+// Android 17 frees themes through NativeAllocationRegistry (ResourcesImpl.ThemeImpl):
+// the free "function" is a bounded id, and the value passed to it is checked
+// like any other handle.
+TEST(framework_theme_free_function) {
+  LibcoreVm vm;
+  rt::Runtime& rt = *vm.rt;
+  const char* am = "Landroid/content/res/AssetManager;";
+  auto words = [](uint64_t v) { return std::vector<uint32_t>{uint32_t(v), uint32_t(v >> 32)}; };
+  uint64_t manager = native_call(rt, am, "nativeCreate", "()J", {});
+  uint64_t theme = native_call(rt, am, "nativeThemeCreate", "(J)J", words(manager));
+  auto changing = [&](uint64_t t) { return native_call(rt, am, "nativeThemeGetChangingConfigurations", "(J)I", words(t)); };
+  CHECK_EQ(changing(theme), uint64_t(0));
+  uint64_t free_fn = native_call(rt, am, "nativeGetThemeFreeFunction", "()J", {});
+  CHECK(free_fn != 0);
+  CHECK_EQ(native_call(rt, am, "nativeGetThemeFreeFunction", "()J", {}), free_fn);
+  auto apply = [&](uint64_t ptr) {
+    std::vector<uint32_t> args = words(free_fn);
+    for (uint32_t w : words(ptr)) args.push_back(w);
+    native_call(rt, "Llibcore/util/NativeAllocationRegistry;", "applyFreeFunction", "(JJ)V", args);
+  };
+  apply(manager);  // another kind of handle: ignored
+  apply(theme);
+  CHECK_THROWS(changing(theme), rt::JavaThrow);  // freed
+  apply(theme);                                  // stale: ignored
+  apply(0x4141414141414141);                     // forged: ignored
+  uint64_t other = native_call(rt, am, "nativeThemeCreate", "(J)J", words(manager));  // the manager is untouched
+  CHECK_EQ(changing(other), uint64_t(0));
+  apply(other);
+  native_call(rt, am, "nativeDestroy", "(J)V", words(manager));
+}
+
+// libcore's Thread.blockedOn (AbstractInterruptibleChannel.begin, on every
+// FileChannel read or write) locks Thread.blockerLock, set up by the native
+// constructors and for the threads the runtime creates (here the main thread).
+TEST(libcore_thread_blocked_on) {
+  const char* boot_thread = R"(
+.class public Ljava/lang/Thread;
+.super Ljava/lang/Object;
+.method public blockedOn(Lsun/nio/ch/Interruptible;)V
+    .registers 3
+    iget-object v0, p0, Ljava/lang/Thread;->blockerLock:Ljava/lang/Object;
+    monitor-enter v0
+    iput-object p1, p0, Ljava/lang/Thread;->blocker:Lsun/nio/ch/Interruptible;
+    monitor-exit v0
+    return-void
+.end method
+)";
+  const char* app = R"(
+.class public LBlocking;
+.super Ljava/lang/Object;
+.method public static run()V
+    .registers 2
+    const/4 v1, 0x0
+    invoke-static {}, Ljava/lang/Thread;->currentThread()Ljava/lang/Thread;
+    move-result-object v0
+    invoke-virtual {v0, v1}, Ljava/lang/Thread;->blockedOn(Lsun/nio/ch/Interruptible;)V
+    new-instance v0, Ljava/lang/Thread;
+    invoke-direct {v0}, Ljava/lang/Thread;-><init>()V
+    invoke-virtual {v0, v1}, Ljava/lang/Thread;->blockedOn(Lsun/nio/ch/Interruptible;)V
+    return-void
+.end method
+)";
+  auto boot = dex::DexFile::open(tool::write_dex({tool::assemble_smali(boot_thread, "boot.smali")}), "core-test.jar!classes.dex");
+  auto code = dex::DexFile::open(tool::write_dex({tool::assemble_smali(app, "app.smali")}), "app.dex");
+  bridge::NullHost host;
+  auto runtime = std::make_unique<rt::Runtime>();
+  runtime->add_boot_dex(boot.get());
+  runtime->add_dex(code.get());
+  bridge::install(runtime->registry(), host);
+  {
+    rt::Runtime::Scope scope(*runtime, "test");
+    std::string thrown;
+    try {
+      runtime->call_static("LBlocking;", "run", "()V");
+    } catch (const rt::JavaThrow& t) {
+      thrown = runtime->describe_throwable(t.exception);
+    }
+    CHECK_EQ(thrown, std::string());
+  }
+}
+
 TEST(libcore_charset_converters) {
   LibcoreVm vm;
   rt::Runtime& rt = *vm.rt;

@@ -520,6 +520,20 @@ TEST(interpreter_limits) {
   CHECK_EQ(vm.thrown("spin", "()V"), std::string("java.lang.Error"));
 }
 
+// `exec --profile`: per-method counters, left untouched when profiling is off.
+TEST(interpreter_profile_counters) {
+  for (bool profile : {false, true}) {
+    rt::RuntimeOptions opts;
+    opts.profile = profile;
+    Vm vm = Vm::standard(opts);
+    CHECK_EQ(int32_t(vm.call("add", "(II)I", {2, 3})), 5);
+    CHECK_EQ(int32_t(vm.call("add", "(II)I", {4, 5})), 9);
+    rt::Method* add = vm.rt->find_class("LT;")->declared_method("add", "(II)I");
+    CHECK_EQ(add->profile_calls, uint64_t(profile ? 2 : 0));
+    CHECK_EQ(add->profile_instructions, uint64_t(profile ? 4 : 0));  // add-int, return
+  }
+}
+
 TEST(interpreter_reports_unsupported_apis) {
   Vm vm = Vm::standard();
   CHECK_EQ(vm.thrown("sleepy", "()V"), std::string("java.lang.NoClassDefFoundError"));

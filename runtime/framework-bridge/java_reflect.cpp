@@ -18,6 +18,7 @@ using S = ApiStatus;
 namespace {
 
 constexpr const char* kNoAnnotations = "annotations DEX non lues dans cette version (prévu en G2)";
+constexpr const char* kInvocationTarget = "Ljava/lang/reflect/InvocationTargetException;";
 
 using rt::FieldPeer;
 using rt::MethodPeer;
@@ -184,19 +185,42 @@ std::vector<uint32_t> build_args(Runtime& rt, const rt::Method* m, Handle receiv
   return words;
 }
 
-// InvocationTargetException keeps its cause in two places: the throwable's
-// cause (bridge mode) and libcore's `target` field (read by its bytecode).
+// InvocationTargetException keeps its target in libcore's `target` field,
+// which getTargetException() and getCause() return, and as the throwable's
+// cause, which the VM's own reports ("Caused by") follow. The field is looked
+// up on InvocationTargetException itself: a subclass field cannot shadow it.
+uint32_t& invocation_target(Runtime& rt, Handle ite) {
+  rt::Field* f = rt.find_class(kInvocationTarget)->declared_field("target", "Ljava/lang/Throwable;");
+  if (!f) rt.throw_new("Ljava/lang/InternalError;", "champ InvocationTargetException.target absent");
+  return rt.nonnull(ite, "InvocationTargetException").fields.at(f->slot);
+}
+
 void set_invocation_target(Runtime& rt, Handle ite, Handle target) {
   if (auto* p = rt.peer<rt::ThrowablePeer>(ite)) p->cause = target;
-  rt::Object* o = rt.object(ite);
-  if (rt::Field* f = o ? find_field(o->klass, "target", "Ljava/lang/Throwable;") : nullptr) o->fields.at(f->slot) = target;
+  invocation_target(rt, ite) = target;
+}
+
+// The constructors chain to ReflectiveOperationException(String, Throwable)
+// like libcore's bytecode, so that the Throwable state (message, stack trace)
+// is set up as for any other exception, then record the target. Java's
+// protected InvocationTargetException() and InvocationTargetException(Throwable)
+// call super((Throwable) null): no message, no cause. The message of
+// InvocationTargetException(Throwable, String) may be null.
+uint64_t init_invocation_target(Runtime& rt, Handle self, Handle target, Handle message) {
+  rt::Class* super = rt.find_class(kInvocationTarget)->super;
+  rt::Method* ctor = super ? super->declared_method("<init>", "(Ljava/lang/String;Ljava/lang/Throwable;)V") : nullptr;
+  if (!ctor) rt.throw_new("Ljava/lang/InternalError;", "constructeur de ReflectiveOperationException introuvable");
+  uint32_t args[3] = {self, message, kNull};
+  rt.invoke(ctor, args, 3);
+  set_invocation_target(rt, self, target);
+  return 0;
 }
 
 uint64_t invoke_wrapped(Runtime& rt, rt::Method* m, std::vector<uint32_t>& words) {
   try {
     return rt.invoke(m, words.data(), uint32_t(words.size()));
   } catch (const rt::JavaThrow& t) {
-    Handle ite = rt.make_throwable(rt.find_class("Ljava/lang/reflect/InvocationTargetException;"), u"", false);
+    Handle ite = rt.make_throwable(rt.find_class(kInvocationTarget), u"", false);
     set_invocation_target(rt, ite, t.exception);
     throw rt::JavaThrow{ite};
   }
@@ -405,29 +429,19 @@ void register_members(rt::NativeRegistry& r) {
   r.define("Ljava/lang/NoSuchMethodException;", "Ljava/lang/ReflectiveOperationException;");
   r.define("Ljava/lang/NoSuchFieldException;", "Ljava/lang/ReflectiveOperationException;");
   r.define("Ljava/lang/IllegalAccessException;", "Ljava/lang/ReflectiveOperationException;");
-  r.define("Ljava/lang/reflect/InvocationTargetException;", "Ljava/lang/ReflectiveOperationException;")
+  r.define(kInvocationTarget, "Ljava/lang/ReflectiveOperationException;")
       .field("target", "Ljava/lang/Throwable;", 0x2)
-      .ctor("()V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; })
+      .ctor("()V", [](Runtime& rt, NativeArgs& a) -> uint64_t { return init_invocation_target(rt, a.h(0), kNull, kNull); })
       .ctor("(Ljava/lang/Throwable;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-        set_invocation_target(rt, a.h(0), a.h(1));
-        return 0;
+        return init_invocation_target(rt, a.h(0), a.h(1), kNull);
       })
       .ctor("(Ljava/lang/Throwable;Ljava/lang/String;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-        set_invocation_target(rt, a.h(0), a.h(1));
-        if (auto* p = rt.peer<rt::ThrowablePeer>(a.h(0))) {
-          p->message = a.str(2);
-          p->has_message = true;
-        }
-        return 0;
+        return init_invocation_target(rt, a.h(0), a.h(1), a.h(2));
       })
-      .method("getTargetException", "()Ljava/lang/Throwable;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-        auto* p = rt.peer<rt::ThrowablePeer>(a.h(0));
-        return p ? p->cause : kNull;
-      })
-      .method("getCause", "()Ljava/lang/Throwable;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-        auto* p = rt.peer<rt::ThrowablePeer>(a.h(0));
-        return p ? p->cause : kNull;
-      });
+      .method("getTargetException", "()Ljava/lang/Throwable;",
+              [](Runtime& rt, NativeArgs& a) -> uint64_t { return invocation_target(rt, a.h(0)); })
+      .method("getCause", "()Ljava/lang/Throwable;",
+              [](Runtime& rt, NativeArgs& a) -> uint64_t { return invocation_target(rt, a.h(0)); });
   r.define_interface("Ljava/lang/reflect/Member;")
       .abstract_method("getName", "()Ljava/lang/String;")
       .abstract_method("getModifiers", "()I")

@@ -8,3 +8,8 @@ compile_commands.json
 # Fichiers extraits d images Android (ne jamais versionner)
 /aosp/
 *.img
+/donnees/
+# Journaux de debogage rediriges a la racine (anyandroid ... > out.txt 2> err.txt)
+/err.txt
+/out.txt
+/inflater.txt
