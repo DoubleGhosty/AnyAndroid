@@ -3,7 +3,7 @@
 Couche de compatibilité qui exécute des applications Android (bytecode DEX) **comme des processus
 Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 
-> **Avancement : ≈ 36 % vers « Android natif sur Windows »**, détail et étape en cours dans
+> **Avancement : ≈ 38 % vers « Android natif sur Windows »**, détail et étape en cours dans
 > [docs/STATUS.md](docs/STATUS.md).
 >
 > **Statut : prototype de recherche.** La preuve de concept de l'annexe A du cadrage fonctionne :
@@ -25,8 +25,9 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
   - vrais threads Windows (`Thread`, `synchronized`, `wait`/`notify`, `sleep`, `join`, `interrupt`)
     sous un verrou global ;
   - ramasse-miettes mark-sweep avec poignées générationnelles et `WeakReference` ;
-  - réflexion `java.lang.reflect` ;
-  - **JNI 1.6** en convention System V, prêt pour les bibliothèques Android x86_64.
+  - réflexion `java.lang.reflect` (`InvocationTargetException` complète : cause, message, pile) ;
+  - **JNI 1.6** en convention System V, prêt pour les bibliothèques Android x86_64 ;
+  - profil d'exécution par méthode (`exec --profile`), sans coût quand il est désactivé.
 - **Pont framework** (≈ 110 classes, ≈ 700 membres) : `java.lang`, `ArrayList`, `HashMap`,
   `Activity`, `Intent`, `Bundle`, `Log`, `Handler`, `View`, `LinearLayout`, `TextView`, `Button`,
   `EditText`, `Toast`… Toute API absente échoue explicitement et est consignée.
@@ -45,17 +46,22 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
   bytecode d'AOSP remplace le pont pour `java.*` ; ses méthodes natives sont implémentées pour
   Windows (`libcore natives` mesure la couverture), avec `invoke-polymorphic`/`VarHandle`, les
   chaînes compactes d'ART et les jeux de caractères standards. Collections, `Formatter`,
-  `java.util.concurrent`, exceptions et **fichiers** fonctionnent : un système de fichiers virtuel
+  `java.util.concurrent`, exceptions et **fichiers** (NIO.2 et `FileChannel` compris)
+  fonctionnent : un système de fichiers virtuel
   ([ADR-005](docs/adr/ADR-005-systeme-de-fichiers-virtuel.md)) sert `/system` et `/apex` depuis
   l'image système en lecture seule, et `/data` depuis un bac à sable.
+  `java.util.zip` repose sur miniz intégré ; `MessageDigest` (MD5, SHA-1, SHA-2) sur les natives de
+  condensé de conscrypt, réécrites ; `Unsafe`, `libcore.io.Memory`, les `ByteBuffer` directs et
+  `mmap` sur une mémoire native émulée (adresses étiquetées vérifiées à chaque accès, budget global).
+  Côté `framework.jar`, `Resources.getSystem()` lit le vrai `framework-res.apk` de l'image.
 
 ## Limites actuelles
 
 Ressources limitées en mode pont (chaînes, couleurs, dimensions, entiers, booléens et mises en page :
 pas d'images, de styles, de thèmes ni de tableaux), pas de chargeur de bibliothèques
-natives ELF (JNI est prêt, le chargement des `.so` arrive en G4), pas de Binder ni de services
-système, pas d'annotations, pas de parallélisme du code Java (verrou global), rendu limité aux
-contrôles standard, un seul processus. L'ADR-002 détaille le chemin vers les GApps.
+natives ELF (JNI est prêt, le chargement des `.so` arrive en G4), conscrypt limité aux condensés
+(ni chiffrement ni TLS), pas de Binder ni de services système, pas d'annotations, pas de
+parallélisme du code Java (verrou global), rendu limité aux contrôles standard, un seul processus. L'ADR-002 détaille le chemin vers les GApps.
 
 ## Construire
 

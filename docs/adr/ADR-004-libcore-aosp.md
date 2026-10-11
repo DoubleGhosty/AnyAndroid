@@ -98,8 +98,9 @@ Liées à ce jour : `System` (temps, `arraycopy` et variantes typées, journal, 
 fdsan), `FileDescriptor`, `libcore.icu.ICU` (versions, locale fixe `en-US`), `sun.misc.Version`,
 `jdk.internal.misc.VM`, `sun.misc.Unsafe` et `jdk.internal.misc.Unsafe` (accès aux champs et
 tableaux par décalages opaques, CAS, `compareAndExchange`, `park`/`unpark` ; la mémoire brute
-`allocateMemory`/`getInt(long)` n'est **pas** exposée), natives ART de `Class` (réflexion,
-`getPrimitiveClass`, `classForName`…), de `Reference` et d'`Array`.
+`allocateMemory`/`getInt(long)` passe par la mémoire native émulée de `native_memory.h` :
+adresses étiquetées vérifiées à chaque accès, jamais des adresses de l'hôte), natives ART de
+`Class` (réflexion, `getPrimitiveClass`, `classForName`…), de `Reference` et d'`Array`.
 
 **Convertisseurs de caractères** (`libcore_charsets.cpp`) : `NativeConverter` (ICU4C sur Android)
 est réimplémenté sans ICU pour UTF-8, US-ASCII, ISO-8859-1, UTF-16(BE/LE) et UTF-32(BE/LE), avec la
@@ -123,8 +124,8 @@ dans un ADR ultérieur.
 - **`MethodHandle.invoke`/`invokeExact`** (transformations, `EmulatedStackFrame`) : non pris en
   charge ; échec explicite.
 - **Annotations DEX** : nécessaires à la réflexion générique et aux classes internes.
-- **Fichiers** : livré, voir [ADR-005](ADR-005-systeme-de-fichiers-virtuel.md) ; restent `mmap`,
-  `ByteBuffer` directs et `readv`/`writev`.
+- **Fichiers** : livré, voir [ADR-005](ADR-005-systeme-de-fichiers-virtuel.md), y compris `mmap`
+  (copie privée) et les `ByteBuffer` directs sur la mémoire native émulée ; restent `readv`/`writev`.
 - **ICU** : `java.util.Formatter` fonctionne déjà (`%d`, `%s`, `%.2f`) ; les locales, formats de
   dates et `android.icu` (données `icudt78l.dat`, lues par `mmap`) restent à faire.
 - **Démarrage** : comme ART, `bridge::start_libcore()` initialise `System` avant le code de
@@ -132,8 +133,8 @@ dans un ADR ultérieur.
   d'initialisation (`VMRuntime` → `AtomicInteger` → `System` → `VMRuntime`).
 - **Finaliseurs et files de références** : jamais déclenchés par le ramasse-miettes.
 - **Couverture** : `anyandroid libcore natives --bootclasspath <dossier> --libcore-only` liste les
-  natives manquantes (environ 690 sur 1 034 pour la libcore d'Android 17, surtout réseau, fichiers,
-  NIO et ICU) ; `--core` liste les membres du cœur encore absents.
+  natives manquantes (514 sur 1 035 pour la libcore d'Android 17, surtout `libcore.io.Linux`,
+  réseau (`sun.nio.ch`) et ICU) ; `--core` liste les membres du cœur encore absents.
 
 ## 5. Chemin parcouru sur la vraie libcore
 

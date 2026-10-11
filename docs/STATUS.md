@@ -1,6 +1,6 @@
 # État du projet AnyAndroid for Windows
 
-*Mis à jour le 10 octobre 2026.*
+*Mis à jour le 11 octobre 2026.*
 
 ## Le but final
 
@@ -32,40 +32,55 @@ le nombre de fichiers.
 |-------|------------------------------------------------------------|-----------:|------|
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
-| G2    | Vraie libcore d'AOSP (Android 17)                           | 90 %       | NIO.2 / `sun.nio.fs` sur VFS opérationnel ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 40 %       | **En cours** (ressources et mises en page XML des applications en mode pont) |
+| G2    | Vraie libcore d'AOSP (Android 17)                           | 92 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 42 %       | **En cours** (ressources des applications en mode pont, `Resources.getSystem()` sur le vrai `framework-res.apk`) |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
-| **Total** | **Android natif sur Windows**                          | **≈ 37 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
+| **Total** | **Android natif sur Windows**                          | **≈ 38 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
 
 ```
 G0 ██████████ 100 %
 G1 ██████████ 100 %
-G2 █████████░  90 %
-G3 ████░░░░░░  40 %
+G2 █████████░  92 %
+G3 ████░░░░░░  42 %
 G4 ░░░░░░░░░░   0 %
 G5 ░░░░░░░░░░   0 %
    ───────────────
-   ███▋░░░░░░ ≈ 37 % vers « Android natif sur Windows »
+   ███▊░░░░░░ ≈ 38 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 31 suites de tests et 75 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 33 suites de tests et 109 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.
 - **Applications de démonstration** affichées dans une vraie fenêtre Windows, avec cycle de vie
   Android et bouton Retour.
 - **Runtime complet** : vrais threads Windows, ramasse-miettes, réflexion et JNI.
+  `InvocationTargetException` garde sa cause, son message et sa pile, même construite par le
+  bytecode de la libcore. `exec --profile` liste les méthodes les plus coûteuses (instructions,
+  appels) ; sans l'option, les compteurs ne sont pas touchés.
 - **Lecture des images système Android** (`anyandroid image`) : formats sparse, super, ext4 et
   EROFS compressé, APEX.
 - **Vraie libcore d'Android 17** : collections, `Formatter`, concurrence, fichiers, jeux de
-  caractères, `VarHandle`, et **NIO.2 (`sun.nio.fs`, `FileDispatcherImpl`) sur VFS**.
+  caractères, `VarHandle`, et **NIO.2 (`sun.nio.fs`, `FileDispatcherImpl`, `FileChannel`) sur VFS**.
+  - **`java.util.zip`** (`Deflater`, `Inflater`, flux GZIP, `CRC32`, `Adler32`) sur
+    [miniz](../runtime/third_party/miniz/README.md) intégré, avec le comportement de zlib pour les
+    vidages répétés et un nombre plafonné de flux vivants (exemple `zip-demo`).
+  - **`MessageDigest`** (MD5, SHA-1, SHA-224, SHA-256, SHA-384, SHA-512) par le fournisseur
+    `AndroidOpenSSL` de conscrypt, dont les natives de condensé sont réécrites (contextes en
+    identifiants bornés). Pas de chiffrement ni de TLS.
+  - **Mémoire native émulée** : `Unsafe.allocateMemory` et les accès par adresse,
+    `libcore.io.Memory`, `ByteBuffer` directs, `Os.mmap` (anonyme, ou copie privée d'un fichier)
+    et `FileChannel.map`. Les adresses sont des valeurs étiquetées vérifiées à chaque accès, jamais
+    des pointeurs de l'hôte, dans un budget global de 1 Gio.
 - **Système de fichiers virtuel** ([ADR-005](adr/ADR-005-systeme-de-fichiers-virtuel.md)).
   `/system` et `/apex` sont servis depuis l'image, et `/data` et `/sdcard` sont isolés dans un bac
   à sable. Le processus émulé ne voit ni les fichiers ni le nom d'utilisateur de l'hôte.
 - **Vrai `framework.jar`** : `Log`, `TextUtils`, `Bundle`, `ArrayMap`, `Uri`, `Base64`, `JSONObject`,
   `Build` (identité honnête « AnyAndroid »), `Looper`/`Handler`, `SystemClock`, `Parcel` (aller-retour
-  en octets d'un `Bundle` et d'un `Intent`) et `Binder` local (`transact`).
+  en octets d'un `Bundle` et d'un `Intent`), `Binder` local (`transact`), `SystemProperties.digestOf`
+  (fournisseurs JCA) et `Resources.getSystem()` sur le vrai `framework-res.apk` (thème Material,
+  `TypedArray`). L'exemple `framework-demo` les vérifie.
 - **Ressources des applications en mode pont** (`anyandroid run`) : le `resources.arsc` de l'APK est
   chargé avec la configuration de l'appareil (langue de Windows ou `--locale`). `Resources`
   (`getString`, `getText`, `getColor`, `getDimension…`, `getInteger`, `getBoolean`, `getIdentifier`,
@@ -92,12 +107,14 @@ ses mises en page.
     d'écran, mode nuit… avec les règles exactes d'AOSP ;
   - styles avec héritage, thèmes et résolution d'attributs de `TypedArray` ;
   - XML compilé (mises en page) ;
-  - tests unitaires complets en mémoire pour `runtime/resources` (`test_resources.cpp`) ;
+  - tests unitaires complets en mémoire pour `runtime/resources` (`test_resources.cpp`, 10 tests) ;
   - `apkgen build --res` compile un dossier `res/` (valeurs, mises en page, langues) en
     `resources.arsc` et XML binaire, sans SDK Android ; `--r-txt` donne les identifiants `R` ;
   - implémentation de `sun.nio.fs` sur le VFS (`libcore_nio.cpp`) débloquant les dépendances NIO.
 - Vérifié sur le vrai `framework-res.apk` d'Android 17 avec la commande
-  `anyandroid resources <apk> --get string/cancel --locale fr-FR` (résultat : « Annuler »).
+  `anyandroid resources <apk> --get string/cancel --locale fr-FR` (résultat : « Annuler »), et
+  par le vrai framework : la section `resources` de `framework-demo` passe par
+  `Resources.getSystem()`, un thème et un `TypedArray`.
 - Les natives Java correspondantes sont écrites : `AssetManager`, `ApkAssets`, `StringBlock` et
   `XmlBlock`, plus de 90 méthodes.
 - En mode pont, `Context`, `Activity`, `TextView`, `Toast` et `LayoutInflater` sont branchés sur

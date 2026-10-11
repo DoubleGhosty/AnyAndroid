@@ -50,8 +50,9 @@ drapeaux), attributs étendus (aucun), droits et propriétaires (sans effet) ; `
 
 ## Limites
 
-- Tampons `ByteBuffer` directs, `readv`/`writev`, `mmap` : pas encore pris en charge (échec
-  explicite). ICU4J lit ses données par `mmap` : prochaine étape.
+- `readv`/`writev` : pas encore pris en charge (échec explicite). `mmap` et `FileChannel.map`
+  donnent une copie privée du fichier (`MAP_SHARED` non émulé : les écritures ne reviennent pas au
+  fichier) ; les `ByteBuffer` directs reposent sur la mémoire native émulée.
 - Pas de verrous de fichiers, pas de droits Unix réels, système de fichiers de l'hôte insensible à
   la casse (`A` et `a` désignent le même fichier dans le bac à sable).
 - L'entrée standard est lue de façon bloquante sans relâcher le verrou global.
