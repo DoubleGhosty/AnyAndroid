@@ -382,6 +382,13 @@ void register_file_dispatcher(rt::NativeRegistry& r) {
 }
 
 void register_ch_misc(rt::NativeRegistry& r) {
+  // Thread.blockedOn(Interruptible), called around every channel operation
+  // (AbstractInterruptibleChannel.begin/end), records what Thread.interrupt()
+  // must close; its bytecode locks Thread.blockerLock, a field the VM's Thread
+  // does not have. Virtual files never block: there is nothing to interrupt
+  // (an interrupt that precedes the operation is still seen by begin()).
+  r.intrinsic("Ljava/lang/Thread;", "blockedOn", "(Lsun/nio/ch/Interruptible;)V",
+              [](Runtime&, NativeArgs&) -> uint64_t { return 0; }, "aucune E/S bloquante sur les fichiers virtuels");
   r.bind("Lsun/nio/ch/IOUtil;", "iovMax", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return 1024; });
   r.bind("Lsun/nio/ch/NativeThread;", "current", "()J", [](Runtime&, NativeArgs&) -> uint64_t { return 1; }, S::kStub);
   r.bind("Lsun/nio/ch/NativeThread;", "signal", "(J)V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; }, S::kStub);

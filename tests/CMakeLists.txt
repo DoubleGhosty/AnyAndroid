@@ -79,13 +79,17 @@ if(AA_LIBCORE_DIR)
     ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --libcore-only ${S}/hello-dex.apk com.anyandroid.samples.hello.Hello)
   aa_e2e(threads-libcore CODE 0 GOLDEN threads-exec.txt
     ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --libcore-only ${S}/threads-demo.apk com.anyandroid.samples.threads.Main)
+  # Each run that writes files gets its own data directory: tests run in
+  # parallel (ctest -j) and the default one is shared by every build.
   aa_e2e(libcore-demo CODE 0 GOLDEN libcore-demo.txt
-    ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --libcore-only ${S}/libcore-demo.apk com.anyandroid.samples.libcore.Main)
+    ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --libcore-only --data-dir ${CMAKE_CURRENT_BINARY_DIR}/appdata-libcore-demo
+         ${S}/libcore-demo.apk com.anyandroid.samples.libcore.Main)
   # Same program, its file system served from the system image (ADR-005).
   set(AA_SYSTEM_IMAGE "" CACHE FILEPATH "system.img d'Android (tests G2 facultatifs)")
   if(AA_SYSTEM_IMAGE)
     aa_e2e(libcore-demo-image CODE 0 GOLDEN libcore-demo.txt
       ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --libcore-only --system-image ${AA_SYSTEM_IMAGE}
+           --data-dir ${CMAKE_CURRENT_BINARY_DIR}/appdata-libcore-demo-image
            ${S}/libcore-demo.apk com.anyandroid.samples.libcore.Main)
     # G3 entry point: utility classes of the real framework.jar.
     aa_e2e(framework-demo CODE 0 GOLDEN framework-demo.txt
