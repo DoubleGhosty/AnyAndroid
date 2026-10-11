@@ -32,10 +32,7 @@ jobs:
       - name: Generate progress visualizer & raw data
         run: python3 tools/progress.py out
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload artifact
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: out
