@@ -3,7 +3,7 @@
 Couche de compatibilité qui exécute des applications Android (bytecode DEX) **comme des processus
 Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 
-> **Avancement : ≈ 38 % vers « Android natif sur Windows »**, détail et étape en cours dans
+> **Avancement : ≈ 42 % vers « Android natif sur Windows »**, détail et étape en cours dans
 > [docs/STATUS.md](docs/STATUS.md).
 >
 > **Statut : prototype de recherche.** La preuve de concept de l'annexe A du cadrage fonctionne :
@@ -54,14 +54,20 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
   condensé de conscrypt, réécrites ; `Unsafe`, `libcore.io.Memory`, les `ByteBuffer` directs et
   `mmap` sur une mémoire native émulée (adresses étiquetées vérifiées à chaque accès, budget global).
   Côté `framework.jar`, `Resources.getSystem()` lit le vrai `framework-res.apk` de l'image.
+- **Démarrage d'applications par le vrai framework** ([ADR-006](docs/adr/ADR-006-demarrage-applications.md),
+  en cours) : vrais `PathClassLoader` sur l'APK, services système locaux (`package` par le vrai
+  `PackageParser`, `permissionmgr`) et `java.util.regex` sur un moteur compatible ICU. Le lanceur
+  d'hôte crée l'`Application` puis l'activité, dont l'`onCreate` s'exécute.
 
 ## Limites actuelles
 
 Ressources limitées en mode pont (chaînes, couleurs, dimensions, entiers, booléens et mises en page :
 pas d'images, de styles, de thèmes ni de tableaux), pas de chargeur de bibliothèques
 natives ELF (JNI est prêt, le chargement des `.so` arrive en G4), conscrypt limité aux condensés
-(ni chiffrement ni TLS), pas de Binder ni de services système, pas d'annotations, pas de
-parallélisme du code Java (verrou global), rendu limité aux contrôles standard, un seul processus. L'ADR-002 détaille le chemin vers les GApps.
+(ni chiffrement ni TLS), Binder local seulement (pas de transactions entre processus) et
+services système encore partiels, annotations limitées aux annotations système (classes
+internes), pas de parallélisme du code Java (verrou global), rendu limité aux contrôles standard
+en mode pont, un seul processus. L'ADR-002 détaille le chemin vers les GApps.
 
 ## Construire
 
