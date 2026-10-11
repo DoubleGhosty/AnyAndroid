@@ -66,6 +66,17 @@ if(WIN32)
   add_subdirectory(apps/cli)
 endif()
 
+# Host code in Java (ADR-006), built only with a JDK >= 17 and R8's jar.
+set(AA_R8_JAR "" CACHE FILEPATH "r8.jar (D8) pour compiler le code d'hôte Java (ADR-006)")
+find_package(Java 17 COMPONENTS Development Runtime QUIET)
+if(WIN32 AND Java_JAVAC_EXECUTABLE AND AA_R8_JAR AND EXISTS "${AA_R8_JAR}")
+  set(AA_ANDROID_HOST ON)
+  add_subdirectory(runtime/android-host)
+  message(STATUS "Code d'hôte Java : javac ${Java_VERSION_STRING}, ${AA_R8_JAR}")
+else()
+  set(AA_ANDROID_HOST OFF)
+endif()
+
 if(AA_BUILD_SAMPLES)
   add_subdirectory(samples)
 endif()

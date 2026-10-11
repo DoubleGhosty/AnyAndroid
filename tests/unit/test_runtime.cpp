@@ -574,3 +574,74 @@ TEST(java_number_formatting) {
   CHECK_EQ(rt::java_fp_to_string(100.0, false), std::string("100.0"));
   CHECK_EQ(rt::java_fp_to_string(0.001, false), std::string("0.001"));
 }
+
+// ADR-006: an abstract method that a class of the host DEX leaves unimplemented
+// answers a neutral value; for application classes it stays AbstractMethodError.
+TEST(host_classes_answer_neutral_values_for_unimplemented_methods) {
+  const char* two = R"SMALI(
+.class public interface abstract LTwo;
+.super Ljava/lang/Object;
+.method public abstract a()I
+.end method
+.method public abstract b()Ljava/lang/String;
+.end method
+)SMALI";
+  const char* half = R"SMALI(
+.class public LHalf;
+.super Ljava/lang/Object;
+.implements LTwo;
+.method public constructor <init>()V
+    .registers 1
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+    return-void
+.end method
+.method public a()I
+    .registers 2
+    const/4 v0, 0x7
+    return v0
+.end method
+)SMALI";
+  const char* use = R"SMALI(
+.class public LUse;
+.super Ljava/lang/Object;
+.method public static run(LTwo;)I
+    .registers 3
+    invoke-interface {p0}, LTwo;->b()Ljava/lang/String;
+    move-result-object v0
+    if-nez v0, :bad
+    invoke-interface {p0}, LTwo;->a()I
+    move-result v1
+    add-int/lit8 v1, v1, 0x64
+    return v1
+    :bad
+    const/4 v1, -0x1
+    return v1
+.end method
+)SMALI";
+  // The same partial class in the application DEX.
+  std::string app_half = std::string(half);
+  app_half.replace(app_half.find("LHalf;"), 6, "LAppHalf;");
+  auto host_dex = dex::DexFile::open(tool::write_dex({tool::assemble_smali(half, "h.smali")}), "host.dex");
+  Vm vm({tool::assemble_smali(two, "t.smali"), tool::assemble_smali(use, "u.smali"),
+         tool::assemble_smali(app_half, "a.smali")});
+  vm.rt->add_host_dex(host_dex.get());
+  auto make = [&](const char* cls) {
+    rt::Class* c = vm.rt->find_class(cls);
+    rt::Handle h = vm.rt->alloc(c);
+    uint32_t args[1] = {h};
+    vm.rt->invoke(c->declared_method("<init>", "()V"), args, 1);
+    return h;
+  };
+  rt::Handle host_obj = make("LHalf;");
+  CHECK(vm.rt->find_class("LHalf;")->host);
+  CHECK_EQ(int32_t(vm.call("run", "(LTwo;)I", {host_obj}, "LUse;")), 107);
+  rt::Handle app_obj = make("LAppHalf;");
+  CHECK(!vm.rt->find_class("LAppHalf;")->host);
+  std::string thrown;
+  try {
+    vm.call("run", "(LTwo;)I", {app_obj}, "LUse;");
+  } catch (const rt::JavaThrow& t) {
+    thrown = vm.rt->class_of(t.exception)->java_name();
+  }
+  CHECK_EQ(thrown, std::string("java.lang.AbstractMethodError"));
+}

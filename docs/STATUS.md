@@ -33,7 +33,7 @@ le nombre de fichiers.
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
 | G2    | Vraie libcore d'AOSP (Android 17)                           | 92 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 42 %       | **En cours** (ressources des applications en mode pont, `Resources.getSystem()` sur le vrai `framework-res.apk`) |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 43 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0 fait (code d'hôte Java) |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
 | **Total** | **Android natif sur Windows**                          | **≈ 38 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
@@ -49,7 +49,7 @@ G5 ░░░░░░░░░░   0 %
    ███▊░░░░░░ ≈ 38 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 33 suites de tests et 109 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 34 suites de tests et 113 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.
@@ -80,6 +80,11 @@ G5 ░░░░░░░░░░   0 %
   - **Bibliothèques natives** : `System.loadLibrary` réussit sans rien charger (chargeur ELF prévu
     en G4) ; l'absence n'apparaît qu'au premier appel d'une méthode native non fournie
     (`UnsatisfiedLinkError`).
+- **Code d'hôte en Java** ([ADR-006](adr/ADR-006-demarrage-applications.md), jalon J0) : `runtime/android-host`
+  est compilé par `javac` + D8 en `anyandroid-host.dex` (option active avec un JDK ≥ 17 et
+  `-DAA_R8_JAR`), chargé après le chemin d'amorçage. Une méthode abstraite du framework qu'une
+  classe d'hôte n'implémente pas répond une valeur neutre et est journalisée, au lieu
+  d'`AbstractMethodError` (test `host-probe`).
 - **Système de fichiers virtuel** ([ADR-005](adr/ADR-005-systeme-de-fichiers-virtuel.md)).
   `/system` et `/apex` sont servis depuis l'image, et `/data` et `/sdcard` sont isolés dans un bac
   à sable. Le processus émulé ne voit ni les fichiers ni le nom d'utilisateur de l'hôte.

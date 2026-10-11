@@ -174,6 +174,7 @@ struct Method {
 struct DexCache {
   const dex::DexFile* dex = nullptr;
   bool boot = false;  // boot class path (libcore, framework)
+  bool host = false;  // AnyAndroid's host code (ADR-006), after the boot class path
   std::vector<Class*> types;
   std::vector<Field*> fields;
   std::vector<Method*> methods;  // static/direct resolution
@@ -189,6 +190,7 @@ struct Class {
   uint32_t access = 0;
   bool framework = false;  // provided by the native registry
   bool boot = false;       // defined by the boot class path (libcore mode)
+  bool host = false;       // defined by the host DEX, or derived from such a class (ADR-006)
   bool phantom = false;    // unknown interface replaced by an empty one
   char primitive = 0;      // 'I', 'Z', ... for primitive classes
   Class* component = nullptr;
@@ -385,6 +387,11 @@ class Runtime {
   // Its classes take precedence over the bridge and over application code,
   // except the VM core classes (is_vm_core_class), which stay native.
   void add_boot_dex(const dex::DexFile* dex);
+  // Adds AnyAndroid's host DEX (system services, ADR-006) after the boot class
+  // path: its classes cannot be replaced by the application's. An abstract
+  // method a host class leaves unimplemented answers a neutral value (null, 0,
+  // false) and is logged once, instead of AbstractMethodError.
+  void add_host_dex(const dex::DexFile* dex);
   bool libcore_mode() const { return boot_mode_; }
 
   // --- Classes -------------------------------------------------------------

@@ -6,12 +6,14 @@
 #     system.img and the boot class path extracted by `anyandroid image`;
 #   - optionally the GSI x86_64 with GMS, from which the GApps (GmsCore, GSF,
 #     Play Store) and their permission files are extracted;
-#   - optionally microG from its official F-Droid repository (microg.org).
+#   - optionally microG from its official F-Droid repository (microg.org);
+#   - optionally R8/D8 from Google's Maven repository, to build AnyAndroid's
+#     host code in Java (ADR-006; -DAA_R8_JAR=<dir>/tools/r8-<version>.jar).
 #
 # Running it means accepting the "GSI License Agreement" shown on
 # https://developer.android.com/topic/generic-system-image/releases.
 #
-#   tools/fetch-android-inputs.sh <output dir> [--gms] [--microg]
+#   tools/fetch-android-inputs.sh <output dir> [--gms] [--microg] [--r8]
 #
 # Needs curl, unzip, sha256sum, python3 and the AnyAndroid CLI: set AA_CLI to
 # its path (default build/apps/cli/anyandroid.exe; on Linux, AA_CLI="wine
@@ -25,15 +27,19 @@ AOSP_SHA=81e37ae9e9280497c92fbda758b998a7dfab91ab9de000021622afa868a43b70
 GMS_ZIP=gsi_gms_x86_64-exp-CP3A.260905.010-16176746-3eb28f1b.zip
 GMS_SHA=3eb28f1b234d0b7cea80d9cb890cc96eb84d530e2b91ceefb9009461269ae58a
 MICROG_REPO=https://microg.org/fdroid/repo
+R8_VERSION=9.5.23
+R8_URL=https://dl.google.com/dl/android/maven2/com/android/tools/r8/$R8_VERSION/r8-$R8_VERSION.jar
+R8_SHA=748ab0ef66e85b54cec5ad83d168999db9e3dad8c8f63170e836eff195cbd09b
 
 usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 [ $# -ge 1 ] || usage
 OUT=$1; shift
-WANT_GMS=0; WANT_MICROG=0
+WANT_GMS=0; WANT_MICROG=0; WANT_R8=0
 for a in "$@"; do
   case $a in
     --gms) WANT_GMS=1 ;;
     --microg) WANT_MICROG=1 ;;
+    --r8) WANT_R8=1 ;;
     *) usage ;;
   esac
 done
@@ -112,5 +118,12 @@ for pkg, versions in index["packages"].items():
 EOF
 fi
 
+if [ $WANT_R8 = 1 ]; then
+  echo "== R8/D8 $R8_VERSION (Google Maven)"
+  mkdir -p "$OUT/tools"
+  fetch "$R8_URL" "$OUT/tools/r8-$R8_VERSION.jar" "$R8_SHA"
+fi
+
 echo "Terminé : $OUT"
 echo "Tests G2/G3 : cmake -S . -B build -DAA_LIBCORE_DIR=$OUT/libcore17 -DAA_SYSTEM_IMAGE=$OUT/aosp17/system.img"
+[ $WANT_R8 = 1 ] && echo "Code d'hôte Java : ajouter -DAA_R8_JAR=$OUT/tools/r8-$R8_VERSION.jar (JDK >= 17 requis)"

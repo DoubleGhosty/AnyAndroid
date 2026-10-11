@@ -1,6 +1,7 @@
 #include "dex-engine/runtime.h"
 
 #include <algorithm>
+#include <iterator>
 #include <cstdio>
 #include <deque>
 
@@ -178,6 +179,12 @@ void Runtime::add_boot_dex(const dex::DexFile* dex) {
   auto pos = std::find_if(dex_caches_.begin(), dex_caches_.end(), [](const auto& c) { return !c->boot; });
   dex_caches_.insert(pos, std::move(cache));
   boot_mode_ = true;
+}
+
+void Runtime::add_host_dex(const dex::DexFile* dex) {
+  add_boot_dex(dex);  // last of the boot caches
+  auto it = std::find_if(dex_caches_.begin(), dex_caches_.end(), [](const auto& c) { return !c->boot; });
+  (*std::prev(it))->host = true;
 }
 
 Class* Runtime::lookup_class(std::string_view descriptor) {
@@ -408,6 +415,7 @@ Class* Runtime::define_from_dex(DexCache& cache, uint32_t idx) {
   if (super->is_interface()) throw_new("Ljava/lang/IncompatibleClassChangeError;", java(desc) + " étend une interface");
   if (super->is_array() || super->primitive) throw_new("Ljava/lang/ClassFormatError;", java(desc) + " : superclasse invalide");
   cls->super = super;
+  cls->host = cache.host || super->host;
 
   try {
     if (def.interfaces_off) {
@@ -848,7 +856,18 @@ uint64_t Runtime::invoke(Method* m, const uint32_t* args, uint32_t nargs) {
     if (unsupported_.insert(api).second) log::error("bridge", "méthode JNI appelée (code natif non pris en charge) : " + api, api);
     throw_new("Ljava/lang/UnsatisfiedLinkError;", "[AnyAndroid] méthode native JNI non prise en charge : " + api);
   }
-  if (m->code_off == 0) throw_new("Ljava/lang/AbstractMethodError;", m->pretty());
+  if (m->code_off == 0) {
+    // ADR-006: host classes (system services) implement only the part of the
+    // framework interfaces they need; the rest answers a neutral value.
+    Object* self = !m->is_static() && nargs > 0 ? object(args[0]) : nullptr;
+    if (self && self->klass->host) {
+      std::string api = self->klass->java_name() + " : " + m->pretty();
+      if (unsupported_.insert(api).second) log::warn("services", "méthode non implémentée par l'hôte AnyAndroid : " + api, m->pretty());
+      stats_.native_calls++;
+      return 0;
+    }
+    throw_new("Ljava/lang/AbstractMethodError;", m->pretty());
+  }
   return execute(m, args, nargs);
 }
 

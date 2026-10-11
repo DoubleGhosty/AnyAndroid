@@ -1,0 +1,3 @@
+hôte : sdk 37, AnyAndroid
+écouteur : attaché, méthode absente -> null
+lambda : ok

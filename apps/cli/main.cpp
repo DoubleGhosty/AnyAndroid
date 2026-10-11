@@ -76,6 +76,8 @@ void usage() {
       "  exec [--bootclasspath <dossier>] <fichier.apk|.dex> <classe> [arguments...]\n"
       "      Exécute la méthode statique main(String[]) d'une classe (programme console).\n"
       "      --bootclasspath : utilise la libcore d'AOSP extraite par `image bootclasspath` (G2) ;\n"
+      "      --host-dex <fichier> : code d'hôte d'AnyAndroid (services système, ADR-006) ; par défaut\n"
+      "        anyandroid-host.dex à côté de l'exécutable s'il existe ;\n"
       "      --libcore-only : n'en garde que les modules ART et i18n (sans framework.jar).\n"
       "      --system-image <system.img> : sert /system et /apex depuis l'image (ADR-005) ;\n"
       "      --data-dir <dossier> : bac à sable des zones inscriptibles (/data, /sdcard) ;\n"
@@ -125,7 +127,7 @@ struct Args {
 bool parse_args(const std::vector<std::string>& argv, Args& a) {
   static const std::set<std::string> with_value = {"--log-level", "--log-file", "--disasm", "--activity",
                                                    "--script",    "--do",       "--max-instructions", "--top", "--output",
-                                                   "--partition", "--bootclasspath", "--system-image", "--data-dir",
+                                                   "--partition", "--bootclasspath", "--system-image", "--data-dir", "--host-dex",
                                                    "--get",       "--locale",   "--density"};
   for (size_t i = 1; i < argv.size(); ++i) {
     const std::string& s = argv[i];
@@ -177,6 +179,15 @@ std::unique_ptr<apk::LoadedApk> load(const std::string& path) {
     err("APK illisible : " + std::string(e.what()));
     return nullptr;
   }
+}
+
+// anyandroid-host.dex next to the executable (built with AA_ANDROID_HOST), or
+// an empty path.
+fs::path default_host_dex() {
+  wchar_t buf[MAX_PATH];
+  DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+  if (n == 0 || n >= MAX_PATH) return {};
+  return fs::path(std::wstring(buf, n)).parent_path() / "anyandroid-host.dex";
 }
 
 // A phone-like configuration (AnyAndroid's default window).
@@ -514,6 +525,27 @@ int cmd_exec(const Args& a) {
   ro.profile = a.has("--profile");
   rt::Runtime runtime(ro);
   for (const auto& d : boot.dex) runtime.add_boot_dex(d.get());
+  // AnyAndroid's host code (system services, ADR-006), after the boot class path.
+  std::unique_ptr<dex::DexFile> host_dex;
+  if (!boot.dex.empty()) {
+    fs::path host_path = a.has("--host-dex") ? path_from_utf8(a.get("--host-dex")) : default_host_dex();
+    if (!host_path.empty() && fs::exists(host_path)) {
+      try {
+        host_dex = dex::DexFile::open(read_file(host_path, 64u << 20), path_utf8(host_path));
+      } catch (const std::exception& e) {
+        err("DEX d'hôte illisible : " + std::string(e.what()));
+        return kUsage;
+      }
+      runtime.add_host_dex(host_dex.get());
+      log::info("libcore", "DEX d'hôte : " + path_utf8(host_path));
+    } else if (a.has("--host-dex")) {
+      err("DEX d'hôte introuvable : " + a.get("--host-dex"));
+      return kUsage;
+    }
+  } else if (a.has("--host-dex")) {
+    err("--host-dex demande --bootclasspath (le code d'hôte s'appuie sur le vrai framework)");
+    return kUsage;
+  }
   for (const auto* d : dex_files) runtime.add_dex(d);
   lifecycle::ConsoleHost host(package);
   bridge::install(runtime.registry(), host);

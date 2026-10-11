@@ -106,6 +106,12 @@ if(AA_LIBCORE_DIR)
     aa_e2e(libcore-demo-image CODE 0 GOLDEN libcore-demo.txt
       ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --libcore-only --system-image ${AA_SYSTEM_IMAGE}
            ${S}/libcore-demo.apk com.anyandroid.samples.libcore.Main)
+    # ADR-006 J0: host code (javac + D8) on the real framework.
+    if(AA_ANDROID_HOST)
+      aa_e2e(host-probe CODE 0 GOLDEN host-probe.txt
+        ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
+             ${S}/hello-dex.apk aa.host.Probe)
+    endif()
     # G3 entry point: utility classes of the real framework.jar.
     aa_e2e(framework-demo CODE 0 GOLDEN framework-demo.txt
       ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE}

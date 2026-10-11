@@ -80,6 +80,10 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+Facultatif : avec un JDK ≥ 17 et le jar de R8 (`tools/fetch-android-inputs.sh <dossier> --r8`),
+`-DAA_R8_JAR=<dossier>/tools/r8-9.5.23.jar` construit aussi le code d'hôte Java
+(`runtime/android-host`, [ADR-006](docs/adr/ADR-006-demarrage-applications.md)).
+
 Le build reconstruit les APK de démonstration depuis leurs sources texte (`samples/`, smali +
 manifeste) avec l'outil `apkgen` : aucun SDK Android n'est nécessaire.
 
