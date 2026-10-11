@@ -1,10 +1,14 @@
 # AnyAndroid for Windows
 
+[![Avancement AnyAndroid](https://DoubleGhosty.github.io/AnyAndroid/badge-overall.svg)](https://DoubleGhosty.github.io/AnyAndroid/)
+[![Pont Framework](https://DoubleGhosty.github.io/AnyAndroid/badge-bridge.svg)](https://DoubleGhosty.github.io/AnyAndroid/)
+[![Natives Libcore](https://DoubleGhosty.github.io/AnyAndroid/badge-libcore.svg)](https://DoubleGhosty.github.io/AnyAndroid/)
+
 Couche de compatibilité qui exécute des applications Android (bytecode DEX) **comme des processus
 Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 
-> **Avancement : ≈ 42 % vers « Android natif sur Windows »**, détail et étape en cours dans
-> [docs/STATUS.md](docs/STATUS.md).
+> **Avancement : ≈ 42 % vers « Android natif sur Windows »**
+> 📊 **[Consulter le tableau de bord interactif de progression](https://DoubleGhosty.github.io/AnyAndroid/)** · [progress.json](https://DoubleGhosty.github.io/AnyAndroid/progress.json) · [docs/STATUS.md](docs/STATUS.md).
 >
 > **Statut : prototype de recherche.** La preuve de concept de l'annexe A du cadrage fonctionne :
 > des APK de démonstration s'ouvrent dans une vraie fenêtre Windows. L'objectif prioritaire est

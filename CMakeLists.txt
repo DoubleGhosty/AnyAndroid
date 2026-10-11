@@ -86,3 +86,12 @@ if(AA_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
 endif()
+
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+  add_custom_target(progress
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/progress.py
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "Génération des visualisations de progression AnyAndroid (dashboard HTML, Treemap SVG, JSON)"
+  )
+endif()
