@@ -158,8 +158,8 @@ struct Method {
   ApiStatus status = ApiStatus::kSupported;
   std::string note;
   bool reported = false;  // stub/partial usage already logged
-  // Profile (`exec --profile`): calls and instructions executed in this
-  // method's own frames (callees excluded).
+  // Profile (`exec --profile`, RuntimeOptions::profile): calls and
+  // instructions executed in this method's own frames (callees excluded).
   uint64_t profile_calls = 0;
   uint64_t profile_instructions = 0;
   // JNI implementation registered with RegisterNatives (System V ABI).
@@ -294,6 +294,9 @@ class GlobalRef {
 
 struct RuntimeOptions {
   bool trace = false;
+  // Per-method counters (Method::profile_*, `exec --profile`). Off, they are
+  // not touched: the interpreter tests a flag hoisted out of its loop.
+  bool profile = false;
   uint32_t max_depth = 1000;
   size_t max_objects = 4'000'000;
   uint32_t max_array_length = 64u << 20;

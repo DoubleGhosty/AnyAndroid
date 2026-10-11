@@ -184,6 +184,7 @@ uint64_t Runtime::execute(Method* m, const uint32_t* args, uint32_t nargs) {
   Handle pending_exception = kNull;
   size_t i = 0;
   uint32_t argbuf[256];
+  const bool profile = options_.profile;
 
   for (;;) {
     try {
@@ -192,7 +193,7 @@ uint64_t Runtime::execute(Method* m, const uint32_t* args, uint32_t nargs) {
         const Insn& in = insns[i];
         t->frames[fi].pc = in.pc;
         stats_.instructions++;
-        m->profile_instructions++;
+        if (profile) m->profile_instructions++;
         if (options_.max_instructions && ++t->budget_used > options_.max_instructions) {
           throw_new("Ljava/lang/Error;", "[AnyAndroid] budget d'instructions dépassé (boucle infinie ?)");
         }
