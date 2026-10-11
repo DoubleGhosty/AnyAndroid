@@ -25,14 +25,14 @@ remplace uniquement la frontière avec le noyau et le matériel.
 
 ## Avancement
 
-[![Avancement AnyAndroid](https://DoubleGhosty.github.io/AnyAndroid/badge-overall.svg)](https://DoubleGhosty.github.io/AnyAndroid/)
-[![Pont Framework](https://DoubleGhosty.github.io/AnyAndroid/badge-bridge.svg)](https://DoubleGhosty.github.io/AnyAndroid/)
-[![Natives Libcore](https://DoubleGhosty.github.io/AnyAndroid/badge-libcore.svg)](https://DoubleGhosty.github.io/AnyAndroid/)
+![Avancement AnyAndroid](badge-overall.svg)
+![Pont Framework](badge-bridge.svg)
+![Natives Libcore](badge-libcore.svg)
 
-> 📊 **[Consulter le tableau de bord interactif de progression](https://DoubleGhosty.github.io/AnyAndroid/)** · Données brutes : [progress.json](https://DoubleGhosty.github.io/AnyAndroid/progress.json)  
+> 📊 **Carte de progression du projet** · Données brutes : [progress.json](progress.json)  
 > Généré automatiquement par [`tools/progress.py`](../tools/progress.py) à chaque push sur `main`.
 
-[![Carte Treemap d'avancement AnyAndroid](https://DoubleGhosty.github.io/AnyAndroid/progress.svg)](https://DoubleGhosty.github.io/AnyAndroid/)
+![Carte Treemap d'avancement AnyAndroid](progress.svg)
 
 Les pourcentages sont des estimations de l'effort réalisé dans chaque étape. Ils ne comptent pas
 le nombre de fichiers.

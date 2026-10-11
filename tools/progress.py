@@ -1219,19 +1219,35 @@ def main():
     parser.add_argument("--out-dir", type=Path, default=None, help="Répertoire de sortie pour le site (défaut: site/)")
     parser.add_argument("--docs-dir", type=Path, default=None, help="Répertoire de sortie pour la documentation (facultatif)")
     parser.add_argument("--report", action="store_true", help="Affiche un rapport texte / markdown sur stdout")
+    parser.add_argument("--summary", action="store_true", help="Génère un résumé markdown compatible GitHub Step Summary")
     parser.add_argument("--check", action="store_true", help="Vérifie la cohérence des métriques")
     args = parser.parse_args()
 
     out_dir = args.output or args.out_dir or DEFAULT_OUT_DIR
 
-    print("[*] Collecte des métriques AnyAndroid...")
     data = collect_all_data()
-
     overall = data["summary"]["overall_percent"]
     bridge_pct = data["summary"]["bridge_percent"]
     libcore_pct = data["summary"]["libcore_percent"]
     dalvik_pct = data["summary"]["dalvik_percent"]
 
+    if args.summary:
+        print("### 📊 AnyAndroid — Tableau de Progression\n")
+        print("| Sous-système | Réalisé | Total | % | Statut |")
+        print("|---|---|---|---|---|")
+        print(f"| **Avancement Global** | — | — | **≈ {overall} %** | Pondéré par l'effort des jalons |")
+        print(f"| **Pont Framework API** | {data['bridge']['counts'].get('supported',0)} | {data['bridge']['total_members']} | **{bridge_pct} %** | {data['bridge']['total_classes']} classes |")
+        print(f"| **Natives Libcore AOSP 17** | {data['libcore']['done']} | {data['libcore']['total']} | **{libcore_pct} %** | {data['libcore']['linked']} liées + {data['libcore']['vm_core']} VM |")
+        print(f"| **Opcodes Dalvik ISA** | {data['dalvik']['done']} | {data['dalvik']['total']} | **{dalvik_pct} %** | Jeu Dalvik complet |")
+        print(f"| **Suites de Tests CTest** | {data['tests']['passed_suites']} | {data['tests']['total_suites']} | **{data['tests']['percent_core']}%** | {data['tests']['unit_tests']} unitaires |\n")
+        print("#### Jalons d'Architecture G0–G5\n")
+        print("| Étape | Nom | % | État |")
+        print("|---|---|---|---|")
+        for m in data["milestones"]["items"]:
+            print(f"| **{m['id']}** | {m['name']} | {m['progress']} % | {m['status']} |")
+        return
+
+    print("[*] Collecte des métriques AnyAndroid...")
     print(f"    - Avancement global : ≈ {overall} %")
     print(f"    - Pont Framework    : {bridge_pct} % ({data['bridge']['counts'].get('supported',0)}/{data['bridge']['total_members']} membres)")
     print(f"    - Natives Libcore   : {libcore_pct} % ({data['libcore']['done']}/{data['libcore']['total']})")
@@ -1274,12 +1290,13 @@ def main():
     with open(out_dir / "badge-libcore.svg", "w", encoding="utf-8") as f:
         f.write(badge_libcore)
 
-    # 4. Dashboard Web HTML (index.html)
-    html_content = generate_html_dashboard(data, svg_content)
-    html_path = out_dir / "index.html"
-    with open(html_path, "w", encoding="utf-8") as f:
-        f.write(html_content)
-    print(f"[+] Écrit: {html_path}")
+    # 4. Dashboard Web HTML (uniquement si ce n'est pas le dossier docs)
+    if out_dir.name != "docs":
+        html_content = generate_html_dashboard(data, svg_content)
+        html_path = out_dir / "index.html"
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html_content)
+        print(f"[+] Écrit: {html_path}")
 
     # Si docs_dir est explicitement demandé
     if args.docs_dir:
@@ -1292,7 +1309,10 @@ def main():
             f.write(badge_overall)
 
     print("\n[✓] Progression générée avec succès !")
-    print(f"    Pour ouvrir le dashboard : {html_path.resolve().as_uri()}")
+    if "html_path" in locals():
+        print(f"    Pour ouvrir le dashboard : {html_path.resolve().as_uri()}")
+    else:
+        print(f"    Carte vectorielle : {(out_dir / 'progress.svg').resolve().as_uri()}")
 
 
 if __name__ == "__main__":
