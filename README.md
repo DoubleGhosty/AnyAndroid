@@ -78,7 +78,7 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 | J5 — démarrage par les vrais gestionnaires d'`ActivityThread`, fenêtre logique | atteint : jusqu'à la première image publiée (test e2e `process-launch`) |
 | J6 — texte (FreeType + HarfBuzz, logique de minikin) | bien avancé : mesure (`Paint`), `MeasuredText`, coupure de lignes (`LineBreaker`) |
 | J7 — moteur 2D logiciel (dessin des vues dans la `Surface`) | la fenêtre est dessinée : `SkiaCanvas` de HWUI sur le Skia d'AOSP, effets des `Paint` ; reste AGSL (`RuntimeShader`) |
-| J8 — fenêtre Win32 et entrées | prochain : présenter les images publiées, puis souris et clavier |
+| J8 — fenêtre Win32 et entrées | en cours : `exec --window` montre l'écran ; service `input`, `KeyCharacterMap` ; reste souris et clavier (`MotionEvent`) |
 | J9-J10 — navigation, une application AOSP affichée | à faire |
 
 ## Limites actuelles

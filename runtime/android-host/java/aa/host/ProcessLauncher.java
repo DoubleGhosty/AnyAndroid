@@ -42,11 +42,17 @@ public final class ProcessLauncher implements ActivityService.AttachHandler {
     this.pkg = pkg;
   }
 
+  /**
+   * {@code main(package [--until-resumed])}: with --until-resumed (the tests), the process ends
+   * once the activity is in the foreground; otherwise the application runs until the process is
+   * ended (its window closed).
+   */
   public static void main(String[] args) {
     ActivityService.onAttach(new ProcessLauncher(args[0]));
+    boolean untilResumed = args.length > 1 && args[1].equals("--until-resumed");
     ActivityTaskService.onResumed = () -> new Handler(Looper.getMainLooper()).post(() -> {
       Launcher.log("activité au premier plan");
-      throw new Stop();
+      if (untilResumed) throw new Stop();
     });
     // Software drawing (ADR-006 §3): ViewRootImpl draws through drawSoftware, without HWUI.
     Reflect.setStatic(Reflect.type("android.view.ThreadedRenderer"), "sRendererEnabled", false);

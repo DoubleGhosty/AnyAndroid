@@ -177,6 +177,14 @@ uint32_t paint_locale_list_id(rt::Runtime& rt, int64_t paint);
 // registered by register_framework_graphics.
 void register_framework_text(rt::NativeRegistry& r);
 void register_parcel_natives(rt::NativeRegistry& r);
+// libbinder's int32 and String8 in a Java Parcel (its mNativePtr), for the
+// natives that marshal their own state; a read past the end clears *ok.
+int32_t parcel_read_i32(rt::Runtime& rt, rt::Handle parcel, bool* ok);
+void parcel_write_i32(rt::Runtime& rt, rt::Handle parcel, int32_t v);
+std::string parcel_read_string8(rt::Runtime& rt, rt::Handle parcel, bool* ok);
+void parcel_write_string8(rt::Runtime& rt, rt::Handle parcel, const std::string& v);
+// KeyCharacterMap, KeyEvent (framework_input.cpp), registered by register_framework_natives.
+void register_framework_input(rt::NativeRegistry& r);
 void register_appmem_natives(rt::NativeRegistry& r);
 void register_resource_natives(rt::NativeRegistry& r);
 // Android system properties of the emulated device (build.prop and

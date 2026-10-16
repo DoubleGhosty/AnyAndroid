@@ -276,10 +276,18 @@ sur un `SkCanvas` posé sur les pixels des bitmaps et des tampons de fenêtre (R
 l'ordre d'Android) ; les polices du moteur de texte deviennent des `SkTypeface` FreeType comme
 dans `MinikinFontSkia` ([ADR-008](adr/ADR-008-moteur-2d.md)).
 
+**J8 commencé : l'écran dans une fenêtre Win32.** `exec --window` montre les images publiées par
+le vrai framework dans une fenêtre (mise à l'échelle avec les proportions de l'écran, sur son
+propre fil) ; la fermer termine le processus, comme Android le tue. `ProcessLauncher` laisse alors
+l'application tourner (`--until-resumed` pour les tests). Le service `input` (`IInputManager`)
+décrit le clavier virtuel (id −1) avec le `Virtual.kcm` de l'image, lu par le port du
+`KeyCharacterMap` de libinput (syntaxe `.kcm`, modificateurs, recouvrements, `Parcel`) ; les
+natives de `KeyCharacterMap` et `KeyEvent` sont branchées.
+
 **Suite prévue, dans l'ordre** :
-1. J8 : présenter les images publiées dans une fenêtre Win32 (un compositeur minimal pour les
-   couches de `SurfaceControl`), puis les entrées (`InputChannel` : souris, clavier) vers
-   `ViewRootImpl`.
+1. J8, suite : les entrées de la fenêtre vers l'application (`MotionEvent` et ses 52 natives,
+   envoi par l'`InputChannel` à `InputEventReceiver`, clavier), puis un compositeur minimal
+   pour plusieurs couches (dialogues, menus).
 2. J7, fin : `RuntimeShader` et `RuntimeColorFilter` (AGSL, utilisés par les ondulations de
    Material), `drawGlyphs`, les rotations 3D de `RenderNode`, et des sondes de pixels dans le
    test `process-launch`.

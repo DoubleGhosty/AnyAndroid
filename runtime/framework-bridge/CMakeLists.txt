@@ -9,6 +9,7 @@ add_library(aa_bridge STATIC
   framework_fonts.cpp
   framework_graphics.cpp
   framework_images.cpp
+  framework_input.cpp
   framework_matrix.cpp
   framework_paint.cpp
   framework_path.cpp
@@ -16,6 +17,7 @@ add_library(aa_bridge STATIC
   framework_surface.cpp
   framework_text.cpp
   framework_vector_drawable.cpp
+  key_character_map.cpp
   framework_natives.cpp
   framework_parcel.cpp
   framework_resources.cpp

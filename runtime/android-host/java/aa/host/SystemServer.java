@@ -5,6 +5,7 @@ import aa.host.services.ActivityService;
 import aa.host.services.ActivityTaskService;
 import aa.host.services.DisplayService;
 import aa.host.services.InputMethodService;
+import aa.host.services.InputService;
 import aa.host.services.PackageService;
 import aa.host.services.PermissionService;
 import aa.host.services.SystemFeatures;
@@ -38,6 +39,7 @@ public final class SystemServer {
     ServiceManager.addService("permissionmgr", new PermissionService(packages));
     ServiceManager.addService("window", new WindowService());
     ServiceManager.addService("display", new DisplayService());
+    ServiceManager.addService("input", new InputService());
     ServiceManager.addService("input_method", new InputMethodService());
     ServiceManager.addService("accessibility", new AccessibilityService());
     ServiceManager.addService("activity", new ActivityService(packages));

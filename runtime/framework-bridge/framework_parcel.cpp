@@ -140,6 +140,48 @@ Handle new_bytes(Runtime& rt, const uint8_t* src, uint32_t n) {
 
 }  // namespace
 
+// The native parcel of a Java Parcel (Parcel.mNativePtr).
+static NativeParcel& parcel_of_object(Runtime& rt, Handle parcel_object) {
+  rt::Object& o = rt.nonnull(parcel_object, "Parcel");
+  rt::Field* f = find_field(o.klass, "mNativePtr", "J");
+  if (!f || f->is_static()) rt.throw_new("Ljava/lang/IllegalStateException;", "Parcel sans natif");
+  int64_t ptr = int64_t(uint64_t(o.fields.at(f->slot)) | (uint64_t(o.fields.at(f->slot + 1)) << 32));
+  return parcel(rt, ptr);
+}
+
+int32_t parcel_read_i32(Runtime& rt, Handle parcel_object, bool* ok) {
+  NativeParcel& p = parcel_of_object(rt, parcel_object);
+  const uint8_t* at = read_raw(p, 4);
+  if (!at) {
+    *ok = false;
+    return 0;
+  }
+  int32_t v;
+  std::memcpy(&v, at, 4);
+  return v;
+}
+
+void parcel_write_i32(Runtime& rt, Handle parcel_object, int32_t v) {
+  write_i32(rt, parcel_of_object(rt, parcel_object), v);
+}
+
+std::string parcel_read_string8(Runtime& rt, Handle parcel_object, bool* ok) {
+  NativeParcel& p = parcel_of_object(rt, parcel_object);
+  int32_t len = read_i32(p);
+  const uint8_t* at = len < 0 ? nullptr : read_raw(p, uint32_t(len) + 1);
+  if (!at) {
+    *ok = false;
+    return {};
+  }
+  return std::string(reinterpret_cast<const char*>(at), size_t(len));
+}
+
+void parcel_write_string8(Runtime& rt, Handle parcel_object, const std::string& v) {
+  NativeParcel& p = parcel_of_object(rt, parcel_object);
+  write_i32(rt, p, int32_t(v.size()));
+  write_raw(rt, p, v.c_str(), uint32_t(v.size() + 1));
+}
+
 void register_parcel_natives(rt::NativeRegistry& r) {
   const char* pc = "Landroid/os/Parcel;";
   r.bind(pc, "nativeCreate", "()J", [](Runtime&, NativeArgs&) -> uint64_t {

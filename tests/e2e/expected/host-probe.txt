@@ -1,7 +1,7 @@
 hôte : sdk 37, AnyAndroid
 écouteur : attaché, méthode absente -> null
 lambda : ok
-services : aa.demo -> même objet, absent -> null, liste aa.demo,accessibility,activity,activity_task,display,input_method,package,permissionmgr,window
+services : aa.demo -> même objet, absent -> null, liste aa.demo,accessibility,activity,activity_task,display,input,input_method,package,permissionmgr,window
 chargeurs : /data/app/com.anyandroid.samples.hello/base.apk
   Hello -> son PathClassLoader, forName même classe, amorçage ne la voit pas, Probe -> BootClassLoader, entrées com.anyandroid.samples.hello.Hello
 pile : aa.host.Probe.stackTraces, java.lang.IllegalStateException: sonde, at aa.host.Probe.stackTraces(Unknown Source), supprimées 1

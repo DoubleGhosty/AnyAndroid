@@ -8,6 +8,7 @@ add_executable(aa_unit_tests
   unit/test_reflect.cpp
   unit/test_jni.cpp
   unit/test_image.cpp
+  unit/test_input.cpp
   unit/test_libcore.cpp
   unit/test_graphics.cpp
   unit/test_native_memory.cpp
@@ -135,7 +136,7 @@ if(AA_LIBCORE_DIR)
       # frame drawn in software (Skia) and written as a PNG.
       aa_e2e(process-launch CODE 0 GOLDEN process-launch.txt FRAME 1080x1920
         ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
-             ${S}/basic-activity.apk aa.host.ProcessLauncher com.anyandroid.samples.basic)
+             ${S}/basic-activity.apk aa.host.ProcessLauncher com.anyandroid.samples.basic --until-resumed)
     endif()
     # G3 entry point: utility classes of the real framework.jar.
     aa_e2e(framework-demo CODE 0 GOLDEN framework-demo.txt

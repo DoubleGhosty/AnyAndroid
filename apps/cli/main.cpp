@@ -34,6 +34,7 @@
 #include "vfs/vfs.h"
 #include "lifecycle/app_host.h"
 #include "miniz.h"
+#include "windows/windowing/frame_window.h"
 #include "windows/windowing/win32_backend.h"
 
 #include <windows.h>
@@ -86,6 +87,8 @@ void usage() {
       "      --profile : à la fin, les méthodes les plus coûteuses (instructions, appels) sur stderr.\n"
       "      --trace-services : écrit sur stdout chaque appel du framework aux services de l'hôte.\n"
       "      --frame-out <fichier.png> : écrit chaque image publiée par une fenêtre (la dernière reste).\n"
+      "      --window [--title <texte>] : montre l'écran de l'appareil dans une fenêtre Windows (images\n"
+      "        publiées par le vrai framework) ; la fermer termine le processus.\n"
       "  libcore natives --bootclasspath <dossier> [--libcore-only] [--all] [--core]\n"
       "      Couverture des méthodes natives de la libcore par AnyAndroid ; --core liste les membres\n"
       "      des classes du cœur de la VM référencés mais absents.\n"
@@ -132,7 +135,7 @@ bool parse_args(const std::vector<std::string>& argv, Args& a) {
   static const std::set<std::string> with_value = {"--log-level", "--log-file", "--disasm", "--activity",
                                                    "--script",    "--do",       "--max-instructions", "--top", "--output",
                                                    "--partition", "--bootclasspath", "--system-image", "--data-dir", "--host-dex",
-                                                   "--get",       "--locale",   "--density", "--frame-out"};
+                                                   "--get",       "--locale",   "--density", "--frame-out", "--title"};
   for (size_t i = 1; i < argv.size(); ++i) {
     const std::string& s = argv[i];
     if (a.command.empty() && !text::starts_with(s, "--")) {
@@ -584,9 +587,27 @@ int cmd_exec(const Args& a) {
   for (const auto* d : dex_files) runtime.add_dex(d);
   lifecycle::ConsoleHost host(package);
   bridge::install(runtime.registry(), host);
-  if (a.has("--frame-out")) {
-    fs::path frame_path = path_from_utf8(a.get("--frame-out"));
-    bridge::set_frame_listener([frame_path](const bridge::PostedFrame& f) { write_frame_png(frame_path, f); });
+  // The device's screen: the frames the framework posts, as PNG files and/or
+  // in a window (J8). Closing the window ends the process, as Android kills it.
+  std::shared_ptr<backend::FrameWindow> screen;
+  if (a.has("--window")) {
+    std::u16string title = text::utf8_to_utf16(a.has("--title") ? a.get("--title") : "AnyAndroid — " + package);
+    screen = std::make_shared<backend::FrameWindow>(title, 1080, 1920);
+    if (!screen->ok()) {
+      err("fenêtre impossible à créer (pas de bureau ?)");
+      return kUsage;
+    }
+    screen->set_on_close([] {
+      std::fflush(nullptr);
+      ExitProcess(0);
+    });
+  }
+  if (a.has("--frame-out") || screen) {
+    fs::path frame_path = a.has("--frame-out") ? path_from_utf8(a.get("--frame-out")) : fs::path();
+    bridge::set_frame_listener([frame_path, window = screen](const bridge::PostedFrame& f) {
+      if (!frame_path.empty()) write_frame_png(frame_path, f);
+      if (window && f.pixels) window->present(f.width, f.height, f.pixels->data());
+    });
   }
   if (!boot.dex.empty()) {
     std::string bcp;
