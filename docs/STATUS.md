@@ -186,6 +186,9 @@ ses mises en page.
 
 ## Reprise : où en est le travail (2026-10-16)
 
+Un agent qui reprend le développement seul part de [HANDOFF.md](HANDOFF.md) : environnement,
+outils, conventions, état, prochaines étapes et règles.
+
 **Jalon J4 atteint : démarrage direct d'une application** (ADR-006). Le test e2e `launch` passe :
 sur le vrai code d'Android 17, l'`Application` puis `MainActivity` vont jusqu'à `onCreate`,
 `onStart`, `onResume` et « activité au premier plan ». Le lanceur Java d'hôte

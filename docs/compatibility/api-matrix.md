@@ -5,10 +5,10 @@
 
 | Statut | Signification | Membres |
 |---|---|---|
-| Supportée | comportement testé et documenté pour le périmètre annoncé | 794 |
+| Supportée | comportement testé et documenté pour le périmètre annoncé | 800 |
 | Partielle | chemin courant pris en charge, limites connues | 63 |
-| Stub | API reconnue mais sans effet réel | 24 |
-| Non supportée | reconnue mais refusée avec une erreur explicite | 26 |
+| Stub | API reconnue mais sans effet réel | 23 |
+| Non supportée | reconnue mais refusée avec une erreur explicite | 25 |
 
 ## `android.app.Activity`
 
@@ -1289,8 +1289,12 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `initCause(Ljava/lang/Throwable;)Ljava/lang/Throwable;` | Supportée |  |
 | `toString()Ljava/lang/String;` | Supportée |  |
 | `printStackTrace()V` | Partielle | écrit dans le journal AnyAndroid |
-| `addSuppressed(Ljava/lang/Throwable;)V` | Stub | exceptions supprimées ignorées |
-| `getStackTrace()[Ljava/lang/StackTraceElement;` | Non supportée | StackTraceElement non implémenté |
+| `addSuppressed(Ljava/lang/Throwable;)V` | Supportée |  |
+| `getSuppressed()[Ljava/lang/Throwable;` | Supportée |  |
+| `getOurStackTrace()[Ljava/lang/StackTraceElement;` | Supportée |  |
+| `getStackTrace()[Ljava/lang/StackTraceElement;` | Supportée |  |
+| `setStackTrace([Ljava/lang/StackTraceElement;)V` | Supportée |  |
+| `fillInStackTrace()Ljava/lang/Throwable;` | Supportée |  |
 
 ## `java.lang.UnsatisfiedLinkError`
 
