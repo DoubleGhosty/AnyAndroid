@@ -2,16 +2,16 @@
   "metadata": {
     "project": "AnyAndroid for Windows",
     "version": "0.1.0",
-    "generated_at": "2026-10-16T12:03:23.272406+00:00",
+    "generated_at": "2026-10-16T12:28:12.089643+00:00",
     "target": "Android natif sur Windows (sans VM ni hyperviseur)"
   },
   "summary": {
     "overall_percent": 43.0,
-    "bridge_percent": 87.8,
+    "bridge_percent": 88.0,
     "libcore_percent": 47.2,
     "dalvik_percent": 99.6,
     "total_classes": 139,
-    "total_members": 911,
+    "total_members": 912,
     "total_natives": 1034,
     "total_opcodes": 256
   },
@@ -3479,13 +3479,18 @@
         },
         {
           "member": "matches(Ljava/lang/String;)Z",
-          "status": "Non supportée",
-          "note": "expressions régulières non prises en charge"
+          "status": "Supportée",
+          "note": ""
         },
         {
           "member": "replaceAll(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
-          "status": "Non supportée",
-          "note": "expressions régulières non prises en charge"
+          "status": "Supportée",
+          "note": ""
+        },
+        {
+          "member": "replaceFirst(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+          "status": "Supportée",
+          "note": ""
         },
         {
           "member": "format(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;` (statique)",
@@ -8928,11 +8933,11 @@
           },
           {
             "name": "java.lang.String",
-            "total": 52,
-            "supported": 40,
+            "total": 53,
+            "supported": 43,
             "partial": 10,
             "stub": 0,
-            "unsupported": 2,
+            "unsupported": 0,
             "members": [
               {
                 "member": "<init>()V",
@@ -9181,13 +9186,18 @@
               },
               {
                 "member": "matches(Ljava/lang/String;)Z",
-                "status": "Non supportée",
-                "note": "expressions régulières non prises en charge"
+                "status": "Supportée",
+                "note": ""
               },
               {
                 "member": "replaceAll(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
-                "status": "Non supportée",
-                "note": "expressions régulières non prises en charge"
+                "status": "Supportée",
+                "note": ""
+              },
+              {
+                "member": "replaceFirst(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                "status": "Supportée",
+                "note": ""
               },
               {
                 "member": "format(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;` (statique)",
@@ -10447,11 +10457,11 @@
             ]
           }
         ],
-        "members": 592,
-        "supported": 551,
+        "members": 593,
+        "supported": 554,
         "partial": 31,
         "stub": 1,
-        "unsupported": 9
+        "unsupported": 7
       },
       "java.util": {
         "classes": [
@@ -10910,14 +10920,14 @@
       }
     },
     "total_classes": 139,
-    "total_members": 911,
+    "total_members": 912,
     "counts": {
-      "supported": 800,
+      "supported": 803,
       "partial": 63,
       "stub": 23,
-      "unsupported": 25
+      "unsupported": 23
     },
-    "percent_supported": 87.8
+    "percent_supported": 88.0
   },
   "libcore": {
     "total": 1034,
