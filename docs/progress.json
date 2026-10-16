@@ -2,11 +2,11 @@
   "metadata": {
     "project": "AnyAndroid for Windows",
     "version": "0.1.0",
-    "generated_at": "2026-10-16T19:26:59.005955+00:00",
+    "generated_at": "2026-10-16T23:33:13.979764+00:00",
     "target": "Android natif sur Windows (sans VM ni hyperviseur)"
   },
   "summary": {
-    "overall_percent": 45.0,
+    "overall_percent": 47.0,
     "bridge_percent": 88.0,
     "libcore_percent": 47.2,
     "dalvik_percent": 99.6,
@@ -50,10 +50,10 @@
       {
         "id": "G3",
         "name": "Vrai `framework.jar` et une application AOSP affichée",
-        "description": "**En cours** : plan de l'ADR-006, J0-J2 et J4 faits, J5 presque fini (première traversée complète jusqu'au dessin logiciel), J6 (texte : mesure et coupure de lignes) bien avancé, J7 (moteur 2D) à commencer",
-        "progress": 71,
+        "description": "**En cours** : plan de l'ADR-006, J0-J2 et J4 faits, J5 atteint (démarrage par les vrais gestionnaires jusqu'à la première image), J6 (texte) bien avancé, J7 : la fenêtre est dessinée par le Skia d'AOSP (image écrite en PNG), J8 (fenêtre Win32) à faire",
+        "progress": 76,
         "weight": 35,
-        "status": "**En cours** : plan de l'ADR-006, J0-J2 et J4 faits, J5 presque fini (première traversée complète jusqu'au dessin logiciel), J6 (texte : mesure et coupure de lignes) bien avancé, J7 (moteur 2D) à commencer",
+        "status": "**En cours** : plan de l'ADR-006, J0-J2 et J4 faits, J5 atteint (démarrage par les vrais gestionnaires jusqu'à la première image), J6 (texte) bien avancé, J7 : la fenêtre est dessinée par le Skia d'AOSP (image écrite en PNG), J8 (fenêtre Win32) à faire",
         "adr": "ADR-006",
         "state": "in_progress"
       },
@@ -78,7 +78,7 @@
         "state": "pending"
       }
     ],
-    "overall_percent": 45.0
+    "overall_percent": 47.0
   },
   "bridge": {
     "classes": {
@@ -11135,11 +11135,11 @@
     ]
   },
   "tests": {
-    "total_suites": 36,
-    "passed_suites": 33,
+    "total_suites": 37,
+    "passed_suites": 34,
     "optional_suites": 3,
-    "unit_tests": 138,
-    "e2e_suites": 32,
+    "unit_tests": 162,
+    "e2e_suites": 33,
     "fuzz_suites": 3,
     "percent_core": 100.0,
     "note": "Les 3 tests non passés requièrent une image système AOSP externe (G2/G3 facultatifs hors dépôt)"
