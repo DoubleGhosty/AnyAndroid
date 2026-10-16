@@ -207,7 +207,12 @@ Ce qui passe, avec le vrai code d'Android 17 :
   (`getActivityClientController`, `setTaskDescription`) et `activity` (`getContentProvider`) ;
   le fournisseur `settings` est un vrai `ContentProvider` du framework côté hôte
   (`SettingsProvider` : `Settings.Global`, `Secure`, `System` et les drapeaux de `DeviceConfig`
-  en mémoire, protocole `call` de la plateforme). `ServicesProbe` vérifie que chaque méthode
+  persistés dans `/data/system`, protocole `call` de la plateforme ; `ANDROID_ID` est un
+  tirage aléatoire de 64 bits fait au premier usage et conservé, jamais dérivé de l'hôte).
+  Les seules méthodes encore « (non implémentée) » de la trace de `launch` sont
+  `DisplayService.getOverlaySupport` (valeur neutre) ;
+- les méthodes d'expressions régulières de `String` (`matches`, `replaceAll`, `replaceFirst`,
+  `split` sur une vraie expression) passent par `java.util.regex` en mode libcore. `ServicesProbe` vérifie que chaque méthode
   publique de ces services surcharge bien une méthode de l'interface du vrai framework (une
   déclaration de `stubs/` décalée compilait sans jamais être appelée) ;
 - `Typeface.loadPreinstalledSystemFontMap()` : `fonts.xml` est lu, les 208 polices de
@@ -232,10 +237,7 @@ Ce qui passe, avec le vrai code d'Android 17 :
   - Natives Java d'`android.graphics.ImageDecoder` (`nCreate` sur assets décompressés d'APK, flux et mémoire, `nDecodeBitmap`, `nGetSampledSize`).
 
 **Suite prévue, dans l'ordre** :
-1. J3, compléments : les méthodes de services encore « (non implémentée) » dans la trace
-   (`AccessibilityService.getRecommendedTimeoutMillis`…), un `ANDROID_ID` stable et persistant
-   pour `Settings.Secure`, la persistance des réglages ;
-2. J5 : démarrage par `handleBindApplication` … `handleResumeActivity`, fenêtre logique. Le
+1. J5 : démarrage par `handleBindApplication` … `handleResumeActivity`, fenêtre logique. Le
    pilote de `Looper` à horloge virtuelle esquissé plus tôt (`looper_driver.cpp`) a été retiré :
    ses natives n'existent pas dans le `MessageQueue` d'Android 17, et son mode piloté rendait la
    main sans attendre (boucle active). Le pilotage déterministe des tests est à reconcevoir sur

@@ -36,7 +36,7 @@ public final class SystemServer {
     ServiceManager.addService("display", new DisplayService());
     ServiceManager.addService("input_method", new InputMethodService());
     ServiceManager.addService("accessibility", new AccessibilityService());
-    ServiceManager.addService("activity", new ActivityService());
+    ServiceManager.addService("activity", new ActivityService(packages));
     ServiceManager.addService("activity_task", new ActivityTaskService());
   }
 }

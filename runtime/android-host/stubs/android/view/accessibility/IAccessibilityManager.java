@@ -12,4 +12,7 @@ public interface IAccessibilityManager {
   }
 
   long addClient(IAccessibilityManagerClient client, int userId);
+  long getRecommendedTimeoutMillis();
+  int getFocusStrokeWidth();
+  int getFocusColor();
 }

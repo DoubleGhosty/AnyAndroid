@@ -8,6 +8,7 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.IPackageManager;
 import android.content.pm.ResolveInfo;
 import android.os.Binder;
+import android.os.Bundle;
 import android.os.ServiceManager;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
@@ -38,7 +39,43 @@ public final class ServicesProbe {
         IPackageManager.class.getMethod("getInstallerPackageName", String.class).invoke(pm, pkg);
     System.out.println("inconnus : " + pm.getApplicationInfo("com.absent", 0, 0) + ", uid "
         + pm.getPackageUid("com.absent", 0, 0) + ", installeur " + installer);
+    settings(pkg);
     checkOverrides();
+  }
+
+  /**
+   * The "settings" provider as ActivityThread.acquireProvider obtains it from the activity
+   * service, called like Settings.NameValueCache does (reflection: IContentProvider and
+   * AttributionSource are not declared in stubs/).
+   */
+  static void settings(String pkg) throws Exception {
+    Object am = ServiceManager.getService("activity");
+    Object holder = am.getClass()
+        .getMethod("getContentProvider", Class.forName("android.app.IApplicationThread"), String.class, String.class,
+            int.class, boolean.class)
+        .invoke(am, null, pkg, "settings", 0, true);
+    Object provider = holder.getClass().getField("provider").get(holder);
+    Class<?> attribution = Class.forName("android.content.AttributionSource");
+    Object source = attribution.getConstructor(int.class, String.class, String.class).newInstance(10000, pkg, null);
+    Method call = Class.forName("android.content.IContentProvider")
+        .getMethod("call", attribution, String.class, String.class, String.class, Bundle.class);
+    String[] read = new String[5];
+    String[][] requests = {{"GET_secure", "android_id"}, {"GET_secure", "android_id"}, {"GET_global", "device_provisioned"},
+        {"PUT_system", "aa_probe"}, {"GET_global", "absent"}};
+    for (int i = 0; i < requests.length; i++) {
+      Bundle extras = null;
+      if (requests[i][0].startsWith("PUT")) {
+        extras = new Bundle();
+        extras.putString("value", "1");
+      }
+      Bundle out = (Bundle) call.invoke(provider, source, "settings", requests[i][0], requests[i][1], extras);
+      read[i] = out == null ? null : out.getString("value");
+    }
+    Bundle written = (Bundle) call.invoke(provider, source, "settings", "GET_system", "aa_probe", null);
+    System.out.println("réglages : android_id "
+        + (read[0] != null && read[0].matches("[0-9a-f]{16}") ? "de 16 chiffres hexadécimaux" : read[0]) + ", stable "
+        + read[0].equals(read[1]) + ", device_provisioned " + read[2] + ", écrit puis lu " + written.getString("value")
+        + ", inconnu " + read[4]);
   }
 
   /**

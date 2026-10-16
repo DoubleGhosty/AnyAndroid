@@ -1224,6 +1224,8 @@ std::shared_ptr<Vfs> make_android_vfs(const LayoutOptions& o) {
   vfs->mount("/data/user/0/" + o.package, host_mount(app / "data", false));
   vfs->mount("/data/user_de/0/" + o.package, host_mount(app / "data_de", false));
   vfs->mount("/data/local/tmp", host_mount(app / "tmp", false));
+  // State of the local system services (settings), per application like the rest.
+  vfs->mount("/data/system", host_mount(app / "system", false));
   vfs->mount("/storage/emulated/0", host_mount(app / "sdcard", false));
   vfs->mount("/sdcard", host_mount(app / "sdcard", false));
   vfs->mount("/dev", dev_mount());

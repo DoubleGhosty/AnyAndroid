@@ -15,6 +15,9 @@ lanceur : com.anyandroid.samples.basic.MainActivity
 activité : com.anyandroid.samples.basic.MainActivity, exportée true, application com.anyandroid.samples.basic
 service : PackageService.getInstallerPackageName (non implémentée)
 inconnus : null, uid -1, installeur null
+service : LocalServiceManager.checkService2
+service : ActivityService.getContentProvider
+réglages : android_id de 16 chiffres hexadécimaux, stable true, device_provisioned 1, écrit puis lu 1, inconnu null
 service : LocalServiceManager.listServices
 service : LocalServiceManager.checkService2
 service : LocalServiceManager.checkService2
@@ -24,4 +27,4 @@ service : LocalServiceManager.checkService2
 service : LocalServiceManager.checkService2
 service : LocalServiceManager.checkService2
 service : LocalServiceManager.checkService2
-surcharges : 37 méthodes dans 10 classes, toutes reconnues
+surcharges : 42 méthodes dans 10 classes, toutes reconnues

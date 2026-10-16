@@ -52,4 +52,10 @@ public final class DisplayService extends IDisplayManager.Stub {
   public int[] getDisplayIds(boolean includeDisabled) {
     return new int[] {Display.DEFAULT_DISPLAY};
   }
+
+  /** No wide color gamut: the composition's wide color space is sRGB (ColorSpace.Named.SRGB, 0). */
+  @Override
+  public int getPreferredWideGamutColorSpaceId() {
+    return 0;
+  }
 }

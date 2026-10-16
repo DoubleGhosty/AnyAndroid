@@ -222,12 +222,10 @@ Fait et vérifié (voir STATUS.md pour le détail) :
 
 ## 9. Prochaines étapes, dans l'ordre
 
-1. **J3, compléments** (court) : les méthodes encore « (non implémentée) » dans la trace de
-   `launch.sh` (`AccessibilityService.getRecommendedTimeoutMillis`, `getFocusStrokeWidth`,
-   `getFocusColor`, `DisplayService.getPreferredWideGamutColorSpaceId`…) avec les valeurs de
-   l'AOSP ; un `Settings.Secure.ANDROID_ID` stable et persistant (64 bits aléatoires créés au
-   premier démarrage et rangés dans les données de l'application ; jamais dérivé d'un
-   identifiant de la machine) ; la persistance des réglages dans `/data`.
+1. **J3, reste** : `DisplayService.getOverlaySupport` (natives d'`OverlayProperties`) quand un
+   appelant en aura besoin ; chaque nouvelle méthode « (non implémentée) » de la trace se traite
+   avec les valeurs de l'AOSP. (Faits : accessibilité, gamme de couleurs, `checkPermissionForDevice`,
+   réglages persistés dans `/data/system`, `ANDROID_ID` aléatoire stable.)
 2. **J5 : démarrage par les vrais gestionnaires** (ADR-006) : passer de `Launcher` à
    `ActivityThread.handleBindApplication` … `handleLaunchActivity`/`handleResumeActivity` par des
    `ClientTransaction` (`LaunchActivityItem`, `ResumeActivityItem`) exécutées sur le vrai

@@ -18,6 +18,7 @@ l'hôte. Elle est assemblée de montages, choisis par préfixe le plus long :
 | `/data/data/<paquet>`, `/data/user/0/<paquet>` | `<données>/<paquet>/data` | lecture/écriture |
 | `/data/user_de/0/<paquet>` | `<données>/<paquet>/data_de` | lecture/écriture |
 | `/data/local/tmp` | `<données>/<paquet>/tmp` | lecture/écriture |
+| `/data/system` | `<données>/<paquet>/system` (état des services système locaux : réglages) | lecture/écriture |
 | `/sdcard`, `/storage/emulated/0` | `<données>/<paquet>/sdcard` | lecture/écriture |
 | `/dev` | `null`, `zero`, `random`, `urandom` (générateur cryptographique du système) | émulé |
 

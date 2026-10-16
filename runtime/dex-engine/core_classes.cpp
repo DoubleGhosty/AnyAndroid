@@ -454,6 +454,11 @@ void register_string(NativeRegistry& r) {
     // Literal separators only (Java's own fast path); real regexes are refused.
     if (sep.size() == 2 && sep[0] == u'\\' && !std::isalnum(int(sep[1] & 0x7f))) sep = sep.substr(1);
     else if (sep.find_first_of(u".$|()[{^?*+\\") != std::u16string::npos || sep.empty()) {
+      if (rt.lookup_class("Ljava/util/regex/Pattern;")) {  // libcore mode: Pattern.compile(regex).split(this)
+        GlobalRef pattern(rt, Handle(rt.call_static("Ljava/util/regex/Pattern;", "compile",
+                                                    "(Ljava/lang/String;)Ljava/util/regex/Pattern;", {a.raw(1)})));
+        return rt.call_virtual(pattern.get(), "split", "(Ljava/lang/CharSequence;)[Ljava/lang/String;", {a.raw(0)});
+      }
       rt.throw_unsupported("Ljava/lang/String;->split(Ljava/lang/String;)[Ljava/lang/String;",
                            "expressions régulières non prises en charge (séparateurs littéraux uniquement)");
     }
@@ -522,9 +527,32 @@ void register_string(NativeRegistry& r) {
     std::memcpy(v.data(), arr.data.data(), arr.data.size());
     return rt.new_string(std::move(v));
   });
-  b.unsupported("matches", "(Ljava/lang/String;)Z", "expressions régulières non prises en charge");
-  b.unsupported("replaceAll", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
-                "expressions régulières non prises en charge");
+  // The regex methods are libcore's: java.util.regex when it is loaded
+  // (libcore mode), refused otherwise (bridge mode has no regex engine).
+  auto regex = [](Runtime& rt, const char* method) {
+    if (!rt.lookup_class("Ljava/util/regex/Pattern;")) {
+      rt.throw_unsupported(std::string("Ljava/lang/String;->") + method, "expressions régulières non prises en charge");
+    }
+  };
+  b.method("matches", "(Ljava/lang/String;)Z", [regex](Runtime& rt, NativeArgs& a) -> uint64_t {
+    regex(rt, "matches(Ljava/lang/String;)Z");
+    return rt.call_static("Ljava/util/regex/Pattern;", "matches", "(Ljava/lang/String;Ljava/lang/CharSequence;)Z",
+                          {a.raw(1), a.raw(0)});
+  });
+  for (const char* name : {"replaceAll", "replaceFirst"}) {
+    std::string method = std::string(name) + "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;";
+    b.method(name, "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+             [regex, name, method](Runtime& rt, NativeArgs& a) -> uint64_t {
+               regex(rt, method.c_str());
+               // Pattern.compile(regex).matcher(this).replaceAll/replaceFirst(replacement)
+               GlobalRef pattern(rt, Handle(rt.call_static("Ljava/util/regex/Pattern;", "compile",
+                                                           "(Ljava/lang/String;)Ljava/util/regex/Pattern;", {a.raw(1)})));
+               GlobalRef matcher(rt, Handle(rt.call_virtual(pattern.get(), "matcher",
+                                                            "(Ljava/lang/CharSequence;)Ljava/util/regex/Matcher;",
+                                                            {a.raw(0)})));
+               return rt.call_virtual(matcher.get(), name, "(Ljava/lang/String;)Ljava/lang/String;", {a.raw(2)});
+             });
+  }
 }
 
 void register_class(NativeRegistry& r) {

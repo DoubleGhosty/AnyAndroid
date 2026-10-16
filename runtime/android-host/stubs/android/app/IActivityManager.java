@@ -7,6 +7,8 @@ public interface IActivityManager {
     public Stub(android.os.PermissionEnforcer enforcer) {}
   }
 
+  int checkPermissionForDevice(String permission, int pid, int uid, int deviceId);
+
   ContentProviderHolder getContentProvider(
       IApplicationThread caller, String callingPackage, String name, int userId, boolean stable);
 }

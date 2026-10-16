@@ -15,10 +15,19 @@ public final class ActivityService extends IActivityManager.Stub {
   /** Process.SYSTEM_UID: the providers of the system run as system. */
   private static final int SYSTEM_UID = 1000;
 
+  private final PackageService packages;
   private ContentProviderHolder settings;
 
-  public ActivityService() {
+  public ActivityService(PackageService packages) {
     super(LocalPermissionEnforcer.INSTANCE);
+    this.packages = packages;
+  }
+
+  /** ActivityManagerService.checkComponentPermission: root and system hold every permission. */
+  @Override
+  public int checkPermissionForDevice(String permission, int pid, int uid, int deviceId) {
+    if (uid == 0 || uid == SYSTEM_UID) return 0;  // PERMISSION_GRANTED
+    return packages.checkUidPermission(permission, uid);
   }
 
   @Override
