@@ -20,6 +20,7 @@ add_library(aa_freetype STATIC
   src/base/ftmm.c
   src/base/ftstroke.c
   src/base/ftsynth.c
+  src/base/fttype1.c
   src/cff/cff.c
   src/psaux/psaux.c
   src/pshinter/pshinter.c

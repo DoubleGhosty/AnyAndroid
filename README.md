@@ -180,7 +180,7 @@ runtime/dex-engine/       format DEX, opcodes, vérification, runtime, interpré
 runtime/framework-bridge/ API Java/Android implémentées en natif (registre à statuts)
 runtime/lifecycle/        hôte d'application et cycle de vie des activités
 runtime/compat/           verdict de compatibilité, matrice des API, analyse d'écart
-runtime/third_party/      code tiers repris sans modification (miniz, FreeType, HarfBuzz : « Composants tiers »)
+runtime/third_party/      code tiers repris sans modification (miniz, FreeType, HarfBuzz, Skia : « Composants tiers »)
 backends/windows/         fenêtre Win32 ; backends/headless/ : backend scriptable
 tools/apkgen/             assembleur smali, compilateur AXML et res/ (resources.arsc), écriture ZIP/DEX
 samples/                  APK de démonstration (sources smali, code Java équivalent en commentaire)
@@ -197,6 +197,7 @@ docs/                     ADR, matrice des API, modèle de menace
 - [ADR-005 — Système de fichiers virtuel](docs/adr/ADR-005-systeme-de-fichiers-virtuel.md)
 - [ADR-006 — Démarrage des applications par le vrai framework](docs/adr/ADR-006-demarrage-applications.md)
 - [ADR-007 — Moteur de texte](docs/adr/ADR-007-moteur-de-texte.md)
+- [ADR-008 — Moteur 2D](docs/adr/ADR-008-moteur-2d.md)
 - [Matrice des API](docs/compatibility/api-matrix.md) (générée par `anyandroid compat --markdown`)
 - [Modèle de menace](docs/security/threat-model.md) · [SECURITY.md](SECURITY.md) · [CONTRIBUTING.md](CONTRIBUTING.md)
 
@@ -214,6 +215,10 @@ docs/                     ADR, matrice des API, modèle de menace
   « Old MIT » : mise en forme du texte. Fichiers de la compilation unique `harfbuzz.cc`, sans
   modification, dans [runtime/third_party/harfbuzz](runtime/third_party/harfbuzz/README.md)
   ([licence](runtime/third_party/harfbuzz/COPYING)).
+- [Skia](https://skia.org/), la copie d'Android 17 (AOSP `external/skia`, étiquette
+  `android-17.0.0_r1`), licence BSD : moteur 2D du dessin des vues. Rendu CPU seulement, sans
+  modification, dans [runtime/third_party/skia](runtime/third_party/skia/README.md)
+  ([licence](runtime/third_party/skia/LICENSE)).
 
 ## Licence et marques
 

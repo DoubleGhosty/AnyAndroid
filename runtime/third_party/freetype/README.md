@@ -22,8 +22,9 @@ FreeType : reprendre la même version, avec la même configuration, donne les m�
   `truetype`, `cff`, `psaux`, `pshinter`, `psnames` et `smooth`, sans les fichiers de
   construction (`module.mk`, `rules.mk`, `Jamfile`, `*.rc`) ni, dans `src/base`, les fichiers des
   formats non compilés (`ftbdf.c`, `ftcid.c`, `ftgxval.c`, `ftotval.c`, `ftpfr.c`, `ftwinfnt.c`,
-  `fttype1.c`, `ftpatent.c`). L'auto-hinter (`autofit`) n'est pas repris : HWUI charge les
-  glyphes avec `FT_LOAD_NO_AUTOHINT`.
+  `ftpatent.c`). `fttype1.c` est repris pour Skia (`FT_Get_PS_Font_Info`, appelé par son port
+  FreeType). L'auto-hinter (`autofit`) n'est pas repris : HWUI charge les glyphes avec
+  `FT_LOAD_NO_AUTOHINT`.
 - **Fichiers compilés** : voir [CMakeLists.txt](CMakeLists.txt) (bibliothèque statique
   `aa_freetype`).
 
