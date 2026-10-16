@@ -58,7 +58,7 @@ G5 ░░░░░░░░░░   0 %
    ████▎░░░░░ ≈ 43 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 36 suites de tests et 131 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 36 suites de tests et 132 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.
@@ -215,10 +215,18 @@ Ce qui passe déjà, avec le vrai code d'Android 17 :
 
 **Suite prévue, dans l'ordre** :
 1. Poursuite du cycle de vie J4 : `onStart`, `onPostCreate` et `onResume`, jusqu'à ce que le test `launch` passe ;
-2. J5 : démarrage par `handleBindApplication` … `handleResumeActivity`, fenêtre logique. Un
-   pilote de `Looper` à horloge virtuelle (`looper_driver.cpp`) a été préparé et reste à brancher.
+2. J5 : démarrage par `handleBindApplication` … `handleResumeActivity`, fenêtre logique. Le
+   pilote de `Looper` à horloge virtuelle esquissé plus tôt (`looper_driver.cpp`) a été retiré :
+   ses natives n'existent pas dans le `MessageQueue` d'Android 17, et son mode piloté rendait la
+   main sans attendre (boucle active). Le pilotage déterministe des tests est à reconcevoir sur
+   l'horloge commune (`common/clock.h`).
 
 **À savoir pour la suite** :
+- toutes les lectures de temps passent par `runtime/common/clock.h` : une seule horloge monotone
+  pour `System.nanoTime`, `SystemClock` et les échéances des attentes. Le runtime demande au
+  démarrage des minuteries à 1 ms (`timeBeginPeriod`) : sans cela, sur Windows, chaque attente
+  de 1 ms dure un tick d'environ 15,6 ms. Vérifié par `threads_timed_waits_are_precise`, qui
+  tourne aussi sur le Windows réel de la CI ;
 - la trace `--trace-services` ne liste que les appels du framework aux objets `Binder` de
   l'hôte ; une méthode non implémentée y apparaît avec « (non implémentée) » et renvoie une
   valeur neutre ;

@@ -6,6 +6,7 @@
 #include <deque>
 
 #include "common/bytes.h"
+#include "common/clock.h"
 #include "common/log.h"
 #include "common/text.h"
 #include "dex-engine/opcodes.h"
@@ -160,6 +161,7 @@ std::u16string NativeArgs::str_or(uint32_t i, std::u16string_view fallback) cons
 // --- Runtime -----------------------------------------------------------------
 
 Runtime::Runtime(RuntimeOptions options) : options_(options) {
+  clock::use_precise_timers();  // timed waits to the millisecond, not the ~15.6 ms system tick
   slots_.emplace_back();  // index 0: null
   gc_object_threshold_ = options_.gc_min_objects;
   gc_byte_threshold_ = options_.gc_min_bytes;

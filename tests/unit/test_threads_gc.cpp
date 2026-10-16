@@ -1,10 +1,13 @@
 // G1: Java threads, monitors and the garbage collector.
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <vector>
 
+#include "common/clock.h"
 #include "dex-engine/dex_file.h"
 #include "dex-engine/runtime.h"
 #include "dex_writer.h"
@@ -437,6 +440,33 @@ TEST(threads_shutdown_kills_running_threads) {
   ThreadVm vm;
   vm.call("spinForever", "()V");
   // ~ThreadVm must stop the spinning daemon thread instead of hanging.
+}
+
+// A 1 ms timed wait must last about 1 ms. With the default Windows tick
+// (~15.6 ms) each one would last a whole tick: Looper delays and animations
+// would run many times too slowly, with nothing in the logs. Judged on the
+// second fastest of 15 waits: a loaded machine delays some waits (a median of
+// 9 ms seen under wine with 8 parallel tests), the tick delays all of them.
+TEST(threads_timed_waits_are_precise) {
+  ThreadVm vm;
+  auto fast_ms = [](const auto& wait) {
+    std::vector<int64_t> d;
+    for (int i = 0; i < 15; ++i) {
+      int64_t t0 = clock::monotonic_nanos();
+      wait();
+      d.push_back(clock::monotonic_nanos() - t0);
+    }
+    std::sort(d.begin(), d.end());
+    return double(d[1]) / 1e6;
+  };
+  double sleep_ms = fast_ms([&] { vm.rt->sleep(1); });
+  double park_ms = fast_ms([&] { vm.rt->park_current(false, 1000000); });
+  if (sleep_ms >= 10 || park_ms >= 10) {
+    std::fprintf(stderr, "  attente de 1 ms : sleep %.2f ms, park %.2f ms\n", sleep_ms, park_ms);
+  }
+  CHECK(sleep_ms >= 1.0);  // never shorter than asked
+  CHECK(sleep_ms < 10.0);
+  CHECK(park_ms < 10.0);
 }
 
 TEST(gc_reclaims_garbage_under_object_limit) {

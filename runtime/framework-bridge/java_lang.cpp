@@ -1,13 +1,13 @@
 // java.lang subset beyond the runtime core: StringBuilder, boxed primitives,
 // Math, System, PrintStream, Runnable, Enum and String.format.
 
-#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <limits>
 #include <random>
 
+#include "common/clock.h"
 #include "common/text.h"
 #include "dex-engine/jlang.h"
 #include "framework-bridge/internal.h"
@@ -538,12 +538,10 @@ void register_system(rt::NativeRegistry& r, Host& host) {
   sys.static_field("out", "Ljava/io/PrintStream;", make_stream(false));
   sys.static_field("err", "Ljava/io/PrintStream;", make_stream(true));
   sys.static_method("currentTimeMillis", "()J", [](Runtime&, NativeArgs&) -> uint64_t {
-    using namespace std::chrono;
-    return rt::ret_long(duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count());
+    return rt::ret_long(aa::clock::unix_millis());
   });
   sys.static_method("nanoTime", "()J", [](Runtime&, NativeArgs&) -> uint64_t {
-    using namespace std::chrono;
-    return rt::ret_long(duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count());
+    return rt::ret_long(aa::clock::monotonic_nanos());
   });
   sys.static_method("exit", "(I)V", [](Runtime&, NativeArgs& a) -> uint64_t { throw rt::ExitRequest{a.i32(0)}; });
   sys.static_method("identityHashCode", "(Ljava/lang/Object;)I", [](Runtime&, NativeArgs& a) -> uint64_t { return a.raw(0); });

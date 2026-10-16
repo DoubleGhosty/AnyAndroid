@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 
+#include "common/clock.h"
 #include "common/log.h"
 #include "common/text.h"
 #include "dex-engine/runtime.h"
@@ -130,7 +131,12 @@ bool Runtime::park(VmThread* t, std::condition_variable& cv, const std::function
   bool ok;
   auto wake = [&] { return shutting_down_.load() || pred(); };
   if (timeout_ms > 0) {
-    ok = cv.wait_for(t->gil, std::chrono::milliseconds(timeout_ms), wake);
+    // In slices of a day: a huge timeout (Long.MAX_VALUE) would overflow the deadline.
+    constexpr int64_t kSlice = int64_t(24) * 3600 * 1000;
+    ok = false;
+    for (int64_t left = timeout_ms; !ok && left > 0; left -= kSlice) {
+      ok = cv.wait_for(t->gil, std::chrono::milliseconds(std::min(left, kSlice)), wake);
+    }
   } else {
     cv.wait(t->gil, wake);
     ok = true;
@@ -274,11 +280,12 @@ void Runtime::sleep(int64_t millis) {
     yield_thread();
     return;
   }
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(millis);
+  const int64_t start = clock::monotonic_nanos();
+  const int64_t deadline = millis >= (INT64_MAX - start) / 1000000 ? INT64_MAX : start + millis * 1000000;
   while (!t->interrupted) {
-    auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+    int64_t left = deadline - clock::monotonic_nanos();
     if (left <= 0) break;
-    park(t, t->sleep_cv, [t] { return t->interrupted; }, left);
+    park(t, t->sleep_cv, [t] { return t->interrupted; }, left / 1000000 + (left % 1000000 != 0));
   }
   check_interrupted(t);
 }
@@ -292,14 +299,12 @@ void Runtime::park_current(bool absolute, int64_t time) {
   if (t->interrupted) return;
   int64_t ms = 0;  // 0: no timeout
   if (absolute) {
-    int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                      std::chrono::system_clock::now().time_since_epoch()).count();
-    ms = time - now;
+    ms = time - clock::unix_millis();
     if (ms <= 0) return;
   } else if (time < 0) {
     return;
   } else if (time > 0) {
-    ms = std::max<int64_t>(1, (time + 999999) / 1000000);
+    ms = std::max<int64_t>(1, time / 1000000 + (time % 1000000 != 0));
   }
   park(t, t->sleep_cv, [t] { return t->park_permit || t->interrupted; }, ms);
   t->park_permit = false;

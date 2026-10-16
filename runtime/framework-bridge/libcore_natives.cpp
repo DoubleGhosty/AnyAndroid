@@ -17,6 +17,7 @@
 #include <thread>
 #include <tuple>
 
+#include "common/clock.h"
 #include "common/log.h"
 #include "common/text.h"
 #include "common/unicode.h"
@@ -126,23 +127,8 @@ const std::vector<std::pair<std::string, std::string>>& android_environment() {
   return env;
 }
 
-int64_t unix_millis() {
-  FILETIME ft;
-  GetSystemTimePreciseAsFileTime(&ft);
-  uint64_t t = (uint64_t(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
-  return int64_t((t - 116444736000000000ull) / 10000);
-}
-
-int64_t monotonic_nanos() {
-  static const int64_t freq = [] {
-    LARGE_INTEGER f;
-    QueryPerformanceFrequency(&f);
-    return int64_t(f.QuadPart);
-  }();
-  LARGE_INTEGER c;
-  QueryPerformanceCounter(&c);
-  return int64_t(c.QuadPart / freq * 1000000000 + (c.QuadPart % freq) * 1000000000 / freq);
-}
+using aa::clock::monotonic_nanos;
+using aa::clock::unix_millis;
 
 std::u16string chars_of(Runtime& rt, Handle arr, int32_t offset, int32_t count) {
   rt::ArrayObject& a = rt.array(arr, "char[]");

@@ -24,7 +24,6 @@ add_library(aa_bridge STATIC
   libcore_nio.cpp
   libcore_regex.cpp
   libcore_zip.cpp
-  looper_driver.cpp
   native_memory.cpp)
 target_link_libraries(aa_bridge PRIVATE aa_miniz aa_regex)
 target_link_libraries(aa_bridge PUBLIC aa_dex aa_vfs aa_res)
