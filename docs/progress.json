@@ -2,7 +2,7 @@
   "metadata": {
     "project": "AnyAndroid for Windows",
     "version": "0.1.0",
-    "generated_at": "2026-10-16T08:10:51.376405+00:00",
+    "generated_at": "2026-10-16T08:29:59.882827+00:00",
     "target": "Android natif sur Windows (sans VM ni hyperviseur)"
   },
   "summary": {
@@ -50,10 +50,10 @@
       {
         "id": "G3",
         "name": "Vrai `framework.jar` et une application AOSP affichée",
-        "description": "**En cours** : plan de l'ADR-006, J0-J2 faits, J3 et J4 en cours (sous-système d'images opérationnel, `onCreate` d'une vraie activité)",
-        "progress": 58,
+        "description": "**En cours** : plan de l'ADR-006, J0-J2 et J4 faits (une vraie activité jusqu'à `onResume`), J3 en cours, J5 ensuite",
+        "progress": 62,
         "weight": 35,
-        "status": "**En cours** : plan de l'ADR-006, J0-J2 faits, J3 et J4 en cours (sous-système d'images opérationnel, `onCreate` d'une vraie activité)",
+        "status": "**En cours** : plan de l'ADR-006, J0-J2 et J4 faits (une vraie activité jusqu'à `onResume`), J3 en cours, J5 ensuite",
         "adr": "ADR-006",
         "state": "in_progress"
       },
@@ -11088,7 +11088,7 @@
     "total_suites": 36,
     "passed_suites": 33,
     "optional_suites": 3,
-    "unit_tests": 137,
+    "unit_tests": 138,
     "e2e_suites": 32,
     "fuzz_suites": 3,
     "percent_core": 100.0,

@@ -18,10 +18,10 @@
 <rect x="408.0" y="66" width="173.0" height="16" rx="3" fill="#d29922"/>
 <text x="414.0" y="78" font-size="10" font-weight="600" fill="#f0f6fc">G2: 92%</text>
 </g>
-<g><title>G3: Vrai `framework.jar` et une application AOSP affichée — 58% (**En cours** : plan de l'ADR-006, J0-J2 faits, J3 et J4 en cours (sous-système d'images opérationnel, `onCreate` d'une vraie activité))</title>
+<g><title>G3: Vrai `framework.jar` et une application AOSP affichée — 62% (**En cours** : plan de l'ADR-006, J0-J2 et J4 faits (une vraie activité jusqu'à `onResume`), J3 en cours, J5 ensuite)</title>
 <rect x="600.0" y="66" width="188.0" height="16" rx="3" fill="#161b22" stroke="#30363d" stroke-width="1"/>
-<rect x="600.0" y="66" width="109.0" height="16" rx="3" fill="#d29922"/>
-<text x="606.0" y="78" font-size="10" font-weight="600" fill="#f0f6fc">G3: 58%</text>
+<rect x="600.0" y="66" width="116.6" height="16" rx="3" fill="#d29922"/>
+<text x="606.0" y="78" font-size="10" font-weight="600" fill="#f0f6fc">G3: 62%</text>
 </g>
 <g><title>G4: Couche native ELF (bibliothèques `.so` des applications) — 0% (À faire)</title>
 <rect x="792.0" y="66" width="188.0" height="16" rx="3" fill="#161b22" stroke="#30363d" stroke-width="1"/>
