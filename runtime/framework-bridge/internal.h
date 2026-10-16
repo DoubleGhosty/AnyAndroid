@@ -53,6 +53,19 @@ void register_framework_path(rt::NativeRegistry& r);
 // (unit tests).
 void path_contents(rt::Runtime& rt, int64_t handle, std::vector<uint8_t>& verbs, std::vector<float>& coords,
                    std::vector<float>& weights);
+// An SVG path string as HWUI's PathParser keeps it (framework_path.cpp), shared
+// with VectorDrawable: verb letters, the float count of each, the floats.
+struct SvgPathData {
+  std::vector<char> verbs;
+  std::vector<size_t> sizes;
+  std::vector<float> points;
+  bool operator==(const SvgPathData&) const = default;
+};
+// Parses s[0, length) as PathParser::getPathDataFromAsciiString; on failure,
+// false and HWUI's message.
+bool parse_svg_path(const std::string& s, size_t length, SvgPathData& out, std::string& error);
+// The contents of a PathParser.PathData handle (IllegalStateException if invalid).
+SvgPathData svg_path_data(rt::Runtime& rt, int64_t handle);
 // Matrix (framework_matrix.cpp), registered by register_framework_graphics.
 void register_framework_matrix(rt::NativeRegistry& r);
 // SkMatrix (framework_matrix.cpp), shared with Canvas's current matrix.
@@ -81,6 +94,8 @@ void bitmap_canvas_info(rt::Runtime& rt, int64_t handle, int32_t& width, int32_t
 void register_framework_canvas(rt::NativeRegistry& r);
 // Region and RegionIterator (framework_region.cpp), registered by register_framework_graphics.
 void register_framework_region(rt::NativeRegistry& r);
+// VectorDrawable and VirtualRefBasePtr (framework_vector_drawable.cpp), registered by register_framework_graphics.
+void register_framework_vector_drawable(rt::NativeRegistry& r);
 // Returns pointer to open AssetStream bytes, or nullptr.
 const std::vector<uint8_t>* asset_data(int64_t handle);
 // Typeface and fonts (framework_fonts.cpp), registered by register_framework_graphics.

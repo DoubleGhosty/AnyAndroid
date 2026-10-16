@@ -331,6 +331,7 @@ void register_framework_graphics(rt::NativeRegistry& r) {
   register_framework_images(r);
   register_framework_canvas(r);
   register_framework_region(r);
+  register_framework_vector_drawable(r);
 }
 
 }  // namespace aa::bridge

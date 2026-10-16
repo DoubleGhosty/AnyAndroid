@@ -751,13 +751,8 @@ Rect rect_args(NativeArgs& a, uint32_t first) {
 // --- android.util.PathParser (hwui: PathParser.cpp, VectorDrawableUtils.cpp) ---
 
 // An SVG path string ("M 0 0 L 10 10 Z") parsed as VectorDrawable keeps it
-// to morph one path into another: the verb letters, the float count of each,
-// and the floats.
-struct VectorPathData {
-  std::vector<char> verbs;
-  std::vector<size_t> sizes;
-  std::vector<float> points;
-};
+// to morph one path into another (SvgPathData, internal.h).
+using VectorPathData = SvgPathData;
 
 struct VectorPath {
   std::mutex lock;
@@ -1352,6 +1347,16 @@ void register_framework_path(rt::NativeRegistry& r) {
   }
   register_path_parser(r);
 }
+
+bool parse_svg_path(const std::string& s, size_t length, SvgPathData& out, std::string& error) {
+  ParseResult result;
+  out = SvgPathData{};
+  parse_path_data(out, result, s, std::min(length, s.size()));
+  error = result.message;
+  return !result.failed;
+}
+
+SvgPathData svg_path_data(rt::Runtime& rt, int64_t handle) { return copy_of(*vector_path(rt, handle)); }
 
 // For the unit tests: the verbs, points and conic weights of a path.
 void path_contents(Runtime& rt, int64_t handle, std::vector<uint8_t>& verbs, std::vector<float>& coords,

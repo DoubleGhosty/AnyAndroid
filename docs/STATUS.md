@@ -42,7 +42,7 @@ le nombre de fichiers.
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
 | G2    | Vraie libcore d'AOSP (Android 17)                           | 92 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 58 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J2 faits, J3 et J4 en cours (sous-système d'images opérationnel, `onCreate` d'une vraie activité) |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 62 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J2 et J4 faits (une vraie activité jusqu'à `onResume`), J3 en cours, J5 ensuite |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
 | **Total** | **Android natif sur Windows**                          | **≈ 43 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
@@ -58,7 +58,7 @@ G5 ░░░░░░░░░░   0 %
    ████▎░░░░░ ≈ 43 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 36 suites de tests et 137 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 36 suites de tests et 138 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.
@@ -129,7 +129,8 @@ G5 ░░░░░░░░░░   0 %
   sauvegardes de HWUI avec ses sauvegardes partielles, matrice courante, bornes de découpe
   arrondies comme `SkCanvas`, cible bitmap), le dessin attendant le moteur de rendu (J7) ;
   `Region` sur le modèle de `SkRegion` (bandes canoniques, opérations booléennes, itération et
-  `toString` de Skia) ; `Font`,
+  `toString` de Skia) ; l'arbre de `VectorDrawable` (groupes, chemins, valeurs par défaut et
+  disposition des propriétés de HWUI, possédé par `VirtualRefBasePtr`) ; `Font`,
   `FontFamily` et `Typeface` avec les règles de style et de repli de minikin. La mesure et le rendu du texte attendent le moteur de texte (J6).
 - **Annotations système des DEX** : `getEnclosingClass`, `getDeclaringClass`, `getSimpleName`,
   `isAnonymousClass` et `getDeclaredClasses` sont lus dans les annotations `InnerClass`,
@@ -183,23 +184,27 @@ ses mises en page.
 - En mode pont, `Context`, `Activity`, `TextView`, `Toast` et `LayoutInflater` sont branchés sur
   les ressources de l'APK (`android_res.cpp`).
 
-## Reprise : où en est le travail (2026-10-11, soir)
+## Reprise : où en est le travail (2026-10-16)
 
-**Jalon en cours : J4, démarrage direct d'une application** (ADR-006). Il n'est **pas terminé** :
-le test e2e `launch` (cycle de vie jusqu'à `onResume`) échoue encore. Le lanceur Java d'hôte
+**Jalon J4 atteint : démarrage direct d'une application** (ADR-006). Le test e2e `launch` passe :
+sur le vrai code d'Android 17, l'`Application` puis `MainActivity` vont jusqu'à `onCreate`,
+`onStart`, `onResume` et « activité au premier plan ». Le lanceur Java d'hôte
 `aa.host.Launcher` (`runtime/android-host/java/aa/host/Launcher.java`) reproduit
 `ActivityThread.attach`, le début de `handleBindApplication` et le démarrage à la Robolectric. Pour
-le relancer :
+le relancer (ou `tools/dev/launch.sh`) :
 
 ```
 anyandroid exec --bootclasspath <libcore17> --system-image <system.img> --trace-services \
     build/samples/basic-activity.apk aa.host.Launcher com.anyandroid.samples.basic
 ```
 
-Ce qui passe déjà, avec le vrai code d'Android 17 :
+Ce qui passe, avec le vrai code d'Android 17 :
 - `ActivityThread`, `Instrumentation`, le `ServiceManager` local et les services `package`,
-  `permissionmgr`, `window`, `display`, `input_method`, `accessibility` et `activity_task`
-  (`getActivityClientController`, `setTaskDescription`). `ServicesProbe` vérifie que chaque méthode
+  `permissionmgr`, `window`, `display`, `input_method`, `accessibility`, `activity_task`
+  (`getActivityClientController`, `setTaskDescription`) et `activity` (`getContentProvider`) ;
+  le fournisseur `settings` est un vrai `ContentProvider` du framework côté hôte
+  (`SettingsProvider` : `Settings.Global`, `Secure`, `System` et les drapeaux de `DeviceConfig`
+  en mémoire, protocole `call` de la plateforme). `ServicesProbe` vérifie que chaque méthode
   publique de ces services surcharge bien une méthode de l'interface du vrai framework (une
   déclaration de `stubs/` décalée compilait sans jamais être appelée) ;
 - `Typeface.loadPreinstalledSystemFontMap()` : `fonts.xml` est lu, les 208 polices de
@@ -210,7 +215,11 @@ Ce qui passe déjà, avec le vrai code d'Android 17 :
 - `MainActivity.onCreate` construit ses vues (`TextView` avec `Paint` et `Typeface`, fonds
   `RippleDrawable`/`GradientDrawable` avec `Path`) puis appelle `setContentView` : `DecorView`
   est créée, ses interpolateurs d'animation (`Path.approximate`) aussi, et la mise en page du
-  décor est gonflée (`Toolbar` et ses `ImageView`, avec `Matrix`).
+  décor est gonflée (`Toolbar` et ses `ImageView`, avec `Matrix`) ; l'icône par défaut
+  (`AdaptiveIconDrawable` et ses `VectorDrawable`) passe par `PathParser`, `Canvas`, `Region` et
+  l'arbre de `VectorDrawable` ;
+- `onStart`, puis `onResume` : `AutofillManager` lit `DeviceConfig` par le fournisseur `settings`,
+  et `EventLog` tient ses événements dans le journal de débogage.
 
 - **Sous-système d'images opérationnel** :
   - Décodeur PNG (miniz zlib, unfiltering Paeth/Sub/Up/Average, conversion ARGB_8888) ;
@@ -220,7 +229,9 @@ Ce qui passe déjà, avec le vrai code d'Android 17 :
   - Natives Java d'`android.graphics.ImageDecoder` (`nCreate` sur assets décompressés d'APK, flux et mémoire, `nDecodeBitmap`, `nGetSampledSize`).
 
 **Suite prévue, dans l'ordre** :
-1. Poursuite du cycle de vie J4 : `onStart`, `onPostCreate` et `onResume`, jusqu'à ce que le test `launch` passe ;
+1. J3, compléments : les méthodes de services encore « (non implémentée) » dans la trace
+   (`AccessibilityService.getRecommendedTimeoutMillis`…), un `ANDROID_ID` stable et persistant
+   pour `Settings.Secure`, la persistance des réglages ;
 2. J5 : démarrage par `handleBindApplication` … `handleResumeActivity`, fenêtre logique. Le
    pilote de `Looper` à horloge virtuelle esquissé plus tôt (`looper_driver.cpp`) a été retiré :
    ses natives n'existent pas dans le `MessageQueue` d'Android 17, et son mode piloté rendait la
@@ -257,8 +268,8 @@ Le plan de G3 est fixé par [ADR-006](adr/ADR-006-demarrage-applications.md) : p
 vrais gestionnaires d'`ActivityThread`.
 
 1. **J0-J2** (faits) : outillage Java/D8 et DEX d'hôte, `ServiceManager` local, vrais chargeurs de classes.
-2. **J3-J5** (en cours) : services système v1, puis démarrage d'une application jusqu'à `onResume`, d'abord
-   en direct puis par `handleBindApplication` … `handleResumeActivity`.
+2. **J3-J5** (en cours) : services système v1 et démarrage d'une application jusqu'à `onResume`,
+   en direct (J4, fait) puis par `handleBindApplication` … `handleResumeActivity` (J5).
 3. **J6-J8** : texte, rendu logiciel du vrai framework (`drawSoftware`, moteur 2D choisi par
    l'ADR-007), fenêtre Win32 et entrées.
 4. **J9-J10, sortie de G3** : navigation, puis une application réelle affichée et utilisable :

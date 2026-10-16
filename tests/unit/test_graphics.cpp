@@ -943,6 +943,69 @@ TEST(graphics_region_follows_skregion) {
   CHECK_EQ(thrown(rt, [&] { op_rect(a, 0, 0, 1, 1, 9); }), std::string("java.lang.IllegalArgumentException"));
 }
 
+// VectorDrawable: HWUI's tree as a property store, its defaults and property
+// layouts, owned by VirtualRefBasePtr (the last reference frees every node).
+TEST(graphics_vector_drawable_follows_hwui) {
+  Vm vm;
+  rt::Runtime& rt = *vm.rt;
+  const char* vd = "Landroid/graphics/drawable/VectorDrawable;";
+  const char* ref = "Lcom/android/internal/util/VirtualRefBasePtr;";
+  auto f32 = [](uint64_t v) {
+    float f;
+    uint32_t bits = uint32_t(v);
+    std::memcpy(&f, &bits, 4);
+    return f;
+  };
+  int64_t root = int64_t(call(rt, vd, "nCreateGroup", "()J"));
+  int64_t path = int64_t(call(rt, vd, "nCreateFullPath", "()J"));
+  int64_t clip = int64_t(call(rt, vd, "nCreateClipPath", "()J"));
+  call(rt, vd, "nAddChild", "(JJ)V", Args().j(root).j(clip));
+  call(rt, vd, "nAddChild", "(JJ)V", Args().j(root).j(path));
+  CHECK_EQ(f32(call(rt, vd, "nGetScaleX", "(J)F", Args().j(root))), 1.0f);
+  call(rt, vd, "nSetRotation", "(JF)V", Args().j(root).f(45));
+  call(rt, vd, "nUpdateGroupProperties", "(JFFFFFFF)V", Args().j(root).f(90).f(1).f(2).f(3).f(4).f(5).f(6));
+  rt::GlobalRef floats(rt, rt.new_array("[F", 7));
+  CHECK_EQ(call(rt, vd, "nGetGroupProperties", "(J[FI)Z", Args().j(root).h(floats.get()).i(7)), uint64_t(1));
+  float g[7];
+  std::memcpy(g, rt.array(floats.get(), "f").data.data(), sizeof g);
+  CHECK(g[0] == 90 && g[3] == 3 && g[6] == 6);
+
+  // FullPathProperties::PrimitiveFields, defaults then updated.
+  rt::GlobalRef bytes(rt, rt.new_array("[B", 48));
+  CHECK_EQ(call(rt, vd, "nGetFullPathProperties", "(J[BI)Z", Args().j(path).h(bytes.get()).i(48)), uint64_t(1));
+  float fields[12];
+  std::memcpy(fields, rt.array(bytes.get(), "b").data.data(), 48);
+  CHECK(fields[0] == 0 && fields[2] == 1 && fields[4] == 1 && fields[6] == 1 && fields[10] == 4);  // widths, alphas, trim end, miter
+  call(rt, vd, "nUpdateFullPathProperties", "(JFIFIFFFFFIII)V",
+       Args().j(path).f(2).i(int32_t(0xFF0000FF)).f(0.5f).i(int32_t(0xFF00FF00)).f(0.25f).f(0.1f).f(0.9f).f(0.2f).f(8).i(1).i(2).i(1));
+  CHECK_EQ(uint32_t(call(rt, vd, "nGetFillColor", "(J)I", Args().j(path))), uint32_t(0xFF00FF00));
+  CHECK_EQ(f32(call(rt, vd, "nGetTrimPathEnd", "(J)F", Args().j(path))), 0.9f);
+  call(rt, vd, "nSetStrokeWidth", "(JF)V", Args().j(path).f(3));
+  CHECK_EQ(f32(call(rt, vd, "nGetStrokeWidth", "(J)F", Args().j(path))), 3.0f);
+  CHECK_EQ(thrown(rt, [&] { call(rt, vd, "nGetFullPathProperties", "(J[BI)Z", Args().j(path).h(bytes.get()).i(40)); }),
+           std::string("java.lang.IllegalArgumentException"));
+  rt::GlobalRef bad(rt, rt.new_string_utf8("M 1"));
+  CHECK_EQ(thrown(rt, [&] { call(rt, vd, "nSetPathString", "(JLjava/lang/String;I)V", Args().j(path).h(bad.get()).i(3)); }),
+           std::string("java.lang.IllegalArgumentException"));
+  CHECK_EQ(thrown(rt, [&] { call(rt, vd, "nGetRotation", "(J)F", Args().j(path)); }),  // a path is not a group
+           std::string("java.lang.IllegalStateException"));
+
+  // The tree: root alpha, a copy keeping the viewport, freed with its nodes.
+  int64_t tree = int64_t(call(rt, vd, "nCreateTree", "(J)J", Args().j(root)));
+  call(rt, ref, "nIncStrong", "(J)V", Args().j(tree));
+  call(rt, vd, "nSetRendererViewportSize", "(JFF)V", Args().j(tree).f(24).f(24));
+  CHECK_EQ(call(rt, vd, "nSetRootAlpha", "(JF)Z", Args().j(tree).f(0.5f)), uint64_t(1));
+  CHECK_EQ(call(rt, vd, "nSetRootAlpha", "(JF)Z", Args().j(tree).f(0.5f)), uint64_t(0));  // unchanged
+  int64_t root2 = int64_t(call(rt, vd, "nCreateGroup", "(J)J", Args().j(root)));
+  CHECK_EQ(f32(call(rt, vd, "nGetRotation", "(J)F", Args().j(root2))), 90.0f);
+  int64_t tree2 = int64_t(call(rt, vd, "nCreateTreeFromCopy", "(JJ)J", Args().j(tree).j(root2)));
+  CHECK_EQ(f32(call(rt, vd, "nGetRootAlpha", "(J)F", Args().j(tree2))), 0.5f);
+  call(rt, ref, "nDecStrong", "(J)V", Args().j(tree));
+  CHECK_EQ(thrown(rt, [&] { call(rt, vd, "nGetStrokeWidth", "(J)F", Args().j(path)); }),
+           std::string("java.lang.IllegalStateException"));
+  CHECK_EQ(f32(call(rt, vd, "nGetRotation", "(J)F", Args().j(root2))), 90.0f);  // the copy's tree lives on
+}
+
 TEST(graphics_nine_patch_natives) {
   Vm vm;
   rt::Runtime& rt = *vm.rt;

@@ -1,5 +1,6 @@
 démarrage : ActivityThread prêt
-application : com.anyandroid.samples.basic.BasicApp
+polices système chargées
+application : android.app.Application
 activité : MainActivity attachée
 cycle : MainActivity.onCreate
 cycle : MainActivity.onStart

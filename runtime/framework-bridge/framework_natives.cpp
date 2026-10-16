@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "common/clock.h"
+#include "common/log.h"
 #include "common/text.h"
 #include "framework-bridge/internal.h"
 #include "image/aosp.h"
@@ -64,6 +65,74 @@ void register_log_clock_trace(rt::NativeRegistry& r) {
     return rt::ret_bool(a.i32(1) >= 4);  // Android's default threshold: INFO
   });
   r.bind(log, "logger_entry_max_payload_native", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return 4068; });
+
+  // EventLog: binary events (logcat -b events), kept in AnyAndroid's debug log
+  // as "tag [values]"; the result is the size of liblog's binary encoding.
+  const char* events = "Landroid/util/EventLog;";
+  struct Event {
+    std::string text;
+    int32_t size = 4;  // the tag
+    void add(const std::string& v, int32_t payload) {
+      text += (text.empty() ? "" : ",") + v;
+      size += 1 + payload;  // type byte and value
+    }
+  };
+  auto write_event = [](int32_t tag, const Event& e, bool list) -> uint64_t {
+    log::debug("eventlog", std::to_string(tag) + (list ? " [" : " ") + e.text + (list ? "]" : ""));
+    return rt::ret_int(e.size + (list ? 2 : 0));
+  };
+  r.bind(events, "writeEvent", "(II)I", [write_event](Runtime&, NativeArgs& a) -> uint64_t {
+    Event e;
+    e.add(std::to_string(a.i32(1)), 4);
+    return write_event(a.i32(0), e, false);
+  }, S::kPartial, "événement tenu dans le journal de débogage");
+  r.bind(events, "writeEvent", "(IJ)I", [write_event](Runtime&, NativeArgs& a) -> uint64_t {
+    Event e;
+    e.add(std::to_string(a.i64(1)), 8);
+    return write_event(a.i32(0), e, false);
+  }, S::kPartial, "événement tenu dans le journal de débogage");
+  r.bind(events, "writeEvent", "(IF)I", [write_event](Runtime&, NativeArgs& a) -> uint64_t {
+    Event e;
+    e.add(std::to_string(a.f32(1)), 4);
+    return write_event(a.i32(0), e, false);
+  }, S::kPartial, "événement tenu dans le journal de débogage");
+  r.bind(events, "writeEvent", "(ILjava/lang/String;)I", [write_event](Runtime& rt, NativeArgs& a) -> uint64_t {
+    Event e;
+    std::string s = a.h(1) ? rt.string_utf8(a.h(1)) : "NULL";
+    e.add(s, 4 + int32_t(s.size()));
+    return write_event(a.i32(0), e, false);
+  }, S::kPartial, "événement tenu dans le journal de débogage");
+  r.bind(events, "writeEvent", "(I[Ljava/lang/Object;)I", [write_event](Runtime& rt, NativeArgs& a) -> uint64_t {
+    Event e;
+    if (a.h(1) != kNull) {
+      rt::ArrayObject& arr = rt.array(a.h(1), "Object[]");
+      for (uint32_t i = 0; i < arr.length; ++i) {
+        Handle v;
+        std::memcpy(&v, &arr.data[size_t(i) * 4], 4);
+        rt::Object* o = rt.object(v);
+        std::string cls = o ? o->klass->java_name() : "";
+        rt::Field* value = o ? find_field(o->klass, "value", cls == "java.lang.Long" ? "J" : cls == "java.lang.Float" ? "F" : "I") : nullptr;
+        if (!o) {
+          e.add("NULL", 8);
+        } else if (cls == "java.lang.String") {
+          std::string s = rt.string_utf8(v);
+          e.add(s, 4 + int32_t(s.size()));
+        } else if (cls == "java.lang.Integer" && value) {
+          e.add(std::to_string(int32_t(o->fields.at(value->slot))), 4);
+        } else if (cls == "java.lang.Long" && value) {
+          e.add(std::to_string(int64_t(uint64_t(o->fields.at(value->slot)) | uint64_t(o->fields.at(value->slot + 1)) << 32)), 8);
+        } else if (cls == "java.lang.Float" && value) {
+          float f;
+          uint32_t bits = o->fields.at(value->slot);
+          std::memcpy(&f, &bits, 4);
+          e.add(std::to_string(f), 4);
+        } else {
+          e.add("(" + cls + ")", 4);  // liblog writes other objects as their toString
+        }
+      }
+    }
+    return write_event(a.i32(0), e, true);
+  }, S::kPartial, "événement tenu dans le journal de débogage");
 
   const char* stats = "Landroid/util/StatsLog;";
   r.bind(stats, "writeImpl", "([BII)V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; }, S::kStub,
