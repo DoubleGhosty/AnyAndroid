@@ -1,6 +1,7 @@
 // java.lang subset beyond the runtime core: StringBuilder, boxed primitives,
 // Math, System, PrintStream, Runnable, Enum and String.format.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>

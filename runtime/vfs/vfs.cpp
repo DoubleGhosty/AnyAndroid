@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstring>
+#include <cwchar>
 #include <mutex>
 #include <stdexcept>
 
