@@ -369,6 +369,7 @@ LayoutPiece shape_piece(std::u16string_view text_buf, Range range, bool rtl, con
     const FontCollection::Run& run = items[size_t(ix)];
     FakedFont faked = paint.font->best_font(substr, run, paint.font_style, paint.font_variations);
     std::shared_ptr<Face> face = faked.face();
+    if (!face) continue;  // a font FreeType rejects draws nothing
     size_t font_ix = p.fonts.size();
     for (size_t k = 0; k < faces.size(); ++k) {
       if (faces[k] == face) {
@@ -500,7 +501,9 @@ TextRect piece_bounds(const LayoutPiece& p, const Paint& paint) {
     const FakedFont& font = p.fonts[p.font_indices[i]];
     uint16_t g = uint16_t(p.glyph_ids[i]);
     Rect r;
-    font.face()->bounds(skia_font(paint, font.fakery), std::span<const uint16_t>(&g, 1), std::span<Rect>(&r, 1));
+    if (std::shared_ptr<Face> face = font.face()) {
+      face->bounds(skia_font(paint, font.fakery), std::span<const uint16_t>(&g, 1), std::span<Rect>(&r, 1));
+    }
     out.join(TextRect{r.left, r.top, r.right, r.bottom}, p.points[i].x, p.points[i].y);
   }
   return out;
@@ -645,7 +648,9 @@ void TextRect::join(const TextRect& r, float dx, float dy) {
 
 Extent font_extent(const FakedFont& font, const Paint& paint) {
   FontMetrics m;
-  font.face()->metrics(skia_font(paint, font.fakery), &m);
+  std::shared_ptr<Face> face = font.face();
+  if (!face) return Extent{};
+  face->metrics(skia_font(paint, font.fakery), &m);
   return Extent{m.ascent, m.descent};
 }
 

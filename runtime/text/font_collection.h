@@ -42,21 +42,37 @@ struct FontFakery {
 
 class Font {
  public:
+  // Font `index` of a file, at the variation coordinates `axes` (those of
+  // Font.Builder). The file is only read for its tables until the font is
+  // drawn or measured, then opened by FreeType.
+  Font(std::shared_ptr<const FontSource> source, uint32_t index, std::vector<Variation> axes, FontStyle style,
+       uint32_t locale_list_id);
+  // A font over a face already opened.
   Font(std::shared_ptr<Face> face, FontStyle style, uint32_t locale_list_id);
-  // The face with the axes given at creation (Font.Builder's).
-  const std::shared_ptr<Face>& face() const { return face_; }
+
+  // The face (opened on first use); nullptr when FreeType rejects the font.
+  std::shared_ptr<Face> face() const;
+  const std::vector<Variation>& variations() const { return axes_; }
+  std::vector<uint8_t> table(uint32_t tag) const;
   FontStyle style() const { return style_; }
   uint32_t locale_list_id() const { return locale_list_id_; }
-  bool axis_supported(uint32_t tag) const;
+  bool axis_supported(uint32_t tag) const { return fvar_axis(tag) != nullptr; }
   const Axis* fvar_axis(uint32_t tag) const;
-  // getAdjustedTypeface: the face at `axes`, minus those at their default.
+  // getAdjustedTypeface: the face at `axes`, minus those at their default;
+  // nullptr when the font cannot be opened.
   std::shared_ptr<Face> adjusted(const VariationSettings& axes) const;
 
  private:
-  std::shared_ptr<Face> face_;
+  std::shared_ptr<const FontSource> source_;
+  uint32_t index_ = 0;
+  std::vector<Variation> axes_;
   FontStyle style_;
   uint32_t locale_list_id_;
+  mutable std::once_flag fvar_once_;
+  mutable std::vector<Axis> fvar_;
   mutable std::mutex lock_;
+  mutable bool opened_ = false;
+  mutable std::shared_ptr<Face> face_;
   mutable std::map<VariationSettings, std::shared_ptr<Face>, VariationLess> adjusted_;
 };
 
@@ -79,8 +95,9 @@ class FontFamily {
   bool default_fallback() const { return default_fallback_; }
   VariationFamilyType variation_type() const { return variation_type_; }
   bool color_emoji() const { return color_emoji_; }
-  const Coverage& coverage() const { return coverage_; }
-  bool has_vs_table() const { return has_vs_table_; }
+  // Read from the cmap of the font closest to the default style, on first use.
+  const Coverage& coverage() const;
+  bool has_vs_table() const;
   bool has_glyph(char32_t c, char32_t selector) const;
   FakedFont closest_match(FontStyle style, const VariationSettings& axes = {}) const;
 
@@ -91,8 +108,9 @@ class FontFamily {
   bool custom_fallback_, default_fallback_;
   VariationFamilyType variation_type_;
   bool color_emoji_;
-  bool has_vs_table_ = false;
-  Coverage coverage_;
+  mutable std::once_flag coverage_once_;
+  mutable bool has_vs_table_ = false;
+  mutable Coverage coverage_;
 };
 
 class FontCollection {
@@ -121,8 +139,6 @@ class FontCollection {
   bool primary(const FontFamily& family) const;
 
   std::vector<std::shared_ptr<const FontFamily>> families_;
-  std::vector<const FontFamily*> vs_families_;
-  uint32_t max_char_ = 0;
 };
 
 }  // namespace aa::text

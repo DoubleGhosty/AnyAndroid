@@ -3,17 +3,17 @@
 // written from what the real start-up path asks for. Typeface's static
 // initialisation and Typeface.loadPreinstalledSystemFontMap read the system
 // font configuration (/system/etc/fonts.xml) in Java; the native side builds
-// minikin's objects (Font, FontFamily, FontCollection behind a Typeface) and
-// keeps its registries, with the rules of HWUI (hwui/Typeface.cpp) and
-// minikin for styles, weights and fallback.
+// minikin's objects (Font, FontFamily, FontCollection behind a Typeface) in
+// the text engine (runtime/text, ADR-007) and keeps HWUI's registries, with
+// its rules for styles, weights and fallback.
 //
 // The font data stays where Java mapped it (a direct ByteBuffer, kept alive
-// by the font): it is not parsed before the text engine (J7), which will
-// also check it, so a font file is read only when text needs it. What needs
-// the font tables (metrics, glyph bounds, supported axes, coverage) is left
-// unbound until then.
+// by the font). The engine reads the tables it needs from it (cmap for
+// fallback, fvar for variations) and opens a font with FreeType only when it
+// measures or draws with it, as minikin leaves fonts mapped until used.
 #include "framework-bridge/internal.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -23,8 +23,11 @@
 #include <utility>
 #include <vector>
 
+#include "common/text.h"
 #include "framework-bridge/handles.h"
 #include "framework-bridge/native_memory.h"
+#include "text/font_collection.h"
+#include "text/locale.h"
 
 namespace aa::bridge {
 
@@ -35,17 +38,6 @@ using rt::kNull;
 using rt::NativeArgs;
 using rt::Runtime;
 using S = rt::ApiStatus;
-
-// minikin's LocaleListCache, keyed by the list's language tags.
-struct LocaleLists {
-  std::mutex lock;
-  std::vector<std::u16string> lists{u""};
-};
-
-LocaleLists& locale_lists() {
-  static auto* l = new LocaleLists;
-  return *l;
-}
 
 struct Axis {
   int32_t tag = 0;
@@ -61,6 +53,34 @@ struct FontData {
   int32_t source_id = 0;
 };
 
+// The engine's view of a font buffer: parts read in place, the whole pinned
+// when FreeType opens the font. A read that fails reads as missing bytes.
+class BufferSource final : public text::FontSource {
+ public:
+  BufferSource(Runtime& rt, std::shared_ptr<const FontData> data) : rt_(&rt), data_(std::move(data)) {}
+  size_t size() const override { return size_t(data_->size); }
+  size_t read(size_t offset, std::span<uint8_t> out) const override {
+    if (offset >= size()) return 0;
+    try {
+      return native_read(*rt_, data_->address, offset, out.first(std::min(out.size(), size() - offset)));
+    } catch (const rt::JavaThrow&) {
+      return 0;
+    }
+  }
+  text::FontData bytes() const override {
+    try {
+      PinnedBytes p = native_pin(*rt_, data_->address, uint64_t(data_->size));
+      return text::FontData{std::move(p.owner), p.data, p.size};
+    } catch (const rt::JavaThrow&) {
+      return text::FontData{};
+    }
+  }
+
+ private:
+  Runtime* rt_;
+  std::shared_ptr<const FontData> data_;
+};
+
 struct Font {
   std::shared_ptr<const FontData> data;
   std::u16string locales;
@@ -68,6 +88,7 @@ struct Font {
   bool italic = false;
   int32_t ttc_index = 0;
   std::vector<Axis> axes;
+  std::shared_ptr<const text::Font> engine;  // minikin::Font
 };
 
 struct FontBuilder {
@@ -81,6 +102,7 @@ struct Family {
   int32_t variant = 0;
   bool custom_fallback = false, default_fallback = false;
   int32_t variation_family_type = 0;
+  std::shared_ptr<const text::FontFamily> engine;  // minikin::FontFamily
 };
 
 struct FamilyBuilder {
@@ -88,7 +110,10 @@ struct FamilyBuilder {
   std::vector<std::shared_ptr<const Font>> fonts;
 };
 
-using Collection = std::vector<std::shared_ptr<const Family>>;
+struct Collection {
+  std::vector<std::shared_ptr<const Family>> families;
+  std::shared_ptr<const text::FontCollection> engine;  // minikin::FontCollection
+};
 
 // HWUI's Typeface: a font collection, its base weight, the style asked
 // through the API (NORMAL, BOLD, ITALIC, BOLD_ITALIC) and the minikin style.
@@ -197,6 +222,16 @@ void set_relative_style(Typeface& t, int32_t base_weight, int32_t style) {
   t.italic = (style & kItalic) != 0;
 }
 
+// Font_Builder_build: the minikin font of a bridge font.
+std::shared_ptr<const text::Font> engine_font(Runtime& rt, const Font& f) {
+  std::vector<text::Variation> axes;
+  for (const Axis& a : f.axes) axes.push_back({uint32_t(a.tag), a.value});
+  uint32_t locales = uint32_t(minikin_locale_list_id(rt, f.locales));
+  text::FontStyle style{uint16_t(std::clamp(f.weight, 0, 1000)), f.italic};
+  return std::make_shared<const text::Font>(std::make_shared<BufferSource>(rt, f.data), uint32_t(std::max(0, f.ttc_index)),
+                                            std::move(axes), style, locales);
+}
+
 void register_fonts(rt::NativeRegistry& r) {
   const char* fb = "Landroid/graphics/fonts/Font$Builder;";
   r.bind(fb, "nInitBuilder", "()J", [](Runtime&, NativeArgs&) -> uint64_t {
@@ -220,10 +255,13 @@ void register_fonts(rt::NativeRegistry& r) {
            f->weight = a.i32(5);
            f->italic = a.z(6);
            f->ttc_index = a.i32(7);
-           std::lock_guard<std::mutex> guard(b->lock);
-           f->axes = b->axes;
+           {
+             std::lock_guard<std::mutex> guard(b->lock);
+             f->axes = b->axes;
+           }
+           f->engine = engine_font(rt, *f);
            return uint64_t(tables().fonts.add(std::move(f)));
-         }, S::kPartial, "données de police conservées, analysées par le moteur de texte (J7)");
+         });
   // A font over the same data with other parameters (Font.Builder(Font)).
   r.bind(fb, "nClone", "(JJIZI)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto src = get(rt, tables().fonts, a.i64(0), "Font");
@@ -232,8 +270,11 @@ void register_fonts(rt::NativeRegistry& r) {
     f->weight = a.i32(4);
     f->italic = a.z(5);
     f->ttc_index = a.i32(6);
-    std::lock_guard<std::mutex> guard(b->lock);
-    f->axes = b->axes;
+    {
+      std::lock_guard<std::mutex> guard(b->lock);
+      f->axes = b->axes;
+    }
+    f->engine = engine_font(rt, *f);
     return uint64_t(tables().fonts.add(std::move(f)));
   });
 
@@ -312,8 +353,14 @@ void register_families(rt::NativeRegistry& r) {
     if (f->fonts.empty()) {
       rt.throw_new("Ljava/lang/IllegalArgumentException;", "Failed to create internal object. maybe invalid font data");
     }
+    std::vector<std::shared_ptr<const text::Font>> fonts;
+    for (const auto& font : f->fonts) fonts.push_back(font->engine);
+    f->engine = std::make_shared<const text::FontFamily>(
+        uint32_t(minikin_locale_list_id(rt, f->lang_tags)), text::FamilyVariant(std::clamp(f->variant, 0, 2)),
+        std::move(fonts), f->custom_fallback, f->default_fallback,
+        text::VariationFamilyType(std::clamp(f->variation_family_type, 0, 3)));
     return uint64_t(tables().families.add(std::move(f)));
-  }, S::kPartial, "couverture des caractères calculée par le moteur de texte (J7)");
+  }, S::kPartial, "couverture lue de la table cmap au premier usage ; la famille n'est pas refusée sans couverture");
 
   const char* fa = "Landroid/graphics/fonts/FontFamily;";
   // A new native font object each time (Java wraps and registers it).
@@ -355,20 +402,24 @@ void register_typefaces(rt::NativeRegistry& r) {
     for (uint32_t i = 0; i < arr.length; ++i) {
       int64_t h;
       std::memcpy(&h, arr.data.data() + size_t(i) * 8, 8);
-      collection->push_back(get(rt, tables().families, h, "FontFamily"));
+      collection->families.push_back(get(rt, tables().families, h, "FontFamily"));
     }
     if (int64_t fallback = a.i64(1)) {
       auto fb = get(rt, tables().typefaces, fallback, "Typeface");
-      collection->insert(collection->end(), fb->collection->begin(), fb->collection->end());
+      const auto& more = fb->collection->families;
+      collection->families.insert(collection->families.end(), more.begin(), more.end());
     }
+    std::vector<std::shared_ptr<const text::FontFamily>> engines;
+    for (const auto& family : collection->families) engines.push_back(family->engine);
+    collection->engine = std::make_shared<const text::FontCollection>(std::move(engines));
     int32_t weight = a.i32(3), italic = a.i32(4);
     if (weight == kResolveByFontTable || italic == kResolveByFontTable) {
       // The style of the first family's font closest to the default one.
       int32_t font_weight = 400;
       bool font_italic = false;
-      if (!collection->empty() && !collection->front()->fonts.empty()) {
+      if (!collection->families.empty() && !collection->families.front()->fonts.empty()) {
         const Font* best = nullptr;
-        for (const auto& f : collection->front()->fonts) {
+        for (const auto& f : collection->families.front()->fonts) {
           if (!best || match_score(*f, 400, false) < match_score(*best, 400, false)) best = f.get();
         }
         font_weight = best->weight;
@@ -465,25 +516,19 @@ void register_typefaces(rt::NativeRegistry& r) {
 }  // namespace
 
 int32_t minikin_locale_list_id(rt::Runtime& rt, const std::u16string& tags) {
-  LocaleLists& l = locale_lists();
-  {
-    std::lock_guard<std::mutex> guard(l.lock);
-    for (size_t i = 0; i < l.lists.size(); ++i) {
-      if (l.lists[i] == tags) return int32_t(i);
-    }
-    // The lists come from the application: bound the registry.
-    if (l.lists.size() < 4096) {
-      l.lists.push_back(tags);
-      return int32_t(l.lists.size() - 1);
-    }
+  ensure_text_services(rt);
+  uint32_t id = text::locale_list_id(text::utf16_to_utf8(tags));
+  if (id == text::kInvalidLocaleListId) {
+    rt.throw_new("Ljava/lang/IllegalArgumentException;", "trop de listes de locales distinctes");
   }
-  rt.throw_new("Ljava/lang/IllegalArgumentException;", "trop de listes de locales distinctes");
+  return int32_t(id);
 }
 
-bool minikin_locale_list_valid(int32_t id) {
-  LocaleLists& l = locale_lists();
-  std::lock_guard<std::mutex> guard(l.lock);
-  return id >= 0 && size_t(id) < l.lists.size();
+bool minikin_locale_list_valid(int32_t id) { return id >= 0 && text::locale_list_id_valid(uint32_t(id)); }
+
+TypefaceInfo resolve_typeface(rt::Runtime& rt, int64_t handle) {
+  auto t = resolve_default(rt, handle);
+  return TypefaceInfo{t->collection->engine, text::FontStyle{uint16_t(t->weight), t->italic}, t->api_style};
 }
 
 void register_framework_fonts(rt::NativeRegistry& r) {

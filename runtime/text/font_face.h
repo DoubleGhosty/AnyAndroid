@@ -26,6 +26,23 @@ struct FontData {
   size_t size = 0;
 };
 
+// Where a font file is read from. Tables can be read without loading the
+// whole file (the fallback fonts of a collection are only looked at for
+// their cmap until they draw something).
+class FontSource {
+ public:
+  virtual ~FontSource() = default;
+  virtual size_t size() const = 0;
+  // Reads up to out.size() bytes at `offset`; returns how many were read
+  // (fewer at the end of the file or on a read error).
+  virtual size_t read(size_t offset, std::span<uint8_t> out) const = 0;
+  // The whole file, kept alive by the result; empty on error.
+  virtual FontData bytes() const = 0;
+};
+
+// A source over bytes already in memory.
+std::shared_ptr<const FontSource> memory_source(FontData data);
+
 constexpr uint32_t tag(char a, char b, char c, char d) {
   return uint32_t(uint8_t(a)) << 24 | uint32_t(uint8_t(b)) << 16 | uint32_t(uint8_t(c)) << 8 | uint8_t(d);
 }
@@ -42,6 +59,12 @@ struct Axis {
   uint32_t tag = 0;
   float min = 0, def = 0, max = 0;
 };
+
+// A table of font `index` of a file (sfnt table directory, TTC header),
+// read without opening the font; empty when absent or malformed.
+std::vector<uint8_t> read_table(const FontSource& source, uint32_t index, uint32_t tag);
+// The axes of an fvar table.
+std::vector<Axis> parse_fvar(std::span<const uint8_t> fvar);
 
 // SkFontHinting and SkFont::Edging.
 enum class Hinting : uint8_t { kNone, kSlight, kNormal, kFull };

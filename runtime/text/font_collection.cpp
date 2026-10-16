@@ -40,20 +40,43 @@ bool VariationLess::operator()(const VariationSettings& a, const VariationSettin
 
 // --- Font ------------------------------------------------------------------
 
+Font::Font(std::shared_ptr<const FontSource> source, uint32_t index, std::vector<Variation> axes, FontStyle style,
+           uint32_t locale_list_id)
+    : source_(std::move(source)), index_(index), axes_(std::move(axes)), style_(style), locale_list_id_(locale_list_id) {}
+
 Font::Font(std::shared_ptr<Face> face, FontStyle style, uint32_t locale_list_id)
-    : face_(std::move(face)), style_(style), locale_list_id_(locale_list_id) {}
+    : source_(memory_source(face->data())),
+      index_(face->index()),
+      axes_(face->variations()),
+      style_(style),
+      locale_list_id_(locale_list_id),
+      opened_(true),
+      face_(std::move(face)) {}
+
+std::shared_ptr<Face> Font::face() const {
+  std::lock_guard<std::mutex> guard(lock_);
+  if (!opened_) {
+    opened_ = true;
+    FontData data = source_->bytes();
+    std::string error;
+    if (data.bytes) face_ = Face::open(std::move(data), index_, axes_, &error);
+  }
+  return face_;
+}
+
+std::vector<uint8_t> Font::table(uint32_t t) const { return read_table(*source_, index_, t); }
 
 const Axis* Font::fvar_axis(uint32_t t) const {
-  for (const Axis& a : face_->axes()) {
+  std::call_once(fvar_once_, [this] { fvar_ = parse_fvar(table(tag('f', 'v', 'a', 'r'))); });
+  for (const Axis& a : fvar_) {
     if (a.tag == t) return &a;
   }
   return nullptr;
 }
 
-bool Font::axis_supported(uint32_t t) const { return fvar_axis(t) != nullptr; }
-
 std::shared_ptr<Face> Font::adjusted(const VariationSettings& axes) const {
-  if (axes.empty()) return face_;
+  std::shared_ptr<Face> base = face();
+  if (axes.empty() || !base) return base;
   std::lock_guard<std::mutex> guard(lock_);
   if (auto it = adjusted_.find(axes); it != adjusted_.end()) return it->second;
   std::vector<Variation> filtered;
@@ -61,8 +84,8 @@ std::shared_ptr<Face> Font::adjusted(const VariationSettings& axes) const {
     const Axis* a = fvar_axis(v.tag);
     if (a && a->def != v.value) filtered.push_back(v);
   }
-  std::shared_ptr<Face> face = face_->with_variations(filtered);
-  if (!face) face = face_;
+  std::shared_ptr<Face> face = base->with_variations(filtered);
+  if (!face) face = base;
   constexpr size_t kMaxAdjusted = 64;
   if (adjusted_.size() >= kMaxAdjusted) adjusted_.erase(adjusted_.begin());
   adjusted_.emplace(axes, face);
@@ -161,10 +184,20 @@ FontFamily::FontFamily(uint32_t locale_list_id, FamilyVariant variant, std::vect
       custom_fallback_(custom_fallback),
       default_fallback_(default_fallback),
       variation_type_(variation_type),
-      color_emoji_(locale_list(locale_list_id).emoji_style() == EmojiStyle::kEmoji) {
-  if (fonts_.empty()) return;
-  const std::shared_ptr<const Font>& font = closest_match(FontStyle{}).font;
-  coverage_ = cmap_coverage(font->face()->table(tag('c', 'm', 'a', 'p')), &has_vs_table_);
+      color_emoji_(locale_list(locale_list_id).emoji_style() == EmojiStyle::kEmoji) {}
+
+const Coverage& FontFamily::coverage() const {
+  std::call_once(coverage_once_, [this] {
+    if (fonts_.empty()) return;
+    std::vector<uint8_t> cmap = closest_match(FontStyle{}).font->table(tag('c', 'm', 'a', 'p'));
+    coverage_ = cmap_coverage(cmap, &has_vs_table_);
+  });
+  return coverage_;
+}
+
+bool FontFamily::has_vs_table() const {
+  coverage();
+  return has_vs_table_;
 }
 
 FakedFont FontFamily::closest_match(FontStyle style, const VariationSettings& axes) const {
@@ -179,13 +212,14 @@ FakedFont FontFamily::closest_match(FontStyle style, const VariationSettings& ax
   }
   const Font& font = *fonts_[best];
   if (axes.empty() && style == font.style()) return FakedFont{fonts_[best], FontFakery{}};
-  return FakedFont{fonts_[best], merge(font, sorted_variations(font.face()->variations()), axes, font.style(), style)};
+  return FakedFont{fonts_[best], merge(font, sorted_variations(font.variations()), axes, font.style(), style)};
 }
 
 bool FontFamily::has_glyph(char32_t c, char32_t selector) const {
-  if (selector == 0) return coverage_.contains(c);
-  if (!has_vs_table_ || vs_index(selector) == kInvalidVsIndex) return false;
-  return closest_match(FontStyle{}).font->face()->glyph(c, selector) != 0;
+  if (selector == 0) return coverage().contains(c);
+  if (!has_vs_table() || vs_index(selector) == kInvalidVsIndex) return false;
+  std::shared_ptr<Face> face = closest_match(FontStyle{}).font->face();
+  return face && face->glyph(c, selector) != 0;
 }
 
 // --- FontCollection ------------------------------------------------------------
@@ -291,12 +325,12 @@ uint32_t glyph_score(std::u16string_view text, uint32_t start, uint32_t end, hb_
 
 }  // namespace
 
+// minikin indexes the families by code point pages and records the highest
+// covered code point; reading every coverage up front would read every
+// fallback font, so families are asked in order instead (same results).
 FontCollection::FontCollection(std::vector<std::shared_ptr<const FontFamily>> families) {
   for (auto& f : families) {
-    if (!f || f->font_count() == 0) continue;
-    if (f->has_vs_table()) vs_families_.push_back(f.get());
-    max_char_ = std::max(max_char_, f->coverage().length());
-    families_.push_back(std::move(f));
+    if (f && f->font_count() > 0) families_.push_back(std::move(f));
   }
 }
 
@@ -336,7 +370,6 @@ uint32_t FontCollection::family_score(char32_t c, char32_t vs, FamilyVariant var
 
 std::vector<uint8_t> FontCollection::family_for_char(char32_t c, char32_t vs, uint32_t locale_list_id,
                                                      FamilyVariant variant) const {
-  if (c >= max_char_) return {0};
   uint32_t best = kUnsupportedFontScore;
   std::vector<uint8_t> result;
   for (size_t i = 0; i < families_.size() && i < 256; ++i) {
@@ -361,9 +394,9 @@ std::vector<uint8_t> FontCollection::family_for_char(char32_t c, char32_t vs, ui
 }
 
 bool FontCollection::has_variation_selector(char32_t base, char32_t selector) const {
-  if (!is_variation_selector(selector) || base >= max_char_) return false;
-  for (const FontFamily* f : vs_families_) {
-    if (f->has_glyph(base, selector)) return true;
+  if (!is_variation_selector(selector)) return false;
+  for (const auto& f : families_) {
+    if (f->has_vs_table() && f->has_glyph(base, selector)) return true;
   }
   if (selector == kTextStyleVs) {
     for (const auto& f : families_) {
@@ -470,8 +503,9 @@ FakedFont FontCollection::best_font(std::u16string_view text, const Run& run, Fo
   if (families_[best]->color_emoji() && run.families.size() > 1) {
     uint32_t best_score = 0xFFFFFFFF;
     for (uint8_t ix : run.families) {
-      hb_font_t* font = families_[ix]->font(0)->face()->hb_font();
-      uint32_t score = glyph_score(text, uint32_t(run.start), uint32_t(run.end), font);
+      std::shared_ptr<Face> face = families_[ix]->font(0)->face();
+      if (!face) continue;
+      uint32_t score = glyph_score(text, uint32_t(run.start), uint32_t(run.end), face->hb_font());
       if (score < best_score) {
         best = ix;
         best_score = score;

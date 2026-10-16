@@ -90,11 +90,23 @@ int64_t map_fd_copy(rt::Runtime& rt, int32_t fd, uint64_t offset, uint64_t lengt
   std::shared_ptr<vfs::OpenFile> file = libcore_vfs().open_file(fd);  // outlives a close of fd
   if (!writable) {
     if (length > kMaxMapping) throw vfs::VfsError{vfs::kENOMEM, "mmap"};
+    auto read = [file, offset, length](uint64_t at, std::span<uint8_t> out) -> size_t {
+      if (at >= length) return 0;
+      size_t n = size_t(std::min<uint64_t>(out.size(), length - at));
+      size_t done = 0;
+      while (done < n) {
+        size_t got = file->read(offset + at + done, out.subspan(done, n - done));
+        if (got == 0) break;
+        done += got;
+      }
+      std::fill(out.begin() + long(done), out.begin() + long(n), uint8_t(0));  // zeros past the end of the file
+      return n;
+    };
     return native_wrap_lazy(rt, length, [file, length, fill] {
       std::vector<uint8_t> data(size_t(length), 0);
       fill(*file, data);
       return data;
-    });
+    }, read);
   }
   std::vector<uint8_t> data = mapping_bytes(length);
   fill(*file, data);

@@ -28,9 +28,12 @@ struct Region {
   bool live = false;
   bool writable = true;
   uint32_t next_free = kNoSlot;      // FIFO of free slots
-  std::vector<uint8_t> bytes;        // owned regions
-  // Lazy regions (native_wrap_lazy): the loader until the bytes are loaded.
+  // Owned regions; shared so that native_pin can keep them past a free.
+  std::shared_ptr<std::vector<uint8_t>> bytes;
+  // Lazy regions (native_wrap_lazy): the loader until the bytes are loaded,
+  // and the optional reader of parts of them meanwhile.
   std::shared_ptr<const std::function<std::vector<uint8_t>()>> loader;
+  std::shared_ptr<const RangeReader> reader;
   uint64_t lazy_size = 0;
   uint64_t charged = 0;              // bytes counted against the budget
   rt::ArrayObject* array = nullptr;  // regions over a Java array (see ArrayRegion)
@@ -170,7 +173,7 @@ int64_t add_owned(rt::Runtime& rt, std::vector<uint8_t>&& bytes, bool writable, 
         if (auto id = take_slot(m)) {
           Region& r = m.regions[*id];
           r.writable = writable;
-          r.bytes = std::move(bytes);
+          r.bytes = std::make_shared<std::vector<uint8_t>>(std::move(bytes));
           r.charged = charged;
           m.used += charged;
           address = encode(*id, r.gen, 0);
@@ -203,7 +206,8 @@ std::optional<Found> lookup(int64_t address) {
   Region* r = find(m, *d);
   if (!r) return std::nullopt;
   Found f;
-  f.data = r->array ? std::span<uint8_t>(r->array->data) : std::span<uint8_t>(r->bytes);
+  f.data = r->array ? std::span<uint8_t>(r->array->data)
+                    : r->bytes ? std::span<uint8_t>(*r->bytes) : std::span<uint8_t>();
   f.offset = d->offset;
   f.writable = r->writable;
   f.owned = r->array == nullptr;
@@ -238,17 +242,24 @@ void load(rt::Runtime& rt, int64_t address) {
   if (!failure.empty()) {
     rt.throw_new("Ljava/lang/InternalError;", "défaut lors d'un accès à une projection de fichier : " + failure);
   }
+  uint64_t charged = bytes.capacity();
+  std::shared_ptr<std::vector<uint8_t>> shared;
+  try {
+    shared = std::make_shared<std::vector<uint8_t>>(std::move(bytes));
+  } catch (const std::bad_alloc&) {
+    out_of_memory(rt, "mmap");
+  }
   bool budget = true;
   {
     std::lock_guard<std::mutex> guard(m.lock);
     Region* r = find(m, d);
     if (!r || !r->loader) return;  // freed, or loaded by another thread
-    uint64_t charged = bytes.capacity();
     if (fits(m, charged)) {
-      r->bytes = std::move(bytes);
+      r->bytes = std::move(shared);
       r->charged = charged;
       m.used += charged;
       r->loader = nullptr;
+      r->reader = nullptr;
     } else {
       budget = false;
     }
@@ -353,9 +364,11 @@ int64_t native_wrap(rt::Runtime& rt, std::vector<uint8_t> data, bool writable) {
   return add_owned(rt, std::move(data), writable, "mmap");
 }
 
-int64_t native_wrap_lazy(rt::Runtime& rt, uint64_t size, std::function<std::vector<uint8_t>()> load) {
+int64_t native_wrap_lazy(rt::Runtime& rt, uint64_t size, std::function<std::vector<uint8_t>()> load,
+                         RangeReader read) {
   if (size > kMaxRegionSize) rt.throw_new("Ljava/lang/OutOfMemoryError;", "bloc trop grand");
   auto loader = std::make_shared<const std::function<std::vector<uint8_t>()>>(std::move(load));
+  auto reader = read ? std::make_shared<const RangeReader>(std::move(read)) : nullptr;
   bool full = false, no_memory = false;
   int64_t address = 0;
   {
@@ -366,6 +379,7 @@ int64_t native_wrap_lazy(rt::Runtime& rt, uint64_t size, std::function<std::vect
         Region& r = m.regions[*id];
         r.writable = false;
         r.loader = std::move(loader);
+        r.reader = std::move(reader);
         r.lazy_size = size;
         address = encode(*id, r.gen, 0);
       } else {
@@ -386,6 +400,69 @@ std::span<uint8_t> native_span(rt::Runtime& rt, int64_t address, uint64_t size, 
     rt.throw_new("Ljava/lang/IndexOutOfBoundsException;", "accès hors du bloc de mémoire native");
   }
   return f.data.subspan(f.offset, size_t(size));
+}
+
+size_t native_read(rt::Runtime& rt, int64_t address, uint64_t offset, std::span<uint8_t> out) {
+  auto d = decode(address);
+  if (!d) unknown(rt, address);
+  std::shared_ptr<const RangeReader> reader;
+  uint64_t size = 0;
+  {
+    Memory& m = memory();
+    std::lock_guard<std::mutex> guard(m.lock);
+    Region* r = find(m, *d);
+    if (r && r->loader && r->reader) {
+      reader = r->reader;
+      size = r->lazy_size;
+    }
+  }
+  if (reader) {  // not loaded: read the part asked for only
+    uint64_t at = uint64_t(d->offset) + offset;
+    if (at >= size) return 0;
+    size_t n = size_t(std::min<uint64_t>(out.size(), size - at));
+    try {
+      return (*reader)(at, out.first(n));
+    } catch (const std::exception& e) {
+      rt.throw_new("Ljava/lang/InternalError;", std::string("défaut lors d'un accès à une projection de fichier : ") + e.what());
+    }
+  }
+  Found f = region_of(rt, address, false);
+  uint64_t at = uint64_t(f.offset) + offset;
+  if (at >= f.data.size()) return 0;
+  size_t n = size_t(std::min<uint64_t>(out.size(), f.data.size() - at));
+  std::copy(f.data.begin() + long(at), f.data.begin() + long(at + n), out.begin());
+  return n;
+}
+
+PinnedBytes native_pin(rt::Runtime& rt, int64_t address, uint64_t size) {
+  Found f = region_of(rt, address, false);
+  if (f.offset > f.data.size() || size > f.data.size() - f.offset) {
+    rt.throw_new("Ljava/lang/IndexOutOfBoundsException;", "accès hors du bloc de mémoire native");
+  }
+  std::shared_ptr<std::vector<uint8_t>> shared;
+  if (!f.writable && f.owned) {
+    auto d = *decode(address);
+    Memory& m = memory();
+    std::lock_guard<std::mutex> guard(m.lock);
+    if (Region* r = find(m, d)) shared = r->bytes;
+  }
+  PinnedBytes out;
+  out.size = size_t(size);
+  if (shared && f.offset + size <= shared->size()) {
+    out.data = shared->data() + f.offset;
+    out.owner = std::move(shared);
+    return out;
+  }
+  // Writable or array regions may change under the reader: a copy.
+  std::shared_ptr<std::vector<uint8_t>> copy;
+  try {
+    copy = std::make_shared<std::vector<uint8_t>>(f.data.begin() + f.offset, f.data.begin() + f.offset + long(size));
+  } catch (const std::bad_alloc&) {
+    out_of_memory(rt, "copie de mémoire native");
+  }
+  out.data = copy->data();
+  out.owner = std::move(copy);
+  return out;
 }
 
 std::string native_cstring(rt::Runtime& rt, int64_t address, size_t max) {

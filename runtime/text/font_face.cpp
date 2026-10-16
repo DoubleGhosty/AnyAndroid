@@ -169,6 +169,79 @@ struct GlyphInfo {
 
 }  // namespace
 
+namespace {
+
+class MemorySource final : public FontSource {
+ public:
+  explicit MemorySource(FontData data) : data_(std::move(data)) {}
+  size_t size() const override { return data_.size; }
+  size_t read(size_t offset, std::span<uint8_t> out) const override {
+    if (offset >= data_.size) return 0;
+    size_t n = std::min(out.size(), data_.size - offset);
+    std::copy(data_.bytes + offset, data_.bytes + offset + n, out.begin());
+    return n;
+  }
+  FontData bytes() const override { return data_; }
+
+ private:
+  FontData data_;
+};
+
+uint32_t be32(const uint8_t* p) { return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3]; }
+uint16_t be16(const uint8_t* p) { return uint16_t(p[0] << 8 | p[1]); }
+
+bool read_exact(const FontSource& src, size_t offset, std::span<uint8_t> out) {
+  return src.read(offset, out) == out.size();
+}
+
+}  // namespace
+
+std::shared_ptr<const FontSource> memory_source(FontData data) { return std::make_shared<MemorySource>(std::move(data)); }
+
+std::vector<uint8_t> read_table(const FontSource& src, uint32_t index, uint32_t t) {
+  uint8_t head[12];
+  if (!read_exact(src, 0, head)) return {};
+  size_t font_offset = 0;
+  if (be32(head) == tag('t', 't', 'c', 'f')) {
+    uint32_t fonts = be32(head + 8);
+    if (index >= fonts) return {};
+    uint8_t off[4];
+    if (!read_exact(src, 12 + size_t(index) * 4, off)) return {};
+    font_offset = be32(off);
+    if (!read_exact(src, font_offset, head)) return {};
+  } else if (index != 0) {
+    return {};
+  }
+  uint16_t tables = be16(head + 4);
+  std::vector<uint8_t> dir(size_t(tables) * 16);
+  if (!read_exact(src, font_offset + 12, dir)) return {};
+  for (size_t i = 0; i < tables; ++i) {
+    const uint8_t* rec = dir.data() + i * 16;
+    if (be32(rec) != t) continue;
+    size_t offset = be32(rec + 8), length = be32(rec + 12);
+    if (offset > src.size() || length > src.size() - offset) return {};
+    std::vector<uint8_t> out(length);
+    if (!read_exact(src, offset, out)) return {};
+    return out;
+  }
+  return {};
+}
+
+std::vector<Axis> parse_fvar(std::span<const uint8_t> fvar) {
+  std::vector<Axis> axes;
+  if (fvar.size() < 16) return axes;
+  const uint8_t* d = fvar.data();
+  size_t offset = be16(d + 4), count = be16(d + 8), size = be16(d + 10);
+  if (size < 20) return axes;
+  for (size_t i = 0; i < count; ++i) {
+    size_t at = offset + i * size;
+    if (at + 20 > fvar.size()) break;
+    auto fixed = [&](size_t o) { return float(int32_t(be32(d + at + o))) / 65536.0f; };
+    axes.push_back({be32(d + at), fixed(4), fixed(8), fixed(12)});
+  }
+  return axes;
+}
+
 // The face's FreeType and HarfBuzz objects, used under the engine lock.
 struct Face::Impl {
   FT_Face face = nullptr;

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
@@ -48,13 +49,32 @@ int64_t native_wrap(rt::Runtime& rt, std::vector<uint8_t> data, bool writable);
 // against the budget). `load` returns exactly `size` bytes or throws; a
 // failure is reported to the accessing Java code as InternalError, as a
 // fault in an unsafe memory access.
-int64_t native_wrap_lazy(rt::Runtime& rt, uint64_t size, std::function<std::vector<uint8_t>()> load);
+// `read`, when given, reads parts of the bytes before they are loaded
+// (offset, buffer -> bytes read), for readers that look at a few of them.
+using RangeReader = std::function<size_t(uint64_t offset, std::span<uint8_t> out)>;
+int64_t native_wrap_lazy(rt::Runtime& rt, uint64_t size, std::function<std::vector<uint8_t>()> load,
+                         RangeReader read = {});
 
 bool is_native_address(int64_t address);
 // `size` bytes at `address`; throws (IllegalArgumentException for an unknown
 // address, IndexOutOfBoundsException past the end of its region,
 // ReadOnlyBufferException when `write` targets a read-only region).
 std::span<uint8_t> native_span(rt::Runtime& rt, int64_t address, uint64_t size, bool write = false);
+// Copies the bytes from `address` + `offset` (at most out.size(), within
+// the region) and returns how many; a lazy region with a range reader is
+// read in part, without being loaded.
+size_t native_read(rt::Runtime& rt, int64_t address, uint64_t offset, std::span<uint8_t> out);
+// The `size` bytes at `address`, kept valid by `owner` even after their
+// region is freed (fonts read by the text engine): shared with a read-only
+// region (a file mapping), copied from a writable one or a Java array, whose
+// bytes may change. Shared bytes no longer count against the budget once
+// the region is freed.
+struct PinnedBytes {
+  std::shared_ptr<const void> owner;
+  const uint8_t* data = nullptr;
+  size_t size = 0;
+};
+PinnedBytes native_pin(rt::Runtime& rt, int64_t address, uint64_t size);
 // Bytes from `address` up to the first NUL (at most `max`, within the region).
 std::string native_cstring(rt::Runtime& rt, int64_t address, size_t max = 4096);
 // The Java array behind a VMRuntime.addressOf value (offset 0 only).

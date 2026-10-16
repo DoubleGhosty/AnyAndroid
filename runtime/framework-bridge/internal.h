@@ -2,6 +2,7 @@
 
 #include <array>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -9,6 +10,7 @@
 
 #include "dex-engine/runtime.h"
 #include "framework-bridge/bridge.h"
+#include "text/font_collection.h"
 #include "vfs/vfs.h"
 
 namespace aa::bridge {
@@ -111,6 +113,17 @@ void register_framework_fonts(rt::NativeRegistry& r);
 // IllegalArgumentException when full).
 int32_t minikin_locale_list_id(rt::Runtime& rt, const std::u16string& tags);
 bool minikin_locale_list_valid(int32_t id);
+// HWUI's Typeface::resolveDefault: the minikin collection and style of a
+// Typeface handle (0: the default typeface).
+struct TypefaceInfo {
+  std::shared_ptr<const text::FontCollection> collection;
+  text::FontStyle style;
+  int32_t api_style = 0;
+};
+TypefaceInfo resolve_typeface(rt::Runtime& rt, int64_t handle);
+// Installs the text engine's Unicode services over the ICU4J of the libcore
+// (text_services.cpp), answering through `rt`. Called before using the engine.
+void ensure_text_services(rt::Runtime& rt);
 void register_parcel_natives(rt::NativeRegistry& r);
 void register_appmem_natives(rt::NativeRegistry& r);
 void register_resource_natives(rt::NativeRegistry& r);
