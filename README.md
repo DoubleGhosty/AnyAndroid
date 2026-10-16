@@ -7,7 +7,7 @@
 Couche de compatibilité qui exécute des applications Android (bytecode DEX) **comme des processus
 Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 
-> **Avancement : ≈ 43 % vers « Android natif sur Windows »**
+> **Avancement : ≈ 44 % vers « Android natif sur Windows »**
 > 📊 Détail des jalons et carte complète dans [docs/STATUS.md](docs/STATUS.md) · [Données brutes](docs/progress.json).
 >
 > **Statut : prototype de recherche.** La preuve de concept de l'annexe A du cadrage fonctionne :
@@ -60,8 +60,22 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
   Côté `framework.jar`, `Resources.getSystem()` lit le vrai `framework-res.apk` de l'image.
 - **Démarrage d'applications par le vrai framework** ([ADR-006](docs/adr/ADR-006-demarrage-applications.md),
   en cours) : vrais `PathClassLoader` sur l'APK, services système locaux (`package` par le vrai
-  `PackageParser`, `permissionmgr`) et `java.util.regex` sur un moteur compatible ICU. Le lanceur
-  d'hôte crée l'`Application` puis l'activité, dont l'`onCreate` s'exécute.
+  `PackageParser`, `activity`, `window`, `display`, `permissionmgr`, réglages persistés) et
+  `java.util.regex` sur un moteur compatible ICU. Le vrai `ActivityThread` démarre l'application
+  par ses propres gestionnaires (`bindApplication`, `LaunchActivityItem`, `ResumeActivityItem`) :
+  `onCreate`, `onStart`, `onResume`, puis fenêtre logique (`addToDisplayAsUser`), vsync à 60 Hz et
+  première traversée de `ViewRootImpl` jusqu'à la mesure des vues.
+
+## Avancement récent
+
+| Jalon (ADR-006) | État |
+|---|---|
+| J0-J2 — outillage Java/D8, `ServiceManager` local, vrais chargeurs de classes | fait |
+| J3 — services système v1 | en cours (chaque appel manquant est tracé) |
+| J4 — `Application` et activité jusqu'à `onResume`, en direct | fait |
+| J5 — démarrage par les vrais gestionnaires d'`ActivityThread`, fenêtre logique | avancé : jusqu'à la mesure des vues |
+| J6 — texte (FreeType + HarfBuzz, logique de minikin) | commencé |
+| J7-J10 — rendu logiciel, fenêtre Win32, navigation, une application AOSP affichée | à faire |
 
 ## Limites actuelles
 
@@ -165,7 +179,7 @@ runtime/dex-engine/       format DEX, opcodes, vérification, runtime, interpré
 runtime/framework-bridge/ API Java/Android implémentées en natif (registre à statuts)
 runtime/lifecycle/        hôte d'application et cycle de vie des activités
 runtime/compat/           verdict de compatibilité, matrice des API, analyse d'écart
-runtime/third_party/      code tiers repris sans modification (miniz, voir « Composants tiers »)
+runtime/third_party/      code tiers repris sans modification (miniz, FreeType, HarfBuzz : « Composants tiers »)
 backends/windows/         fenêtre Win32 ; backends/headless/ : backend scriptable
 tools/apkgen/             assembleur smali, compilateur AXML et res/ (resources.arsc), écriture ZIP/DEX
 samples/                  APK de démonstration (sources smali, code Java équivalent en commentaire)
@@ -180,6 +194,8 @@ docs/                     ADR, matrice des API, modèle de menace
 - [ADR-003 — Threads, ramasse-miettes, réflexion et JNI](docs/adr/ADR-003-runtime-threads-gc-jni.md)
 - [ADR-004 — La libcore d'AOSP sur la VM (G2)](docs/adr/ADR-004-libcore-aosp.md)
 - [ADR-005 — Système de fichiers virtuel](docs/adr/ADR-005-systeme-de-fichiers-virtuel.md)
+- [ADR-006 — Démarrage des applications par le vrai framework](docs/adr/ADR-006-demarrage-applications.md)
+- [ADR-007 — Moteur de texte](docs/adr/ADR-007-moteur-de-texte.md)
 - [Matrice des API](docs/compatibility/api-matrix.md) (générée par `anyandroid compat --markdown`)
 - [Modèle de menace](docs/security/threat-model.md) · [SECURITY.md](SECURITY.md) · [CONTRIBUTING.md](CONTRIBUTING.md)
 
@@ -189,6 +205,14 @@ docs/                     ADR, matrice des API, modèle de menace
   deflate/inflate, CRC-32 et Adler-32 des natives de `java.util.zip`. Fichiers repris sans
   modification dans [runtime/third_party/miniz](runtime/third_party/miniz/README.md), avec leur
   [licence](runtime/third_party/miniz/LICENSE).
+- [FreeType](https://freetype.org/) 2.13.2, tel qu'Android le livre (miroir AOSP
+  `external/freetype`, `ba86f9b`), licence FTL : métriques, avances et contours des glyphes.
+  Modules utiles seulement, sans modification, dans
+  [runtime/third_party/freetype](runtime/third_party/freetype/README.md) ([licence](runtime/third_party/freetype/docs/FTL.TXT)).
+- [HarfBuzz](https://harfbuzz.github.io/) 10.2.0 (version d'AOSP `external/harfbuzz_ng`), licence
+  « Old MIT » : mise en forme du texte. Fichiers de la compilation unique `harfbuzz.cc`, sans
+  modification, dans [runtime/third_party/harfbuzz](runtime/third_party/harfbuzz/README.md)
+  ([licence](runtime/third_party/harfbuzz/COPYING)).
 
 ## Licence et marques
 
