@@ -110,6 +110,11 @@ return-void
 .end method
 )",
     R"(
+.class public Landroid/graphics/Region;
+.super Ljava/lang/Object;
+.field public mNativeRegion:J
+)",
+    R"(
 .class public Landroid/util/Size;
 .super Ljava/lang/Object;
 .field public mWidth:I
@@ -847,6 +852,95 @@ TEST(graphics_canvas_state_follows_skia) {
   CHECK_EQ(call(rt, cv, "nQuickReject", "(JJ)Z", Args().j(c).j(tri)), uint64_t(0));
   CHECK_EQ(thrown(rt, [&] { call(rt, cv, "nGetSaveCount", "(J)I", Args().j(tri)); }),
            std::string("java.lang.IllegalStateException"));
+}
+
+// Region: SkRegion's canonical bands, boolean operations, iteration order
+// and toString, the instance natives reading Region.mNativeRegion.
+TEST(graphics_region_follows_skregion) {
+  Vm vm;
+  rt::Runtime& rt = *vm.rt;
+  const char* rg = "Landroid/graphics/Region;";
+  auto make = [&] { return int64_t(call(rt, rg, "nativeConstructor", "()J")); };
+  auto set_rect = [&](int64_t r, int32_t l, int32_t t, int32_t rr, int32_t b) {
+    return call(rt, rg, "nativeSetRect", "(JIIII)Z", Args().j(r).i(l).i(t).i(rr).i(b)) != 0;
+  };
+  auto op_rect = [&](int64_t r, int32_t l, int32_t t, int32_t rr, int32_t b, int32_t op) {
+    return call(rt, rg, "nativeOp", "(JIIIII)Z", Args().j(r).i(l).i(t).i(rr).i(b).i(op)) != 0;
+  };
+  auto text = [&](int64_t r) {
+    return rt.string_utf8(rt::Handle(call(rt, rg, "nativeToString", "(J)Ljava/lang/String;", Args().j(r))));
+  };
+  // A Java Region around a native one, for the instance natives.
+  auto java = [&](int64_t r) {
+    rt::Handle h = rt.alloc(rt.find_class(rg));
+    rt::Object& o = rt.nonnull(h, "Region");
+    rt::Field* f = o.klass->declared_field("mNativeRegion", "J");
+    o.fields.at(f->slot) = uint32_t(uint64_t(r));
+    o.fields.at(f->slot + 1) = uint32_t(uint64_t(r) >> 32);
+    return h;
+  };
+  auto is = [&](rt::Handle h, const char* name) { return call(rt, rg, name, "()Z", Args().h(h)) != 0; };
+
+  int64_t a = make();
+  CHECK(set_rect(a, 0, 0, 10, 10));
+  CHECK(op_rect(a, 5, 5, 15, 15, 2));  // union
+  CHECK_EQ(text(a), std::string("SkRegion((0,0,10,5)(0,5,15,10)(5,10,15,15))"));
+  rt::GlobalRef ja(rt, java(a));
+  CHECK(!is(ja.get(), "isRect"));
+  CHECK(is(ja.get(), "isComplex"));
+  CHECK_EQ(call(rt, rg, "contains", "(II)Z", Args().h(ja.get()).i(12).i(7)), uint64_t(1));
+  CHECK_EQ(call(rt, rg, "contains", "(II)Z", Args().h(ja.get()).i(12).i(2)), uint64_t(0));
+  rt::GlobalRef rect(rt, rt.alloc(rt.find_class("Landroid/graphics/Rect;")));
+  CHECK_EQ(call(rt, rg, "nativeGetBounds", "(JLandroid/graphics/Rect;)Z", Args().j(a).h(rect.get())), uint64_t(1));
+  CHECK_EQ(get_field_i32(rt, rect.get(), "right"), 15);
+
+  // The square minus the union; the union with itself in xor is empty.
+  int64_t square = make(), diff = make();
+  set_rect(square, 0, 0, 15, 15);
+  CHECK_EQ(call(rt, rg, "nativeOp", "(JJJI)Z", Args().j(diff).j(square).j(a).i(0)), uint64_t(1));
+  CHECK_EQ(text(diff), std::string("SkRegion((10,0,15,5)(0,10,5,15))"));
+  CHECK_EQ(call(rt, rg, "nativeOp", "(JJJI)Z", Args().j(diff).j(a).j(a).i(3)), uint64_t(0));
+  rt::GlobalRef jd(rt, java(diff));
+  CHECK(is(jd.get(), "isEmpty"));
+
+  // Canonical form: two halves make the same region as the whole.
+  int64_t halves = make(), whole = make();
+  set_rect(halves, 0, 0, 10, 5);
+  op_rect(halves, 0, 5, 10, 10, 2);
+  set_rect(whole, 0, 0, 10, 10);
+  CHECK_EQ(call(rt, rg, "nativeEquals", "(JJ)Z", Args().j(halves).j(whole)), uint64_t(1));
+  rt::GlobalRef jh(rt, java(halves));
+  CHECK(is(jh.get(), "isRect"));
+  CHECK_EQ(call(rt, rg, "quickContains", "(IIII)Z", Args().h(jh.get()).i(1).i(1).i(9).i(9)), uint64_t(1));
+  CHECK_EQ(call(rt, rg, "quickReject", "(IIII)Z", Args().h(jh.get()).i(10).i(0).i(20).i(5)), uint64_t(1));
+
+  // Rect op region (intersect), translate and scale (rounded as roundf).
+  rt::GlobalRef r8(rt, rt.alloc(rt.find_class("Landroid/graphics/Rect;")));
+  rt::Object& ro = rt.nonnull(r8.get(), "Rect");
+  int32_t vals[4] = {2, 2, 8, 8};
+  const char* names[4] = {"left", "top", "right", "bottom"};
+  for (int i = 0; i < 4; ++i) ro.fields.at(ro.klass->declared_field(names[i], "I")->slot) = uint32_t(vals[i]);
+  int64_t inter = make();
+  CHECK_EQ(call(rt, rg, "nativeOp", "(JLandroid/graphics/Rect;JI)Z", Args().j(inter).h(r8.get()).j(diff).i(1)), uint64_t(0));
+  CHECK_EQ(call(rt, rg, "nativeOp", "(JLandroid/graphics/Rect;JI)Z", Args().j(inter).h(r8.get()).j(a).i(1)), uint64_t(1));
+  CHECK_EQ(text(inter), std::string("SkRegion((2,2,8,8))"));
+  call(rt, rg, "translate", "(IILandroid/graphics/Region;)V", Args().h(jh.get()).i(5).i(-1).h(rt::kNull));
+  CHECK_EQ(text(halves), std::string("SkRegion((5,-1,15,9))"));
+  rt::GlobalRef js(rt, java(square));
+  call(rt, rg, "scale", "(FLandroid/graphics/Region;)V", Args().h(js.get()).f(0.5f).h(jd.get()));
+  CHECK_EQ(text(diff), std::string("SkRegion((0,0,8,8))"));
+
+  // RegionIterator: band by band, left to right, on a copy.
+  const char* it = "Landroid/graphics/RegionIterator;";
+  int64_t iter = int64_t(call(rt, it, "nativeConstructor", "(J)J", Args().j(a)));
+  set_rect(a, 0, 0, 1, 1);
+  std::string seen;
+  while (call(rt, it, "nativeNext", "(JLandroid/graphics/Rect;)Z", Args().j(iter).h(rect.get()))) {
+    seen += std::to_string(get_field_i32(rt, rect.get(), "left")) + "," +
+            std::to_string(get_field_i32(rt, rect.get(), "top")) + " ";
+  }
+  CHECK_EQ(seen, std::string("0,0 0,5 5,10 "));
+  CHECK_EQ(thrown(rt, [&] { op_rect(a, 0, 0, 1, 1, 9); }), std::string("java.lang.IllegalArgumentException"));
 }
 
 TEST(graphics_nine_patch_natives) {

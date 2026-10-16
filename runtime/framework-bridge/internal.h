@@ -79,6 +79,8 @@ void register_framework_images(rt::NativeRegistry& r);
 void bitmap_canvas_info(rt::Runtime& rt, int64_t handle, int32_t& width, int32_t& height, bool& opaque);
 // Canvas state (framework_canvas.cpp), registered by register_framework_graphics.
 void register_framework_canvas(rt::NativeRegistry& r);
+// Region and RegionIterator (framework_region.cpp), registered by register_framework_graphics.
+void register_framework_region(rt::NativeRegistry& r);
 // Returns pointer to open AssetStream bytes, or nullptr.
 const std::vector<uint8_t>* asset_data(int64_t handle);
 // Typeface and fonts (framework_fonts.cpp), registered by register_framework_graphics.

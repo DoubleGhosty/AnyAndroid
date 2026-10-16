@@ -11,6 +11,7 @@ add_library(aa_bridge STATIC
   framework_matrix.cpp
   framework_paint.cpp
   framework_path.cpp
+  framework_region.cpp
   framework_natives.cpp
   framework_parcel.cpp
   framework_resources.cpp
