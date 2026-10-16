@@ -2,11 +2,11 @@
   "metadata": {
     "project": "AnyAndroid for Windows",
     "version": "0.1.0",
-    "generated_at": "2026-10-16T18:01:06.309153+00:00",
+    "generated_at": "2026-10-16T18:29:37.307971+00:00",
     "target": "Android natif sur Windows (sans VM ni hyperviseur)"
   },
   "summary": {
-    "overall_percent": 44.0,
+    "overall_percent": 45.0,
     "bridge_percent": 88.0,
     "libcore_percent": 47.2,
     "dalvik_percent": 99.6,
@@ -50,10 +50,10 @@
       {
         "id": "G3",
         "name": "Vrai `framework.jar` et une application AOSP affichée",
-        "description": "**En cours** : plan de l'ADR-006, J0-J2 et J4 faits, J5 avancé (vrai `ActivityThread` jusqu'à la fenêtre logique et la première mesure des vues), J6 (texte : FreeType + HarfBuzz) commencé",
-        "progress": 66,
+        "description": "**En cours** : plan de l'ADR-006, J0-J2 et J4 faits, J5 avancé (vrai `ActivityThread` jusqu'à la mesure complète des vues et `relayoutWindow`), J6 (texte : mesure et coupure de lignes) bien avancé",
+        "progress": 69,
         "weight": 35,
-        "status": "**En cours** : plan de l'ADR-006, J0-J2 et J4 faits, J5 avancé (vrai `ActivityThread` jusqu'à la fenêtre logique et la première mesure des vues), J6 (texte : FreeType + HarfBuzz) commencé",
+        "status": "**En cours** : plan de l'ADR-006, J0-J2 et J4 faits, J5 avancé (vrai `ActivityThread` jusqu'à la mesure complète des vues et `relayoutWindow`), J6 (texte : mesure et coupure de lignes) bien avancé",
         "adr": "ADR-006",
         "state": "in_progress"
       },
@@ -78,7 +78,7 @@
         "state": "pending"
       }
     ],
-    "overall_percent": 44.0
+    "overall_percent": 45.0
   },
   "bridge": {
     "classes": {
