@@ -229,10 +229,12 @@ Ce qui passe déjà, avec le vrai code d'Android 17 :
   elle manque (wine 9 n'a pas `FileDispositionInfoEx`/`FileRenameInfoEx` : sous wine, c'est le
   repli qui est testé ; le chemin POSIX l'est par la CI Windows) ;
 - toutes les lectures de temps passent par `runtime/common/clock.h` : une seule horloge monotone
-  pour `System.nanoTime`, `SystemClock` et les échéances des attentes. Le runtime demande au
-  démarrage des minuteries à 1 ms (`timeBeginPeriod`) : sans cela, sur Windows, chaque attente
-  de 1 ms dure un tick d'environ 15,6 ms. Vérifié par `threads_timed_waits_are_precise`, qui
-  tourne aussi sur le Windows réel de la CI ;
+  pour `System.nanoTime`, `SystemClock` et les échéances des attentes. Sur Windows, une attente
+  temporisée finit sur un tick d'environ 15,6 ms, et la demande de `timeBeginPeriod(1)` peut être
+  ignorée (la CI Windows mesurait 14 ms par attente de 1 ms) : la fin de chaque attente se fait
+  donc par pas de 1 ms sur un minuteur haute résolution (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`),
+  verrou relâché. Vérifié par `threads_timed_waits_are_precise`, qui tourne aussi sur le Windows
+  réel de la CI ;
 - la trace `--trace-services` ne liste que les appels du framework aux objets `Binder` de
   l'hôte ; une méthode non implémentée y apparaît avec « (non implémentée) » et renvoie une
   valeur neutre ;

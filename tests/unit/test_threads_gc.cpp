@@ -444,7 +444,8 @@ TEST(threads_shutdown_kills_running_threads) {
 
 // A 1 ms timed wait must last about 1 ms. With the default Windows tick
 // (~15.6 ms) each one would last a whole tick: Looper delays and animations
-// would run many times too slowly, with nothing in the logs. Judged on the
+// would run many times too slowly, with nothing in the logs (the CI's Windows
+// Server measured 14 ms per wait despite timeBeginPeriod). Judged on the
 // second fastest of 15 waits: a loaded machine delays some waits (a median of
 // 9 ms seen under wine with 8 parallel tests), the tick delays all of them.
 TEST(threads_timed_waits_are_precise) {

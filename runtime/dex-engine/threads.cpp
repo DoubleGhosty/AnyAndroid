@@ -131,12 +131,30 @@ bool Runtime::park(VmThread* t, std::condition_variable& cv, const std::function
   bool ok;
   auto wake = [&] { return shutting_down_.load() || pred(); };
   if (timeout_ms > 0) {
-    // In slices of a day: a huge timeout (Long.MAX_VALUE) would overflow the deadline.
-    constexpr int64_t kSlice = int64_t(24) * 3600 * 1000;
+    // The condition variable's timed wait ends on a system tick (~15.6 ms on
+    // Windows, whatever timeBeginPeriod asked). It covers all but the last
+    // tick; the rest goes by 1 ms high-resolution sleeps, the lock released,
+    // the predicate checked between them (a wakeup is seen within 1 ms).
+    constexpr int64_t kTickNanos = 16000000, kStepNanos = 1000000;
+    constexpr int64_t kDayMs = int64_t(24) * 3600 * 1000;
+    const int64_t deadline = clock::monotonic_nanos() + std::min(timeout_ms, kDayMs) * 1000000;
     ok = false;
-    for (int64_t left = timeout_ms; !ok && left > 0; left -= kSlice) {
-      ok = cv.wait_for(t->gil, std::chrono::milliseconds(std::min(left, kSlice)), wake);
+    while (!(ok = wake())) {
+      int64_t left = deadline - clock::monotonic_nanos();
+      if (left <= 0) break;
+      if (left > 2 * kTickNanos) {
+        cv.wait_for(t->gil, std::chrono::nanoseconds(left - kTickNanos), wake);
+        continue;
+      }
+      t->gil.unlock();
+      bool slept = clock::precise_sleep(std::min(left, kStepNanos));
+      t->gil.lock();
+      if (!slept) {  // no high-resolution timer: the tick it is
+        ok = cv.wait_until(t->gil, std::chrono::steady_clock::now() + std::chrono::nanoseconds(left), wake);
+        break;
+      }
     }
+    // A day at most per call: the callers' loops resume longer waits.
   } else {
     cv.wait(t->gil, wake);
     ok = true;

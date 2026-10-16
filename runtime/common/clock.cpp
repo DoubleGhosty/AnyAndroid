@@ -1,5 +1,7 @@
 #include "common/clock.h"
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <mutex>
 
@@ -50,6 +52,23 @@ void use_precise_timers() {
   });
 }
 
+bool precise_sleep(int64_t nanos) {
+  static std::atomic<bool> unavailable{false};
+  if (unavailable.load(std::memory_order_relaxed)) return false;
+  constexpr DWORD kHighResolution = 0x2;  // CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+  HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, kHighResolution, TIMER_ALL_ACCESS);
+  if (!timer) {
+    unavailable = true;
+    return false;
+  }
+  LARGE_INTEGER due;
+  due.QuadPart = -std::max<int64_t>(1, nanos / 100);  // relative, in 100 ns units
+  bool ok = SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0) &&
+            WaitForSingleObject(timer, INFINITE) == WAIT_OBJECT_0;
+  CloseHandle(timer);
+  return ok;
+}
+
 #else
 
 int64_t monotonic_nanos() {
@@ -63,6 +82,8 @@ int64_t unix_millis() {
 }
 
 void use_precise_timers() {}
+
+bool precise_sleep(int64_t) { return false; }
 
 #endif
 
