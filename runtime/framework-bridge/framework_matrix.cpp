@@ -118,6 +118,31 @@ M skew(float kx, float ky, float px, float py) { return {1, kx, -kx * py, ky, 1,
 void pre_concat(M& m, const M& other) {
   if (!is_identity(other)) m = concat(m, other);
 }
+
+// SkMatrix::preTranslate.
+void pre_translate(M& m, float dx, float dy) {
+  unsigned mask = type_of(m);
+  if ((mask & 0xF) <= kTranslateMask) {
+    m[kTransX] += dx;
+    m[kTransY] += dy;
+  } else if (mask & kPerspectiveMask) {
+    pre_concat(m, translate(dx, dy));
+  } else {
+    m[kTransX] += m[kScaleX] * dx + m[kSkewX] * dy;
+    m[kTransY] += m[kSkewY] * dx + m[kScaleY] * dy;
+  }
+}
+
+// SkMatrix::preScale(sx, sy).
+void pre_scale(M& m, float sx, float sy) {
+  if (sx == 1 && sy == 1) return;
+  m[kScaleX] *= sx;
+  m[kSkewY] *= sx;
+  m[kPersp0] *= sx;
+  m[kSkewX] *= sy;
+  m[kScaleY] *= sy;
+  m[kPersp1] *= sy;
+}
 void post_concat(M& m, const M& other) {
   if (!is_identity(other)) m = concat(other, m);
 }
@@ -373,6 +398,31 @@ float* floats(Runtime& rt, Handle h, int64_t min) {
 
 }  // namespace
 
+namespace skmatrix {
+
+Values identity() { return kIdentity; }
+void pre_translate(Values& m, float dx, float dy) { bridge::pre_translate(m, dx, dy); }
+void pre_scale(Values& m, float sx, float sy) { bridge::pre_scale(m, sx, sy); }
+void pre_rotate(Values& m, float degrees) { bridge::pre_concat(m, rotate(degrees, 0, 0)); }
+void pre_skew(Values& m, float kx, float ky) { bridge::pre_concat(m, skew(kx, ky, 0, 0)); }
+void pre_concat(Values& m, const Values& other) { bridge::pre_concat(m, other); }
+bool invert(const Values& m, Values& out) { return bridge::invert(m, out); }
+bool is_scale_translate(const Values& m) { return scale_translate_only(type_of(m)); }
+bool map_rect(const Values& m, std::array<float, 4>& rect) {
+  Rect out;
+  bool exact = bridge::map_rect(m, {rect[0], rect[1], rect[2], rect[3]}, out);
+  rect = {out.l, out.t, out.r, out.b};
+  return exact;
+}
+Values of(rt::Runtime& rt, int64_t handle) { return snapshot(rt, handle); }
+void assign(rt::Runtime& rt, int64_t handle, const Values& values) {
+  auto m = matrix(rt, handle);
+  std::lock_guard<std::mutex> guard(m->lock);
+  m->m = values;
+}
+
+}  // namespace skmatrix
+
 void register_framework_matrix(rt::NativeRegistry& r) {
   const char* ex = "Landroid/graphics/Matrix$ExtraNatives;";
   static const int64_t matrix_free = register_free_function([](int64_t h) { matrices().remove(h); });
@@ -415,19 +465,7 @@ void register_framework_matrix(rt::NativeRegistry& r) {
 
   // set*, pre* and post* of each elementary transformation.
   r.bind(mx, "nSetTranslate", "(JFF)V", edit([](M& m, NativeArgs& a) { m = translate(a.f32(2), a.f32(3)); }));
-  r.bind(mx, "nPreTranslate", "(JFF)V", edit([](M& m, NativeArgs& a) {
-    float dx = a.f32(2), dy = a.f32(3);
-    unsigned mask = type_of(m);
-    if ((mask & 0xF) <= kTranslateMask) {
-      m[kTransX] += dx;
-      m[kTransY] += dy;
-    } else if (mask & kPerspectiveMask) {
-      pre_concat(m, translate(dx, dy));
-    } else {
-      m[kTransX] += m[kScaleX] * dx + m[kSkewX] * dy;
-      m[kTransY] += m[kSkewY] * dx + m[kScaleY] * dy;
-    }
-  }));
+  r.bind(mx, "nPreTranslate", "(JFF)V", edit([](M& m, NativeArgs& a) { pre_translate(m, a.f32(2), a.f32(3)); }));
   r.bind(mx, "nPostTranslate", "(JFF)V", edit([](M& m, NativeArgs& a) {
     if (has_perspective(m)) {
       post_concat(m, translate(a.f32(2), a.f32(3)));
@@ -440,16 +478,7 @@ void register_framework_matrix(rt::NativeRegistry& r) {
   r.bind(mx, "nSetScale", "(JFFFF)V", edit([](M& m, NativeArgs& a) {
     m = scale(a.f32(2), a.f32(3), a.f32(4), a.f32(5));
   }));
-  r.bind(mx, "nPreScale", "(JFF)V", edit([](M& m, NativeArgs& a) {
-    float sx = a.f32(2), sy = a.f32(3);
-    if (sx == 1 && sy == 1) return;
-    m[kScaleX] *= sx;
-    m[kSkewY] *= sx;
-    m[kPersp0] *= sx;
-    m[kSkewX] *= sy;
-    m[kScaleY] *= sy;
-    m[kPersp1] *= sy;
-  }));
+  r.bind(mx, "nPreScale", "(JFF)V", edit([](M& m, NativeArgs& a) { pre_scale(m, a.f32(2), a.f32(3)); }));
   r.bind(mx, "nPreScale", "(JFFFF)V", edit([](M& m, NativeArgs& a) {
     pre_concat(m, scale(a.f32(2), a.f32(3), a.f32(4), a.f32(5)));
   }));

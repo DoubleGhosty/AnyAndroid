@@ -915,6 +915,15 @@ void register_image_decoder(rt::NativeRegistry& r) {
 
 }  // namespace
 
+void bitmap_canvas_info(rt::Runtime& rt, int64_t handle, int32_t& width, int32_t& height, bool& opaque) {
+  auto b = bitmap(rt, handle);
+  std::lock_guard<std::mutex> guard(b->lock);
+  width = b->width;
+  height = b->height;
+  // SkImageInfo::isOpaque: RGB_565 (3) always, ARGB_8888 and others without alpha.
+  opaque = b->config == 3 || (b->config != 1 && !b->has_alpha);
+}
+
 void register_framework_images(rt::NativeRegistry& r) {
   register_nine_patch(r);
   register_bitmap(r);

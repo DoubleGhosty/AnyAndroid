@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <functional>
 #include <optional>
 #include <span>
@@ -54,8 +55,30 @@ void path_contents(rt::Runtime& rt, int64_t handle, std::vector<uint8_t>& verbs,
                    std::vector<float>& weights);
 // Matrix (framework_matrix.cpp), registered by register_framework_graphics.
 void register_framework_matrix(rt::NativeRegistry& r);
+// SkMatrix (framework_matrix.cpp), shared with Canvas's current matrix.
+namespace skmatrix {
+using Values = std::array<float, 9>;  // Matrix.getValues's order
+Values identity();
+void pre_translate(Values& m, float dx, float dy);
+void pre_scale(Values& m, float sx, float sy);
+void pre_rotate(Values& m, float degrees);
+void pre_skew(Values& m, float kx, float ky);
+void pre_concat(Values& m, const Values& other);
+bool invert(const Values& m, Values& out);
+bool is_scale_translate(const Values& m);
+// Maps {left, top, right, bottom} in place, sorted; true when the result is
+// exactly the mapped rectangle.
+bool map_rect(const Values& m, std::array<float, 4>& rect);
+// A Matrix handle's values, and their replacement (IllegalStateException if invalid).
+Values of(rt::Runtime& rt, int64_t handle);
+void assign(rt::Runtime& rt, int64_t handle, const Values& values);
+}  // namespace skmatrix
 // Images: ImageDecoder, Bitmap, NinePatch (framework_images.cpp), registered by register_framework_graphics.
 void register_framework_images(rt::NativeRegistry& r);
+// Size and opacity (SkImageInfo::isOpaque) of a Bitmap handle (IllegalStateException if invalid).
+void bitmap_canvas_info(rt::Runtime& rt, int64_t handle, int32_t& width, int32_t& height, bool& opaque);
+// Canvas state (framework_canvas.cpp), registered by register_framework_graphics.
+void register_framework_canvas(rt::NativeRegistry& r);
 // Returns pointer to open AssetStream bytes, or nullptr.
 const std::vector<uint8_t>* asset_data(int64_t handle);
 // Typeface and fonts (framework_fonts.cpp), registered by register_framework_graphics.

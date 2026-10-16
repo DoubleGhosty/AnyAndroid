@@ -756,6 +756,99 @@ TEST(graphics_matrix_follows_skmatrix) {
   CHECK_EQ(call(rt, mx, "nEquals", "(JJ)Z", Args().j(m).j(inv)), uint64_t(0));
 }
 
+// Canvas without pixels (J4): HWUI's save stack with its partial saves, the
+// current matrix, and the clip's device bounds as SkCanvas rounds them.
+TEST(graphics_canvas_state_follows_skia) {
+  Vm vm;
+  rt::Runtime& rt = *vm.rt;
+  const char* cv = "Landroid/graphics/Canvas;";
+  rt::GlobalRef rect(rt, rt.alloc(rt.find_class("Landroid/graphics/Rect;")));
+  auto clip = [&](int64_t c) {
+    uint64_t nonempty = call(rt, cv, "nGetClipBounds", "(JLandroid/graphics/Rect;)Z", Args().j(c).h(rect.get()));
+    std::string out = nonempty ? "1:" : "0:";
+    for (const char* f : {"left", "top", "right", "bottom"}) out += std::to_string(get_field_i32(rt, rect.get(), f)) + " ";
+    return out;
+  };
+  auto i32 = [&](int64_t c, const char* name) { return int32_t(call(rt, cv, name, "(J)I", Args().j(c))); };
+  auto reject = [&](int64_t c, float l, float t, float r, float b) {
+    return call(rt, cv, "nQuickReject", "(JFFFF)Z", Args().j(c).f(l).f(t).f(r).f(b)) != 0;
+  };
+  auto clip_rect = [&](int64_t c, float l, float t, float r, float b, int32_t op) {
+    return call(rt, cv, "nClipRect", "(JFFFFI)Z", Args().j(c).f(l).f(t).f(r).f(b).i(op)) != 0;
+  };
+
+  // new Canvas(): no target, so an empty clip.
+  int64_t none = int64_t(call(rt, cv, "nInitRaster", "(J)J", Args().j(0)));
+  CHECK_EQ(i32(none, "nGetWidth"), 0);
+  CHECK_EQ(i32(none, "nGetSaveCount"), 1);
+  CHECK_EQ(clip(none), std::string("0:0 0 0 0 "));
+  CHECK(reject(none, 0, 0, 10, 10));
+  CHECK_EQ(call(rt, cv, "nRestore", "(J)Z", Args().j(none)), uint64_t(0));  // Canvas.java: underflow
+
+  rt::Handle bm = rt::Handle(call(rt, "Landroid/graphics/Bitmap;", "nativeCreate",
+                                  "([IIIIIIZJ)Landroid/graphics/Bitmap;",
+                                  Args().h(rt::kNull).i(0).i(100).i(100).i(50).i(5).z(true).j(0)));
+  rt::GlobalRef keep(rt, bm);
+  int64_t bitmap = get_native_ptr(rt, bm);
+  int64_t c = int64_t(call(rt, cv, "nInitRaster", "(J)J", Args().j(bitmap)));
+  CHECK_EQ(i32(c, "nGetWidth"), 100);
+  CHECK_EQ(i32(c, "nGetHeight"), 50);
+  CHECK_EQ(call(rt, cv, "nIsOpaque", "(J)Z", Args().j(c)), uint64_t(0));
+  CHECK_EQ(clip(c), std::string("1:0 0 100 50 "));
+
+  // Matrix and a clip rounded to device pixels (no antialiasing).
+  CHECK_EQ(int32_t(call(rt, cv, "nSave", "(JI)I", Args().j(c).i(3))), 1);
+  call(rt, cv, "nTranslate", "(JFF)V", Args().j(c).f(10).f(5));
+  call(rt, cv, "nScale", "(JFF)V", Args().j(c).f(2).f(2));
+  CHECK(clip_rect(c, 0, 0, 20.3f, 10, 1));  // device 10,5 to 50.6,25: 10 5 51 25
+  CHECK_EQ(clip(c), std::string("1:0 0 21 10 "));  // 20.5 rounds up
+  CHECK(reject(c, 30, 0, 40, 5));    // device x 70..90, beyond the clip outset by 1
+  CHECK(!reject(c, 20, 0, 30, 5));   // device x 50..70 meets 9..52
+  int64_t m = int64_t(call(rt, "Landroid/graphics/Matrix$ExtraNatives;", "nCreate", "(J)J", Args().j(0)));
+  call(rt, cv, "nGetMatrix", "(JJ)V", Args().j(c).j(m));
+  CHECK(bridge::skmatrix::of(rt, m) == (bridge::skmatrix::Values{2, 0, 10, 0, 2, 5, 0, 0, 1}));
+  CHECK_EQ(call(rt, cv, "nRestore", "(J)Z", Args().j(c)), uint64_t(1));
+  CHECK_EQ(i32(c, "nGetSaveCount"), 1);
+  CHECK_EQ(clip(c), std::string("1:0 0 100 50 "));
+
+  // Difference: a band along a whole edge shrinks the bounds, a hole does not.
+  call(rt, cv, "nSave", "(JI)I", Args().j(c).i(3));
+  CHECK(clip_rect(c, 0, 0, 100, 10, 0));
+  CHECK(clip_rect(c, 40, 20, 60, 30, 0));
+  CHECK_EQ(clip(c), std::string("1:0 10 100 50 "));
+  call(rt, cv, "nRestoreToCount", "(JI)V", Args().j(c).i(1));
+
+  // A save of the matrix only (HWUI's partial save): the clip outlives restore.
+  CHECK_EQ(int32_t(call(rt, cv, "nSave", "(JI)I", Args().j(c).i(1))), 1);
+  call(rt, cv, "nTranslate", "(JFF)V", Args().j(c).f(5).f(0));
+  clip_rect(c, 0, 0, 10, 10, 1);
+  call(rt, cv, "nRestore", "(J)Z", Args().j(c));
+  CHECK_EQ(clip(c), std::string("1:5 0 15 10 "));  // identity matrix again
+
+  // A new target resets everything; a quarter turn keeps rectangles exact.
+  call(rt, cv, "nSetBitmap", "(JJ)V", Args().j(c).j(bitmap));
+  call(rt, cv, "nTranslate", "(JFF)V", Args().j(c).f(50).f(0));
+  call(rt, cv, "nRotate", "(JF)V", Args().j(c).f(90));
+  CHECK(clip_rect(c, 0, 0, 10, 20, 1));  // device 30 0 50 10
+  CHECK_EQ(clip(c), std::string("1:0 0 10 20 "));
+  call(rt, cv, "nSetMatrix", "(JJ)V", Args().j(c).j(0));
+  CHECK_EQ(clip(c), std::string("1:30 0 50 10 "));
+
+  // Clip by a path: its bounds; an empty path rejects everything.
+  call(rt, cv, "nSetBitmap", "(JJ)V", Args().j(c).j(bitmap));
+  int64_t tri = int64_t(call(rt, kPath, "nInit", "()J"));
+  call(rt, kPath, "nMoveTo", "(JFF)V", Args().j(tri).f(0.5f).f(0));
+  call(rt, kPath, "nLineTo", "(JFF)V", Args().j(tri).f(30).f(0));
+  call(rt, kPath, "nLineTo", "(JFF)V", Args().j(tri).f(0).f(39.5f));
+  CHECK_EQ(call(rt, cv, "nClipPath", "(JJI)Z", Args().j(c).j(tri).i(1)), uint64_t(1));
+  CHECK_EQ(clip(c), std::string("1:0 0 30 40 "));
+  int64_t nothing = int64_t(call(rt, kPath, "nInit", "()J"));
+  CHECK_EQ(call(rt, cv, "nQuickReject", "(JJ)Z", Args().j(c).j(nothing)), uint64_t(1));
+  CHECK_EQ(call(rt, cv, "nQuickReject", "(JJ)Z", Args().j(c).j(tri)), uint64_t(0));
+  CHECK_EQ(thrown(rt, [&] { call(rt, cv, "nGetSaveCount", "(J)I", Args().j(tri)); }),
+           std::string("java.lang.IllegalStateException"));
+}
+
 TEST(graphics_nine_patch_natives) {
   Vm vm;
   rt::Runtime& rt = *vm.rt;

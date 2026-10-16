@@ -4,6 +4,7 @@ add_library(aa_bridge STATIC
   android_widget.cpp
   bridge.cpp
   framework_appmem.cpp
+  framework_canvas.cpp
   framework_fonts.cpp
   framework_graphics.cpp
   framework_images.cpp
