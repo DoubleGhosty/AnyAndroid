@@ -11,8 +11,10 @@ add_library(aa_skia STATIC ${AA_SKIA_SOURCES} ${AA_SKIA_HSW_SOURCES} aa-config/a
 
 target_compile_definitions(aa_skia
   PUBLIC SK_USER_CONFIG_HEADER="SkUserConfig.h"
-  # As Android's build of skcms: the baseline color transforms only.
-  PRIVATE SKIA_IMPLEMENTATION=1 SKCMS_DISABLE_HSW SKCMS_DISABLE_SKX)
+  # As Android's build of skcms: the baseline color transforms only. No
+  # [[musttail]]: skcms keeps it from clang on Windows (wrong code), not from
+  # GCC 15, which refuses it there (vectors are passed by reference).
+  PRIVATE SKIA_IMPLEMENTATION=1 SKCMS_DISABLE_HSW SKCMS_DISABLE_SKX SKCMS_HAS_MUSTTAIL=0)
 # SYSTEM: the project's -Wpedantic/-Wshadow do not apply to Skia's headers.
 target_include_directories(aa_skia SYSTEM PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/aa-config
