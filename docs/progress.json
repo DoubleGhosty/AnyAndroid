@@ -2,7 +2,7 @@
   "metadata": {
     "project": "AnyAndroid for Windows",
     "version": "0.1.0",
-    "generated_at": "2026-10-16T18:29:37.307971+00:00",
+    "generated_at": "2026-10-16T18:54:10.243209+00:00",
     "target": "Android natif sur Windows (sans VM ni hyperviseur)"
   },
   "summary": {
@@ -50,10 +50,10 @@
       {
         "id": "G3",
         "name": "Vrai `framework.jar` et une application AOSP affichée",
-        "description": "**En cours** : plan de l'ADR-006, J0-J2 et J4 faits, J5 avancé (vrai `ActivityThread` jusqu'à la mesure complète des vues et `relayoutWindow`), J6 (texte : mesure et coupure de lignes) bien avancé",
-        "progress": 69,
+        "description": "**En cours** : plan de l'ADR-006, J0-J2 et J4 faits, J5 presque fini (première traversée complète jusqu'au dessin logiciel), J6 (texte : mesure et coupure de lignes) bien avancé, J7 (moteur 2D) à commencer",
+        "progress": 71,
         "weight": 35,
-        "status": "**En cours** : plan de l'ADR-006, J0-J2 et J4 faits, J5 avancé (vrai `ActivityThread` jusqu'à la mesure complète des vues et `relayoutWindow`), J6 (texte : mesure et coupure de lignes) bien avancé",
+        "status": "**En cours** : plan de l'ADR-006, J0-J2 et J4 faits, J5 presque fini (première traversée complète jusqu'au dessin logiciel), J6 (texte : mesure et coupure de lignes) bien avancé, J7 (moteur 2D) à commencer",
         "adr": "ADR-006",
         "state": "in_progress"
       },
