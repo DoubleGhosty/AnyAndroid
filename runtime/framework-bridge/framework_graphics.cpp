@@ -15,6 +15,8 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <vector>
+#include <string>
 
 #include "framework-bridge/handles.h"
 
@@ -375,10 +377,76 @@ void register_graphics_environment(rt::NativeRegistry& r) {
          [](Runtime& rt, NativeArgs&) -> uint64_t { return rt.new_string_utf8(""); });
 }
 
+// android.animation.PropertyValuesHolder: the animated property's setter,
+// found by name as JNI's GetMethodID does (NoSuchMethodError if absent; the
+// animation then falls back on reflection), then called as CallVoidMethod
+// does, dispatched on the target's class.
+struct Setter {
+  std::string name, sig;
+};
+
+HandleTable<Setter>& setters() {
+  static auto* t = new HandleTable<Setter>(0x1119);  // never destroyed
+  return *t;
+}
+
+void register_property_values_holder(rt::NativeRegistry& r) {
+  const char* pvh = "Landroid/animation/PropertyValuesHolder;";
+  auto find = [](Runtime& rt, Handle cls_handle, Handle name_handle, std::string sig) -> uint64_t {
+    rt::Class* cls = rt.mirror_class(cls_handle);
+    if (!cls || name_handle == kNull) rt.throw_npe("PropertyValuesHolder");
+    std::string name = rt.string_utf8(name_handle);
+    if (!rt.resolve_virtual(cls, name, sig)) rt.throw_new("Ljava/lang/NoSuchMethodError;", name + sig);
+    return rt::ret_long(setters().add(std::make_shared<Setter>(Setter{name, sig})));
+  };
+  for (char type : {'I', 'F'}) {
+    std::string one = std::string("(") + type + ")V";
+    r.bind(pvh, type == 'I' ? "nGetIntMethod" : "nGetFloatMethod", "(Ljava/lang/Class;Ljava/lang/String;)J",
+           [find, one](Runtime& rt, NativeArgs& a) -> uint64_t { return find(rt, a.h(0), a.h(1), one); });
+    r.bind(pvh, type == 'I' ? "nGetMultipleIntMethod" : "nGetMultipleFloatMethod",
+           "(Ljava/lang/Class;Ljava/lang/String;I)J", [find, type](Runtime& rt, NativeArgs& a) -> uint64_t {
+             int32_t n = a.i32(2);
+             if (n < 0 || n > 255) rt.throw_new("Ljava/lang/IllegalArgumentException;", "nombre de paramètres");
+             return find(rt, a.h(0), a.h(1), "(" + std::string(size_t(n), type) + ")V");
+           });
+  }
+  // nCall...: the target, the setter, then 1, 2 or 4 values or an array.
+  auto call = [](Runtime& rt, NativeArgs& a, std::vector<uint32_t> values) -> uint64_t {
+    auto setter = setters().get(a.i64(1));
+    if (!setter) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] setter d'animation invalide");
+    if (a.h(0) == kNull) rt.throw_npe("cible de l'animation");
+    rt.call_virtual(a.h(0), setter->name, setter->sig, std::move(values));
+    return 0;
+  };
+  const std::pair<const char*, int> fixed[] = {{"nCallIntMethod", 1}, {"nCallTwoIntMethod", 2}, {"nCallFourIntMethod", 4},
+                                               {"nCallFloatMethod", 1}, {"nCallTwoFloatMethod", 2}, {"nCallFourFloatMethod", 4}};
+  for (const auto& [name, count] : fixed) {
+    char type = std::string(name).find("Float") != std::string::npos ? 'F' : 'I';
+    std::string sig = "(Ljava/lang/Object;J" + std::string(size_t(count), type) + ")V";
+    r.bind(pvh, name, sig, [call, n = count](Runtime& rt, NativeArgs& a) -> uint64_t {
+      std::vector<uint32_t> values;
+      for (int i = 0; i < n; ++i) values.push_back(a.raw(uint32_t(3 + i)));
+      return call(rt, a, std::move(values));
+    });
+  }
+  for (char type : {'I', 'F'}) {
+    r.bind(pvh, type == 'I' ? "nCallMultipleIntMethod" : "nCallMultipleFloatMethod",
+           type == 'I' ? "(Ljava/lang/Object;J[I)V" : "(Ljava/lang/Object;J[F)V",
+           [call](Runtime& rt, NativeArgs& a) -> uint64_t {
+             if (a.h(3) == kNull) rt.throw_npe("valeurs de l'animation");
+             rt::ArrayObject& arr = rt.array(a.h(3), "valeurs");
+             std::vector<uint32_t> values(arr.length);
+             if (arr.length) std::memcpy(values.data(), arr.data.data(), size_t(arr.length) * 4);
+             return call(rt, a, std::move(values));
+           });
+  }
+}
+
 }  // namespace
 
 void register_framework_graphics(rt::NativeRegistry& r) {
   register_hardware_renderer(r);
+  register_property_values_holder(r);
   register_graphics_environment(r);
   register_color_space(r);
   register_render_node(r);
@@ -390,6 +458,7 @@ void register_framework_graphics(rt::NativeRegistry& r) {
   register_framework_canvas(r);
   register_framework_region(r);
   register_framework_vector_drawable(r);
+  register_framework_surface(r);
 }
 
 }  // namespace aa::bridge

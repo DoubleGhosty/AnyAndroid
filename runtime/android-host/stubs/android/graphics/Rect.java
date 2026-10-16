@@ -14,4 +14,6 @@ public class Rect {
     this.right = right;
     this.bottom = bottom;
   }
+
+  public void set(Rect src) {}
 }

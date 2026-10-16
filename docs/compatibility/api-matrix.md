@@ -5,10 +5,10 @@
 
 | Statut | Signification | Membres |
 |---|---|---|
-| Supportée | comportement testé et documenté pour le périmètre annoncé | 800 |
+| Supportée | comportement testé et documenté pour le périmètre annoncé | 803 |
 | Partielle | chemin courant pris en charge, limites connues | 63 |
 | Stub | API reconnue mais sans effet réel | 23 |
-| Non supportée | reconnue mais refusée avec une erreur explicite | 25 |
+| Non supportée | reconnue mais refusée avec une erreur explicite | 23 |
 
 ## `android.app.Activity`
 
@@ -1151,8 +1151,9 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `valueOf(F)Ljava/lang/String;` (statique) | Supportée |  |
 | `valueOf(D)Ljava/lang/String;` (statique) | Supportée |  |
 | `valueOf([C)Ljava/lang/String;` (statique) | Supportée |  |
-| `matches(Ljava/lang/String;)Z` | Non supportée | expressions régulières non prises en charge |
-| `replaceAll(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;` | Non supportée | expressions régulières non prises en charge |
+| `matches(Ljava/lang/String;)Z` | Supportée |  |
+| `replaceAll(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;` | Supportée |  |
+| `replaceFirst(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;` | Supportée |  |
 | `format(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;` (statique) | Partielle | sous-ensemble des formats (%s %d %x %c %b %f %n), sans Locale |
 
 ## `java.lang.StringBuffer`

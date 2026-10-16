@@ -10,4 +10,7 @@ public interface IWindowSession {
       throw new RuntimeException("stub");
     }
   }
+
+  int addToDisplayAsUser(IWindow window, WindowManager.LayoutParams attrs, int viewVisibility, int displayId,
+      int userId, int requestedVisibleTypes, InputChannel outInputChannel, WindowRelayoutResult outRelayoutResult);
 }

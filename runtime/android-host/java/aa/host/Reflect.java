@@ -11,18 +11,18 @@ import java.lang.reflect.Modifier;
  * then by argument types, so that a signature change in the image's framework.jar shows as an
  * explicit error naming the member rather than a silent mismatch.
  */
-final class Reflect {
+public final class Reflect {
   private Reflect() {}
 
-  static Object call(Object target, String name, Object... args) {
+  public static Object call(Object target, String name, Object... args) {
     return invoke(target.getClass(), target, name, args);
   }
 
-  static Object callStatic(Class<?> cls, String name, Object... args) {
+  public static Object callStatic(Class<?> cls, String name, Object... args) {
     return invoke(cls, null, name, args);
   }
 
-  static Object newInstance(Class<?> cls, Object... args) {
+  public static Object newInstance(Class<?> cls, Object... args) {
     for (Constructor<?> c : cls.getDeclaredConstructors()) {
       if (accepts(c.getParameterTypes(), args)) {
         try {
@@ -38,7 +38,7 @@ final class Reflect {
     throw new IllegalStateException("[AnyAndroid] constructeur introuvable : " + cls.getName() + " (" + args.length + " arguments)");
   }
 
-  static Object get(Object target, String name) {
+  public static Object get(Object target, String name) {
     try {
       return field(target.getClass(), name).get(target);
     } catch (IllegalAccessException e) {
@@ -46,7 +46,7 @@ final class Reflect {
     }
   }
 
-  static void set(Object target, String name, Object value) {
+  public static void set(Object target, String name, Object value) {
     try {
       field(target.getClass(), name).set(target, value);
     } catch (IllegalAccessException e) {
@@ -54,7 +54,7 @@ final class Reflect {
     }
   }
 
-  static Object getStatic(Class<?> cls, String name) {
+  public static Object getStatic(Class<?> cls, String name) {
     try {
       return field(cls, name).get(null);
     } catch (IllegalAccessException e) {
@@ -62,7 +62,7 @@ final class Reflect {
     }
   }
 
-  static void setStatic(Class<?> cls, String name, Object value) {
+  public static void setStatic(Class<?> cls, String name, Object value) {
     try {
       field(cls, name).set(null, value);
     } catch (IllegalAccessException e) {
@@ -70,7 +70,7 @@ final class Reflect {
     }
   }
 
-  static Class<?> type(String name) {
+  public static Class<?> type(String name) {
     try {
       return Class.forName(name);
     } catch (ClassNotFoundException e) {

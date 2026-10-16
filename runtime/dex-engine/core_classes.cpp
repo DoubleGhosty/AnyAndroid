@@ -762,6 +762,8 @@ void register_thread(NativeRegistry& r) {
   t.field("contextClassLoader", "Ljava/lang/ClassLoader;");
   // Read by libcore's Runtime.addShutdownHook; mirrors ThreadPeer::started.
   t.field("started", "Z");
+  // Written by libcore's setPosixNicenessInternal (Process.setThreadPriority).
+  t.field("niceness", "I");
   auto init = [](Runtime& rt, NativeArgs& a, Handle target, std::u16string name) -> uint64_t {
     auto p = std::make_unique<ThreadPeer>();
     p->target = target;

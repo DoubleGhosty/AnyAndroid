@@ -58,4 +58,14 @@ public final class DisplayService extends IDisplayManager.Stub {
   public int getPreferredWideGamutColorSpaceId() {
     return 0;
   }
+
+  private final java.util.List<android.hardware.display.IDisplayManagerCallback> callbacks = new java.util.ArrayList<>();
+
+  /** Display events (added, changed, brightness...): the single display never changes. */
+  @Override
+  public void registerCallbackWithEventMask(android.hardware.display.IDisplayManagerCallback callback, long eventsMask) {
+    synchronized (callbacks) {
+      callbacks.add(callback);
+    }
+  }
 }

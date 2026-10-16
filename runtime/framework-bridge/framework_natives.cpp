@@ -209,10 +209,19 @@ void register_log_clock_trace(rt::NativeRegistry& r) {
 // Here a queue remembers the thread polling it; the wait is a LockSupport-
 // style park of that thread (the GIL is released), nativeWake() unparks it.
 
+// A native callback that pollOnce runs once its deadline passes, as
+// Looper::pollOnce runs the callbacks of the descriptors it watches (the
+// vsync of DisplayEventReceiver).
+struct NativeTimer {
+  int64_t deadline;  // monotonic nanoseconds
+  std::function<void(Runtime&)> fire;
+};
+
 struct NativeQueue {
   Handle poller = kNull;  // java.lang.Thread blocked in nativePollOnce
   bool polling = false;
   bool woken = false;  // wake requested before or during the poll
+  std::vector<NativeTimer> timers;
 };
 
 std::vector<std::unique_ptr<NativeQueue>>& queues() {
@@ -228,6 +237,39 @@ NativeQueue& queue(Runtime& rt, int64_t ptr) {
   return *t[size_t(ptr - 1)];
 }
 
+// Runs the timers of q whose deadline has passed, in deadline order; true if any ran.
+bool run_due_timers(Runtime& rt, NativeQueue& q) {
+  std::vector<NativeTimer> due;
+  int64_t now = monotonic_nanos();
+  for (auto it = q.timers.begin(); it != q.timers.end();) {
+    if (it->deadline <= now) {
+      due.push_back(std::move(*it));
+      it = q.timers.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  std::stable_sort(due.begin(), due.end(), [](const auto& a, const auto& b) { return a.deadline < b.deadline; });
+  for (auto& t : due) t.fire(rt);  // may call into Java (and post messages)
+  return !due.empty();
+}
+
+int64_t next_timer(const NativeQueue& q) {
+  int64_t next = INT64_MAX;
+  for (const auto& t : q.timers) next = std::min(next, t.deadline);
+  return next;
+}
+
+}  // namespace
+
+void post_queue_callback(rt::Runtime& rt, int64_t queue_ptr, int64_t deadline, std::function<void(rt::Runtime&)> fn) {
+  NativeQueue& q = queue(rt, queue_ptr);
+  q.timers.push_back({deadline, std::move(fn)});
+  if (q.polling && q.poller != kNull) rt.unpark(q.poller);  // to wait for the new deadline
+}
+
+namespace {
+
 void register_message_queue(rt::NativeRegistry& r) {
   const char* mq = "Landroid/os/MessageQueue;";
   r.bind(mq, "nativeInit", "()J", [](Runtime&, NativeArgs&) -> uint64_t {
@@ -240,30 +282,43 @@ void register_message_queue(rt::NativeRegistry& r) {
     return 0;
   });
   // Instance method: argument 0 is the MessageQueue.
+  // Waits for a wake, the timeout, or the deadline of a native callback, which
+  // it then runs; returns so that MessageQueue.next looks at its messages.
   r.bind(mq, "nativePollOnce", "(JI)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    NativeQueue& q = queue(rt, a.i64(1));
+    int64_t ptr = a.i64(1);
     int32_t timeout = a.i32(3);
-    if (q.woken) {
-      q.woken = false;
-      return 0;
-    }
-    if (timeout == 0) return 0;
-    q.poller = rt.current_thread_peer();
-    q.polling = true;
-    // park_current: relative nanoseconds, 0 = until unparked.
-    int64_t remaining = timeout < 0 ? 0 : int64_t(timeout) * 1000000;
-    int64_t deadline = monotonic_nanos() + remaining;
-    while (!q.woken) {
-      rt.park_current(false, remaining);
-      if (timeout >= 0) {
-        remaining = deadline - monotonic_nanos();
-        if (remaining <= 0) break;
+    {
+      NativeQueue& q = queue(rt, ptr);
+      if (q.woken) {
+        q.woken = false;
+        run_due_timers(rt, q);
+        return 0;
       }
+      if (run_due_timers(rt, q) || timeout == 0) return 0;
     }
-    q.polling = false;
-    q.woken = false;
+    const int64_t deadline = timeout < 0 ? INT64_MAX : monotonic_nanos() + int64_t(timeout) * 1000000;
+    while (true) {
+      NativeQueue& q = queue(rt, ptr);  // again: callbacks may create queues
+      int64_t wake_at = std::min(deadline, next_timer(q));
+      int64_t remaining = wake_at == INT64_MAX ? 0 : wake_at - monotonic_nanos();
+      if (wake_at != INT64_MAX && remaining <= 0) {
+        run_due_timers(rt, q);
+        break;
+      }
+      q.poller = rt.current_thread_peer();
+      q.polling = true;
+      rt.park_current(false, remaining);  // relative nanoseconds, 0 = until unparked
+      NativeQueue& after = queue(rt, ptr);
+      after.polling = false;
+      if (after.woken) {
+        after.woken = false;
+        run_due_timers(rt, after);
+        break;
+      }
+      if (run_due_timers(rt, after) || monotonic_nanos() >= deadline) break;
+    }
     return 0;
-  }, S::kPartial, "attente sans descripteurs de fichiers surveillés");
+  }, S::kPartial, "rappels natifs à échéance (vsync), pas de descripteurs surveillés");
   r.bind(mq, "nativeWake", "(J)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     NativeQueue& q = queue(rt, a.i64(0));
     q.woken = true;

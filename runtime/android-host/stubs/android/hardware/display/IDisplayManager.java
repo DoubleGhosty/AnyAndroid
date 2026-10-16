@@ -15,4 +15,5 @@ public interface IDisplayManager {
   DisplayInfo getDisplayInfo(int displayId);
   int[] getDisplayIds(boolean includeDisabled);
   int getPreferredWideGamutColorSpaceId();
+  void registerCallbackWithEventMask(IDisplayManagerCallback callback, long eventsMask);
 }

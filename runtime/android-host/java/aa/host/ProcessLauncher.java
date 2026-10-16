@@ -48,6 +48,8 @@ public final class ProcessLauncher implements ActivityService.AttachHandler {
       Launcher.log("activité au premier plan");
       throw new Stop();
     });
+    // Software drawing (ADR-006 §3): ViewRootImpl draws through drawSoftware, without HWUI.
+    Reflect.setStatic(Reflect.type("android.view.ThreadedRenderer"), "sRendererEnabled", false);
     Launcher.log("démarrage : ActivityThread.main");
     try {
       ActivityThread.main(new String[0]);

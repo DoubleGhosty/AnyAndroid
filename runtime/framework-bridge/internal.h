@@ -96,6 +96,12 @@ void register_framework_canvas(rt::NativeRegistry& r);
 void register_framework_region(rt::NativeRegistry& r);
 // VectorDrawable and VirtualRefBasePtr (framework_vector_drawable.cpp), registered by register_framework_graphics.
 void register_framework_vector_drawable(rt::NativeRegistry& r);
+// SurfaceControl, its Transaction and Surface (framework_surface.cpp), registered by register_framework_graphics.
+void register_framework_surface(rt::NativeRegistry& r);
+// Runs fn on the thread of a MessageQueue (its mPtr), from its nativePollOnce,
+// once `deadline` (monotonic nanoseconds) passes, as Looper::pollOnce runs the
+// callbacks of watched descriptors (framework_natives.cpp). Wakes the poller.
+void post_queue_callback(rt::Runtime& rt, int64_t queue_ptr, int64_t deadline, std::function<void(rt::Runtime&)> fn);
 // Returns pointer to open AssetStream bytes, or nullptr.
 const std::vector<uint8_t>* asset_data(int64_t handle);
 // Typeface and fonts (framework_fonts.cpp), registered by register_framework_graphics.

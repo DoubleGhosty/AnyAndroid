@@ -234,6 +234,11 @@ void register_system(rt::NativeRegistry& r) {
          [](Runtime& rt, NativeArgs&) -> uint64_t { return rt.current_thread_peer(); });
   r.bind(th, "currentCarrierThread", "()Ljava/lang/Thread;",
          [](Runtime& rt, NativeArgs&) -> uint64_t { return rt.current_thread_peer(); });
+  // ART applies the niceness with setpriority and returns 0 (errno on
+  // failure); the Java side keeps it in Thread.niceness. The host scheduler
+  // is left alone: the value is remembered, not applied.
+  r.bind(th, "setNiceness0", "(I)I", [](Runtime&, NativeArgs&) -> uint64_t { return 0; }, S::kPartial,
+         "niceness conservée par Java, non appliquée à l'ordonnanceur de l'hôte");
 
   const char* fdc = "Ljava/io/FileDescriptor;";
   r.bind(fdc, "getAppend", "(I)Z", [](Runtime&, NativeArgs&) -> uint64_t { return 0; }, S::kPartial,
@@ -528,6 +533,15 @@ void register_strings(rt::NativeRegistry& r) {
   r.bind(icu, "getDefaultLocale", "()Ljava/lang/String;", text_result("en-US"), S::kPartial, "locale fixe en-US");
   r.bind(icu, "getScript", "(Ljava/lang/String;)Ljava/lang/String;", text_result(""), S::kPartial, "script non déduit");
 
+  // General category and bidirectional class: ART answers from ICU4C; ICU4J
+  // (android.icu.lang.UCharacter) reads the same data of the i18n module.
+  // Both are ICU values: libcore's Character maps them to Java's.
+  r.bind(ch, "getTypeImpl", "(I)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt.call_static("Landroid/icu/lang/UCharacter;", "getType", "(I)I", {a.raw(0)});
+  });
+  r.bind(ch, "getDirectionalityImpl", "(I)B", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_int(int8_t(rt.call_static("Landroid/icu/lang/UCharacter;", "getDirection", "(I)I", {a.raw(0)})));
+  });
   r.bind(ch, "digitImpl", "(II)I", [](Runtime&, NativeArgs& a) -> uint64_t {
     int32_t c = a.i32(0), radix = a.i32(1), v = -1;
     if (c >= '0' && c <= '9') v = c - '0';
