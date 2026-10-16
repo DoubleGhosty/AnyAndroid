@@ -2,16 +2,16 @@
   "metadata": {
     "project": "AnyAndroid for Windows",
     "version": "0.1.0",
-    "generated_at": "2026-10-16T08:29:59.882827+00:00",
+    "generated_at": "2026-10-16T08:33:00.581765+00:00",
     "target": "Android natif sur Windows (sans VM ni hyperviseur)"
   },
   "summary": {
     "overall_percent": 43.0,
-    "bridge_percent": 87.5,
+    "bridge_percent": 87.8,
     "libcore_percent": 47.2,
     "dalvik_percent": 99.6,
     "total_classes": 139,
-    "total_members": 907,
+    "total_members": 911,
     "total_natives": 1034,
     "total_opcodes": 256
   },
@@ -4008,13 +4008,33 @@
         },
         {
           "member": "addSuppressed(Ljava/lang/Throwable;)V",
-          "status": "Stub",
-          "note": "exceptions supprimées ignorées"
+          "status": "Supportée",
+          "note": ""
+        },
+        {
+          "member": "getSuppressed()[Ljava/lang/Throwable;",
+          "status": "Supportée",
+          "note": ""
+        },
+        {
+          "member": "getOurStackTrace()[Ljava/lang/StackTraceElement;",
+          "status": "Supportée",
+          "note": ""
         },
         {
           "member": "getStackTrace()[Ljava/lang/StackTraceElement;",
-          "status": "Non supportée",
-          "note": "StackTraceElement non implémenté"
+          "status": "Supportée",
+          "note": ""
+        },
+        {
+          "member": "setStackTrace([Ljava/lang/StackTraceElement;)V",
+          "status": "Supportée",
+          "note": ""
+        },
+        {
+          "member": "fillInStackTrace()Ljava/lang/Throwable;",
+          "status": "Supportée",
+          "note": ""
         }
       ],
       "java.lang.UnsatisfiedLinkError": [
@@ -9688,11 +9708,11 @@
           },
           {
             "name": "java.lang.Throwable",
-            "total": 12,
-            "supported": 9,
+            "total": 16,
+            "supported": 15,
             "partial": 1,
-            "stub": 1,
-            "unsupported": 1,
+            "stub": 0,
+            "unsupported": 0,
             "members": [
               {
                 "member": "<init>()V",
@@ -9746,13 +9766,33 @@
               },
               {
                 "member": "addSuppressed(Ljava/lang/Throwable;)V",
-                "status": "Stub",
-                "note": "exceptions supprimées ignorées"
+                "status": "Supportée",
+                "note": ""
+              },
+              {
+                "member": "getSuppressed()[Ljava/lang/Throwable;",
+                "status": "Supportée",
+                "note": ""
+              },
+              {
+                "member": "getOurStackTrace()[Ljava/lang/StackTraceElement;",
+                "status": "Supportée",
+                "note": ""
               },
               {
                 "member": "getStackTrace()[Ljava/lang/StackTraceElement;",
-                "status": "Non supportée",
-                "note": "StackTraceElement non implémenté"
+                "status": "Supportée",
+                "note": ""
+              },
+              {
+                "member": "setStackTrace([Ljava/lang/StackTraceElement;)V",
+                "status": "Supportée",
+                "note": ""
+              },
+              {
+                "member": "fillInStackTrace()Ljava/lang/Throwable;",
+                "status": "Supportée",
+                "note": ""
               }
             ]
           },
@@ -10407,11 +10447,11 @@
             ]
           }
         ],
-        "members": 588,
-        "supported": 545,
+        "members": 592,
+        "supported": 551,
         "partial": 31,
-        "stub": 2,
-        "unsupported": 10
+        "stub": 1,
+        "unsupported": 9
       },
       "java.util": {
         "classes": [
@@ -10870,14 +10910,14 @@
       }
     },
     "total_classes": 139,
-    "total_members": 907,
+    "total_members": 911,
     "counts": {
-      "supported": 794,
+      "supported": 800,
       "partial": 63,
-      "stub": 24,
-      "unsupported": 26
+      "stub": 23,
+      "unsupported": 25
     },
-    "percent_supported": 87.5
+    "percent_supported": 87.8
   },
   "libcore": {
     "total": 1034,
