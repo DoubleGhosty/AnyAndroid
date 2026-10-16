@@ -1,5 +1,8 @@
 package aa.host.services;
 
+import aa.host.Reflect;
+import android.content.res.Resources;
+import android.graphics.Rect;
 import android.hardware.display.IDisplayManager;
 import android.view.Display;
 import android.view.DisplayInfo;
@@ -68,4 +71,31 @@ public final class DisplayService extends IDisplayManager.Stub {
       callbacks.add(callback);
     }
   }
+
+  /**
+   * The global configuration (the system resources' copy) with the window configuration of a
+   * full-screen window on the display, as the window manager gives an activity.
+   */
+  public static Object displayConfiguration() {
+    Object configuration = Reflect.newInstance(Reflect.type("android.content.res.Configuration"),
+        Reflect.call(Resources.getSystem(), "getConfiguration"));
+    fillWindowConfiguration(configuration);
+    return configuration;
+  }
+
+  /** Bounds, application and maximum bounds of the display, full screen, standard activity, no rotation. */
+  public static void fillWindowConfiguration(Object configuration) {
+    Rect display = new Rect(0, 0, WIDTH, HEIGHT);
+    Object window = Reflect.get(configuration, "windowConfiguration");
+    Reflect.call(window, "setBounds", display);
+    Reflect.call(window, "setAppBounds", display);
+    Reflect.call(window, "setMaxBounds", display);
+    Reflect.call(window, "setWindowingMode", WINDOWING_MODE_FULLSCREEN);
+    Reflect.call(window, "setActivityType", ACTIVITY_TYPE_STANDARD);
+    Reflect.call(window, "setRotation", 0);
+    Reflect.call(window, "setDisplayRotation", 0);
+  }
+
+  /** WindowConfiguration.WINDOWING_MODE_FULLSCREEN and ACTIVITY_TYPE_STANDARD. */
+  private static final int WINDOWING_MODE_FULLSCREEN = 1, ACTIVITY_TYPE_STANDARD = 1;
 }

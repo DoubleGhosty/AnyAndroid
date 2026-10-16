@@ -245,6 +245,18 @@ void set_int_field(Runtime& rt, Handle obj, const char* name, int32_t v) {
 
 }  // namespace
 
+void canvas_target_surface(Runtime& rt, Handle canvas_object, int32_t width, int32_t height, bool opaque,
+                           const int32_t* dirty) {
+  rt::Object& o = rt.nonnull(canvas_object, "Canvas");
+  rt::Field* f = find_field(o.klass, "mNativeCanvasWrapper", "J");
+  if (!f || f->is_static()) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] Canvas sans natif");
+  int64_t handle = int64_t(uint64_t(o.fields.at(f->slot)) | (uint64_t(o.fields.at(f->slot + 1)) << 32));
+  auto c = canvas(rt, handle);
+  std::lock_guard<std::mutex> guard(c->lock);
+  c->set_target(width, height, opaque);
+  if (dirty) c->clip_rect({float(dirty[0]), float(dirty[1]), float(dirty[2]), float(dirty[3])}, 1);
+}
+
 void register_framework_canvas(rt::NativeRegistry& r) {
   const char* cv = "Landroid/graphics/Canvas;";
   static const int64_t canvas_free = register_free_function([](int64_t h) { canvases().remove(h); });

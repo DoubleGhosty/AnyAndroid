@@ -27,4 +27,4 @@ service : LocalServiceManager.checkService2
 service : LocalServiceManager.checkService2
 service : LocalServiceManager.checkService2
 service : LocalServiceManager.checkService2
-surcharges : 48 méthodes dans 10 classes, toutes reconnues
+surcharges : 50 méthodes dans 10 classes, toutes reconnues

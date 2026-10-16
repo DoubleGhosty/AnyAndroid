@@ -405,6 +405,11 @@ void pre_translate(Values& m, float dx, float dy) { bridge::pre_translate(m, dx,
 void pre_scale(Values& m, float sx, float sy) { bridge::pre_scale(m, sx, sy); }
 void pre_rotate(Values& m, float degrees) { bridge::pre_concat(m, rotate(degrees, 0, 0)); }
 void pre_skew(Values& m, float kx, float ky) { bridge::pre_concat(m, skew(kx, ky, 0, 0)); }
+void pre_rotate(Values& m, float degrees, float px, float py) { bridge::pre_concat(m, rotate(degrees, px, py)); }
+void pre_scale(Values& m, float sx, float sy, float px, float py) {
+  if (sx == 1 && sy == 1) return;  // SkMatrix::preScale
+  bridge::pre_concat(m, scale(sx, sy, px, py));
+}
 void pre_concat(Values& m, const Values& other) { bridge::pre_concat(m, other); }
 bool invert(const Values& m, Values& out) { return bridge::invert(m, out); }
 bool is_scale_translate(const Values& m) { return scale_translate_only(type_of(m)); }

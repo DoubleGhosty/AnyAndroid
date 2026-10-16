@@ -79,6 +79,9 @@ void pre_translate(Values& m, float dx, float dy);
 void pre_scale(Values& m, float sx, float sy);
 void pre_rotate(Values& m, float degrees);
 void pre_skew(Values& m, float kx, float ky);
+// SkMatrix::preRotate and preScale about a pivot.
+void pre_rotate(Values& m, float degrees, float px, float py);
+void pre_scale(Values& m, float sx, float sy, float px, float py);
 void pre_concat(Values& m, const Values& other);
 bool invert(const Values& m, Values& out);
 bool is_scale_translate(const Values& m);
@@ -95,6 +98,11 @@ void register_framework_images(rt::NativeRegistry& r);
 void bitmap_canvas_info(rt::Runtime& rt, int64_t handle, int32_t& width, int32_t& height, bool& opaque);
 // Canvas state (framework_canvas.cpp), registered by register_framework_graphics.
 void register_framework_canvas(rt::NativeRegistry& r);
+// Points a Java Canvas at a surface buffer of width x height (0 x 0: none),
+// clipped to dirty (left, top, right, bottom) when given, as Surface's
+// nativeLockCanvas sets an SkBitmap on the native canvas.
+void canvas_target_surface(rt::Runtime& rt, rt::Handle canvas, int32_t width, int32_t height, bool opaque,
+                           const int32_t* dirty);
 // Region and RegionIterator (framework_region.cpp), registered by register_framework_graphics.
 void register_framework_region(rt::NativeRegistry& r);
 // VectorDrawable and VirtualRefBasePtr (framework_vector_drawable.cpp), registered by register_framework_graphics.

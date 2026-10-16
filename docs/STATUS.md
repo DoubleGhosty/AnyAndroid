@@ -42,7 +42,7 @@ le nombre de fichiers.
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
 | G2    | Vraie libcore d'AOSP (Android 17)                           | 92 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 69 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J2 et J4 faits, J5 avancé (vrai `ActivityThread` jusqu'à la mesure complète des vues et `relayoutWindow`), J6 (texte : mesure et coupure de lignes) bien avancé |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 71 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J2 et J4 faits, J5 presque fini (première traversée complète jusqu'au dessin logiciel), J6 (texte : mesure et coupure de lignes) bien avancé, J7 (moteur 2D) à commencer |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
 | **Total** | **Android natif sur Windows**                          | **≈ 45 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
@@ -51,7 +51,7 @@ le nombre de fichiers.
 G0 ██████████ 100 %
 G1 ██████████ 100 %
 G2 █████████░  92 %
-G3 ██████▉░░░  69 %
+G3 ███████░░░  71 %
 G4 ░░░░░░░░░░   0 %
 G5 ░░░░░░░░░░   0 %
    ───────────────
@@ -246,8 +246,12 @@ principale, `handleBindApplication` crée l'`Application`, puis `TransactionExec
 logique (cadres 1080×1920, inset, configuration fusionnée, paire d'`InputChannel`),
 `activityResumed` est reçu, le vsync à 60 Hz (`DisplayEventReceiver`, minuteurs de la file native
 servis par `nativePollOnce`) déclenche `performTraversals`. La hiérarchie entière se mesure, texte
-compris (`BoringLayout` et `StaticLayout`), puis `relayoutWindow` demande la surface de la fenêtre :
-`SurfaceControl.nativeCreate` est le blocage suivant.
+compris (`BoringLayout` et `StaticLayout`). `relayoutWindow` crée la surface côté application
+(Android 17 gère la mise en page de la fenêtre localement : `SurfaceControl`, transactions et
+couches logiques), `IWindowSession.relayout` renvoie les cadres de l'écran avec une
+`WindowConfiguration` plein écran, puis `BLASTBufferQueue` fournit la `Surface`. La mise en page se
+fait aux vraies tailles et `drawSoftware` verrouille la surface : le premier appel de dessin
+(`Canvas.drawRect` du fond de `DecorView`) est le début de J7, le moteur 2D logiciel.
 
 **J6 bien avancé : moteur de texte.** Android mesure le texte avec minikin, sur HarfBuzz (mise en
 forme) et sur FreeType via Skia (métriques et avances, avec l'indication `FT_LOAD_TARGET_NORMAL`
@@ -260,9 +264,10 @@ gloutonne et optimale de minikin, frontières de lignes de l'ICU4J de la libcore
 d'union et tirets conditionnels (les motifs `.hyb` attendent `Hyphenator.init`).
 
 **Suite prévue, dans l'ordre** :
-1. J5, fin : `SurfaceControl` et `relayout` calculé (cadres, surface logique), première
-   traversée complète (mesure, mise en page, dessin logiciel à vide), test de bout en bout du
-   démarrage par les gestionnaires.
+1. J7 : moteur 2D logiciel (choix à fixer par un ADR) derrière les natives de dessin de
+   `Canvas`/`BaseCanvas`, dans le tampon de la `Surface` ; image de la fenêtre écrite en PNG en
+   mode sans fenêtre, puis présentée dans une fenêtre Win32 (J8). Test de bout en bout du
+   démarrage par les gestionnaires (J5) sur l'image produite.
 2. J6, fin : `TextRunShaper`/`PositionedGlyphs` et les glyphes pour le dessin (J7), motifs de
    césure. Le pilotage déterministe des tests est à
    concevoir sur l'horloge commune (`common/clock.h`).

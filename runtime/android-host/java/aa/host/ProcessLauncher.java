@@ -2,6 +2,7 @@ package aa.host;
 
 import aa.host.services.ActivityService;
 import aa.host.services.ActivityTaskService;
+import aa.host.services.DisplayService;
 import android.app.ActivityThread;
 import android.content.ComponentName;
 import android.content.Intent;
@@ -9,7 +10,6 @@ import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.IPackageManager;
 import android.content.pm.ResolveInfo;
-import android.content.res.Resources;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.Handler;
@@ -120,9 +120,8 @@ public final class ProcessLauncher implements ActivityService.AttachHandler {
     Reflect.call(thread, "scheduleTransaction", transaction);
   }
 
-  /** The global configuration (the system resources' copy). */
+  /** The global configuration, with the window configuration of a full-screen window. */
   private static Object configuration() {
-    return Reflect.newInstance(Reflect.type("android.content.res.Configuration"),
-        Reflect.call(Resources.getSystem(), "getConfiguration"));
+    return DisplayService.displayConfiguration();
   }
 }

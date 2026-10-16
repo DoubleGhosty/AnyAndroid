@@ -73,9 +73,10 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 | J0-J2 — outillage Java/D8, `ServiceManager` local, vrais chargeurs de classes | fait |
 | J3 — services système v1 | en cours (chaque appel manquant est tracé) |
 | J4 — `Application` et activité jusqu'à `onResume`, en direct | fait |
-| J5 — démarrage par les vrais gestionnaires d'`ActivityThread`, fenêtre logique | avancé : mesure complète des vues, jusqu'à `relayoutWindow` (surface à fournir) |
+| J5 — démarrage par les vrais gestionnaires d'`ActivityThread`, fenêtre logique | presque fini : première traversée complète (mesure, relayout, mise en page) jusqu'au dessin logiciel |
 | J6 — texte (FreeType + HarfBuzz, logique de minikin) | bien avancé : mesure (`Paint`), `MeasuredText`, coupure de lignes (`LineBreaker`) |
-| J7-J10 — rendu logiciel, fenêtre Win32, navigation, une application AOSP affichée | à faire |
+| J7 — moteur 2D logiciel (dessin des vues dans la `Surface`) | prochain : le premier `Canvas.drawRect` est atteint |
+| J8-J10 — fenêtre Win32 et entrées, navigation, une application AOSP affichée | à faire |
 
 ## Limites actuelles
 

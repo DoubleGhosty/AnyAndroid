@@ -1,7 +1,6 @@
 package aa.host.services;
 
 import aa.host.Reflect;
-import android.content.res.Resources;
 import android.graphics.Point;
 import android.graphics.Rect;
 import android.view.Display;
@@ -10,6 +9,7 @@ import android.view.IWindowManager;
 import android.view.IWindowSession;
 import android.view.IWindowSessionCallback;
 import android.view.InputChannel;
+import android.view.SurfaceControl;
 import android.view.WindowManager;
 import android.view.WindowRelayoutResult;
 import java.util.ArrayList;
@@ -76,6 +76,24 @@ public final class WindowService extends IWindowManager.Stub {
       }
       return ADD_FLAG_IN_TOUCH_MODE | ADD_FLAG_APP_VISIBLE;  // ADD_OKAY (0) with these flags
     }
+
+    /**
+     * The window keeps covering the display. Its surface is created by the application itself
+     * (Android 17's locally managed window layout), so nothing is returned in outSurfaceControl
+     * and no relayout flag is set here.
+     */
+    @Override
+    public int relayout(IWindow window, WindowManager.LayoutParams attrs, int requestedWidth, int requestedHeight,
+        int viewVisibility, int flags, int seq, int lastSyncSeqId, SurfaceControl outSurfaceControl,
+        WindowRelayoutResult outRelayoutResult) {
+      if (outRelayoutResult != null) fillDisplayFrames(outRelayoutResult);
+      return 0;
+    }
+
+    @Override
+    public void relayoutAsync(IWindow window, WindowManager.LayoutParams attrs, int requestedWidth,
+        int requestedHeight, int viewVisibility, int flags, int seq, int lastSyncSeqId,
+        SurfaceControl outSurfaceControl) {}
   }
 
   /** WindowManagerGlobal.ADD_FLAG_IN_TOUCH_MODE (phones start in touch mode), ADD_FLAG_APP_VISIBLE. */
@@ -90,9 +108,8 @@ public final class WindowService extends IWindowManager.Stub {
     out.frames.attachedFrame = null;
     out.frames.compatScale = 1f;
     out.insetsState.setDisplayFrame(display);
-    Object global = Reflect.newInstance(Reflect.type("android.content.res.Configuration"),
-        Reflect.call(Resources.getSystem(), "getConfiguration"));
-    Reflect.call(out.mergedConfiguration, "setConfiguration", global,
-        Reflect.newInstance(Reflect.type("android.content.res.Configuration")));
+    Object override = Reflect.newInstance(Reflect.type("android.content.res.Configuration"));
+    DisplayService.fillWindowConfiguration(override);
+    Reflect.call(out.mergedConfiguration, "setConfiguration", DisplayService.displayConfiguration(), override);
   }
 }
