@@ -12,7 +12,10 @@
 #include "text/font_collection.h"
 #include "text/font_face.h"
 #include "text/layout.h"
+#include "text/line_breaker.h"
 #include "text/locale.h"
+#include "text/measured_text.h"
+#include "text/word_breaker.h"
 
 namespace aa::text {
 std::ostream& operator<<(std::ostream& os, const Rect& r) {
@@ -336,4 +339,141 @@ TEST(text_cursor_and_offsets_follow_minikin) {
   CHECK(!text::is_grapheme_break(e, emoji.data(), 0, 4, 2));  // inside a surrogate pair
   CHECK_EQ(text::text_run_cursor(e, emoji.data(), 0, 4, 2, text::CursorOpt::kAtOrAfter), size_t(3));
   CHECK_EQ(text::text_run_cursor(e, emoji.data(), 0, 4, 2, text::CursorOpt::kAt), size_t(-1));
+}
+
+// --- minikin's MeasuredText, WordBreaker and line breakers ---
+
+namespace {
+
+// The sample font with a hyphen-minus (300 units) for hyphenated lines.
+test::TestFont line_font() {
+  test::TestFont f = sample_font();
+  f.glyphs.push_back({U'-', 300, 0, 300, 300, 400});
+  return f;
+}
+
+// One style run over the whole text, at 10 px without hinting: 'x' is
+// 5 px, ' ' 2.5 px, '-' 3 px.
+std::unique_ptr<text::MeasuredText> measure_paragraph(std::u16string_view s, bool hyphenation = false) {
+  text::Paint p = paint_of(collection_of({line_font()}), 10);
+  p.flags.hinting = text::Hinting::kNone;
+  std::vector<text::TextRun> runs;
+  runs.push_back(text::TextRun::style(0, uint32_t(s.size()), p, 0, 0, hyphenation, false));
+  return text::MeasuredText::build(s, std::move(runs), hyphenation, false, false);
+}
+
+text::LineWidths widths_of(float width) {
+  text::LineWidths w;
+  w.first_width = w.rest_width = width;
+  return w;
+}
+
+text::LineBreakResult break_paragraph(std::u16string_view s, text::BreakStrategy strategy, float width,
+                                      text::HyphenationFrequency frequency = text::HyphenationFrequency::kNone) {
+  auto mt = measure_paragraph(s, frequency != text::HyphenationFrequency::kNone);
+  text::TabStops tabs;
+  tabs.tab_width = 20;
+  return text::break_into_lines(s, strategy, frequency, false, *mt, widths_of(width), tabs, false);
+}
+
+}  // namespace
+
+TEST(text_measured_text_widths_runs_and_extent) {
+  text::Paint p = paint_of(collection_of({line_font()}), 10);
+  p.flags.hinting = text::Hinting::kNone;
+  std::u16string s = u"xx\uFFFC";
+  std::vector<text::TextRun> runs;
+  runs.push_back(text::TextRun::style(0, 2, p, 0, 0, false, false));
+  runs.push_back(text::TextRun::replacement(2, 3, 7, text::kEmptyLocaleListId));
+  auto mt = text::MeasuredText::build(s, std::move(runs), false, false, false);
+  CHECK_EQ(mt->widths, (std::vector<float>{5, 5, 7}));
+  CHECK_EQ(mt->extent(s, 0, 3), (text::Extent{-8, 2}));
+  CHECK_EQ(mt->extent(s, 2, 3), (text::Extent{0, 0}));  // a replacement has no extent
+  // 'x' (0.2..4.8 rounded out) twice, then the replacement's empty box.
+  CHECK_EQ(mt->bounds(s, 0, 3), (text::TextRect{0, -5, 10, 0}));
+  CHECK_EQ(mt->memory_usage(), uint32_t(3 * sizeof(float)));
+}
+
+TEST(text_greedy_breaks_at_words_then_clusters) {
+  text::LineBreakResult r = break_paragraph(u"xx xx xx", text::BreakStrategy::kGreedy, 25);
+  CHECK_EQ(r.break_points, (std::vector<int32_t>{6, 8}));
+  CHECK_EQ(r.widths, (std::vector<float>{22.5f, 10}));  // the trailing space does not count
+  CHECK_EQ(r.ascents, (std::vector<float>{-8, -8}));
+  CHECK_EQ(r.descents, (std::vector<float>{2, 2}));
+  CHECK_EQ(r.flags, (std::vector<int32_t>{0, 0}));
+  // A word longer than the line breaks between characters.
+  r = break_paragraph(u"xxxxxxxx", text::BreakStrategy::kGreedy, 25);
+  CHECK_EQ(r.break_points, (std::vector<int32_t>{5, 8}));
+  CHECK_EQ(r.widths, (std::vector<float>{25, 15}));
+}
+
+TEST(text_optimal_breaks_minimize_ragged_lines) {
+  text::LineBreakResult r = break_paragraph(u"xx xx xx", text::BreakStrategy::kHighQuality, 25);
+  CHECK_EQ(r.break_points, (std::vector<int32_t>{6, 8}));
+  CHECK_EQ(r.widths, (std::vector<float>{22.5f, 10}));
+  // Three words on two lines: high quality fills the first line (the last
+  // line costs nothing), balanced evens them out.
+  r = break_paragraph(u"xx x x", text::BreakStrategy::kHighQuality, 18);
+  CHECK_EQ(r.break_points, (std::vector<int32_t>{5, 6}));
+  CHECK_EQ(r.widths, (std::vector<float>{17.5f, 5}));
+  r = break_paragraph(u"xx x x", text::BreakStrategy::kBalanced, 18);
+  CHECK_EQ(r.break_points, (std::vector<int32_t>{3, 6}));
+  CHECK_EQ(r.widths, (std::vector<float>{10, 12.5f}));
+}
+
+TEST(text_soft_hyphen_breaks_insert_a_hyphen) {
+  text::LineBreakResult r = break_paragraph(u"xxx\u00ADxxx", text::BreakStrategy::kGreedy, 25,
+                                            text::HyphenationFrequency::kNormal);
+  CHECK_EQ(r.break_points, (std::vector<int32_t>{4, 7}));
+  CHECK_EQ(r.widths, (std::vector<float>{18, 15}));  // "xxx" and an inserted hyphen
+  CHECK_EQ(r.flags, (std::vector<int32_t>{int32_t(text::EndHyphenEdit::kInsertHyphen), 0}));
+  // Without hyphenation, the word breaks between characters.
+  r = break_paragraph(u"xxx\u00ADxxx", text::BreakStrategy::kGreedy, 25);
+  CHECK_EQ(r.break_points, (std::vector<int32_t>{6, 7}));
+}
+
+TEST(text_tabs_break_greedily_and_flag_lines) {
+  text::LineBreakResult r = break_paragraph(u"x\tx", text::BreakStrategy::kHighQuality, 100);
+  CHECK_EQ(r.break_points, (std::vector<int32_t>{3}));
+  CHECK_EQ(r.widths, (std::vector<float>{25}));  // the tab reaches the stop at 20
+  CHECK_EQ(r.flags, (std::vector<int32_t>{text::LineBreakResult::kTabBit}));
+  text::TabStops stops{{10, 20}, 8};
+  CHECK_EQ(stops.next_tab(5), 10.0f);
+  CHECK_EQ(stops.next_tab(20), 24.0f);
+}
+
+TEST(text_line_widths_follow_android_indents) {
+  text::LineWidths w;
+  w.first_width = 100;
+  w.first_line_count = 1;
+  w.rest_width = 80;
+  w.indents = {10, 5};
+  CHECK_EQ(w.at(0), 90.0f);
+  CHECK_EQ(w.at(1), 75.0f);
+  CHECK_EQ(w.at(5), 75.0f);  // the last indent goes on
+  CHECK_EQ(w.min(), 75.0f);
+}
+
+TEST(text_word_breaker_follows_urls) {
+  std::u16string s = u"ab http://x.y/z";
+  text::WordBreaker wb;
+  wb.set_text(s);
+  std::vector<int64_t> breaks{wb.following_with_locale(text::Locale(), text::LineBreakStyle::kNone,
+                                                       text::LineBreakWordStyle::kNone, 0)};
+  std::vector<int> badness{wb.break_badness()};
+  while (breaks.back() != text::WordBreaker::kDone) {
+    breaks.push_back(wb.next());
+    badness.push_back(wb.break_badness());
+  }
+  // Chicago Manual of Style: after "http:", after "//", before '.' and '/'.
+  CHECK_EQ(breaks, (std::vector<int64_t>{3, 8, 10, 11, 13, 15, -1}));
+  CHECK_EQ(badness, (std::vector<int>{0, 1, 1, 1, 1, 0, 0}));
+  // No break after a hyphen: hyphenation handles it.
+  std::u16string h = u"a- b";
+  wb.set_text(h);
+  CHECK_EQ(wb.following_with_locale(text::Locale(), text::LineBreakStyle::kNone, text::LineBreakWordStyle::kNone, 0),
+           int64_t(3));
+  std::vector<text::HyphenationType> types = text::hyphenate(u"ab-cd", text::Hyphenator::lookup(text::Locale()));
+  CHECK(types[3] == text::HyphenationType::kBreakAndDontInsertHyphen);
+  CHECK(types[2] == text::HyphenationType::kDontBreak);
 }

@@ -37,6 +37,7 @@ class IcuServices final : public text::UnicodeServices {
     tags_.clear();
     properties_.clear();
     graphemes_.clear();
+    int_properties_.clear();
   }
 
   // minikin's toLanguageTag (LocaleListCache.cpp): uloc_canonicalize, then
@@ -143,12 +144,54 @@ class IcuServices final : public text::UnicodeServices {
     }
   }
 
+  int32_t int_property(char32_t c, text::IntProperty p) override {
+    uint64_t key = uint64_t(c) << 16 | uint32_t(p);
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      if (auto it = int_properties_.find(key); it != int_properties_.end()) return it->second;
+    }
+    int32_t value = 0;
+    try {
+      value = int32_t(rt_->call_static("Landroid/icu/lang/UCharacter;", "getIntPropertyValue", "(II)I",
+                                       {uint32_t(c), uint32_t(p)}));
+    } catch (const rt::JavaThrow&) {
+    }
+    std::lock_guard<std::mutex> guard(lock_);
+    int_properties_.emplace(key, value);
+    return value;
+  }
+
+  // ubrk_open(UBRK_LINE) through android.icu.text.BreakIterator, walked
+  // from first() to DONE.
+  bool line_boundaries(std::u16string_view text, std::string_view tag, std::vector<uint32_t>* out) override {
+    try {
+      Handle tag_string = rt_->new_string_utf8(std::string(tag));
+      Handle locale = Handle(rt_->call_static("Landroid/icu/util/ULocale;", "forLanguageTag",
+                                              "(Ljava/lang/String;)Landroid/icu/util/ULocale;", {tag_string}));
+      Handle it = Handle(rt_->call_static("Landroid/icu/text/BreakIterator;", "getLineInstance",
+                                          "(Landroid/icu/util/ULocale;)Landroid/icu/text/BreakIterator;", {locale}));
+      if (it == kNull) return false;
+      Handle str = rt_->new_string(std::u16string(text));
+      rt_->call_virtual(it, "setText", "(Ljava/lang/String;)V", {str});
+      out->clear();
+      for (int32_t b = int32_t(rt_->call_virtual(it, "first", "()I")); b != -1;
+           b = int32_t(rt_->call_virtual(it, "next", "()I"))) {
+        if (b < 0 || size_t(b) > text.size() || (!out->empty() && uint32_t(b) <= out->back())) return false;
+        out->push_back(uint32_t(b));
+      }
+      return true;
+    } catch (const rt::JavaThrow&) {
+      return false;
+    }
+  }
+
  private:
   Runtime* rt_ = nullptr;
   std::mutex lock_;
   std::map<std::string, std::string> tags_;
   std::unordered_map<uint64_t, bool> properties_;
   std::unordered_map<char32_t, text::GraphemeBreakProp> graphemes_;
+  std::unordered_map<uint64_t, int32_t> int_properties_;
 };
 
 }  // namespace

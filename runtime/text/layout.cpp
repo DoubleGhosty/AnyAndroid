@@ -12,21 +12,23 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <list>
+#include <mutex>
 #include <set>
+#include <string>
+#include <unordered_map>
 
+#include "text/layout_internal.h"
 #include "text/locale.h"
 #include "text/unicode.h"
 
 namespace aa::text {
 
-namespace {
+using namespace detail;
+
+namespace detail {
 
 constexpr char32_t kLineFeed = 0x0A, kCarriageReturn = 0x0D, kHyphen = 0x2010, kHyphenMinus = 0x002D;
-
-struct Range {
-  size_t start = 0, end = 0;
-  size_t length() const { return end - start; }
-};
 
 // U16StringPiece::codePointAt.
 char32_t code_point_at(std::u16string_view s, size_t i) {
@@ -111,12 +113,6 @@ bool may_be_rtl(char32_t c) {
          c == 0x202E || c == 0x2067 || c == 0x2068;
 }
 
-struct BidiRunInfo {
-  Range range;
-  bool rtl = false;
-  bool valid = true;
-};
-
 std::vector<BidiRunInfo> bidi_runs(std::u16string_view text, Range range, Bidi bidi) {
   bool rtl = uint8_t(bidi) & 1;
   if (uint8_t(bidi) & 4) return {{range, rtl}};  // override: a single run
@@ -144,6 +140,10 @@ std::vector<BidiRunInfo> bidi_runs(std::u16string_view text, Range range, Bidi b
   }
   return out;
 }
+
+}  // namespace detail
+
+namespace {
 
 // --- Script runs (ScriptUtils.cpp) ---
 
@@ -250,6 +250,10 @@ hb_font_funcs_t* font_funcs(bool color_bitmaps) {
 
 // --- Hyphens ---
 
+}  // namespace
+
+namespace detail {
+
 std::u16string_view hyphen_string(StartHyphenEdit h) {
   switch (h) {
     case StartHyphenEdit::kInsertZwj: return u"‍";
@@ -269,6 +273,10 @@ std::u16string_view hyphen_string(EndHyphenEdit h) {
     default: return {};
   }
 }
+
+}  // namespace detail
+
+namespace {
 
 bool is_insertion(StartHyphenEdit h) { return h != StartHyphenEdit::kNoEdit; }
 bool is_insertion(EndHyphenEdit h) { return uint8_t(h) >= uint8_t(EndHyphenEdit::kInsertHyphen); }
@@ -327,23 +335,6 @@ uint32_t add_to_buffer(hb_buffer_t* buffer, const char16_t* buf, size_t start, s
 }
 
 // --- LayoutPiece (LayoutCore.cpp) ---
-
-struct Point {
-  float x = 0, y = 0;
-};
-
-struct LayoutPiece {
-  std::vector<float> advances;  // per code unit of the piece
-  std::vector<uint8_t> font_indices;
-  std::vector<uint32_t> glyph_ids;
-  std::vector<Point> points;
-  std::vector<uint32_t> clusters;
-  std::vector<FakedFont> fonts;
-  float advance = 0;
-  Extent extent;
-  uint32_t cluster_count = 0;
-  bool vertical = false;
-};
 
 LayoutPiece shape_piece(std::u16string_view text_buf, Range range, bool rtl, const Paint& paint,
                         StartHyphenEdit start_hyphen, EndHyphenEdit end_hyphen) {
@@ -494,7 +485,10 @@ LayoutPiece shape_piece(std::u16string_view text_buf, Range range, bool rtl, con
   return p;
 }
 
-// LayoutPiece::calculateBounds.
+}  // namespace
+
+namespace detail {
+
 TextRect piece_bounds(const LayoutPiece& p, const Paint& paint) {
   TextRect out;
   for (size_t i = 0; i < p.glyph_ids.size(); ++i) {
@@ -509,6 +503,114 @@ TextRect piece_bounds(const LayoutPiece& p, const Paint& paint) {
   return out;
 }
 
+// --- LayoutCache ---
+
+namespace {
+
+// Words longer than this are shaped every time (CHAR_LIMIT_FOR_CACHE).
+constexpr size_t kCharLimitForCache = 128;
+constexpr size_t kMaxCacheEntries = 5000;
+
+template <typename T>
+void put(std::string& key, const T& v) {
+  key.append(reinterpret_cast<const char*>(&v), sizeof v);
+}
+
+// LayoutCacheKey: the context, the piece in it, the direction, the hyphen
+// edits and what of the paint changes the shaping.
+std::string cache_key(std::u16string_view ctx, Range piece, bool rtl, const Paint& paint, StartHyphenEdit sh,
+                      EndHyphenEdit eh) {
+  std::string key;
+  key.reserve(ctx.size() * 2 + 96);
+  put(key, uint32_t(ctx.size()));
+  key.append(reinterpret_cast<const char*>(ctx.data()), ctx.size() * 2);
+  put(key, uint32_t(piece.start));
+  put(key, uint32_t(piece.end));
+  put(key, uint8_t(rtl | uint8_t(sh) << 1 | uint8_t(eh) << 3));
+  put(key, paint.font.get());
+  put(key, paint.size);
+  put(key, paint.scale_x);
+  put(key, paint.skew_x);
+  put(key, paint.letter_spacing);
+  const FontSpec& f = paint.flags;
+  put(key, uint8_t(f.hinting));
+  put(key, uint8_t(f.edging));
+  put(key, uint8_t(f.embolden | f.linear_metrics << 1 | f.subpixel << 2 | f.embedded_bitmaps << 3 |
+                   f.force_autohint << 4 | paint.vertical_text << 5 | paint.font_style.italic << 6));
+  put(key, paint.locale_list_id);
+  put(key, paint.font_style.weight);
+  put(key, uint8_t(paint.family_variant));
+  put(key, uint32_t(paint.font_features.size()));
+  for (const FontFeature& ft : paint.font_features) {
+    put(key, ft.tag);
+    put(key, ft.value);
+  }
+  put(key, uint32_t(paint.font_variations.size()));
+  for (const Variation& v : paint.font_variations) {
+    put(key, v.tag);
+    put(key, v.value);
+  }
+  return key;
+}
+
+class LayoutCache {
+ public:
+  std::shared_ptr<const LayoutPiece> get(const std::string& key) {
+    std::lock_guard<std::mutex> guard(lock_);
+    auto it = map_.find(key);
+    if (it == map_.end()) return nullptr;
+    lru_.splice(lru_.begin(), lru_, it->second.lru);
+    return it->second.piece;
+  }
+  void put(std::string key, std::shared_ptr<const FontCollection> font, std::shared_ptr<const LayoutPiece> piece) {
+    std::lock_guard<std::mutex> guard(lock_);
+    if (map_.count(key)) return;
+    if (map_.size() >= kMaxCacheEntries) {
+      map_.erase(lru_.back());
+      lru_.pop_back();
+    }
+    lru_.push_front(key);
+    // The entry holds the collection: its address, in the key, cannot be
+    // reused by another while the entry lives.
+    map_.emplace(std::move(key), Entry{std::move(font), std::move(piece), lru_.begin()});
+  }
+
+ private:
+  struct Entry {
+    std::shared_ptr<const FontCollection> font;
+    std::shared_ptr<const LayoutPiece> piece;
+    std::list<std::string>::iterator lru;
+  };
+  std::mutex lock_;
+  std::list<std::string> lru_;
+  std::unordered_map<std::string, Entry> map_;
+};
+
+LayoutCache& layout_cache() {
+  static auto* cache = new LayoutCache;  // never destroyed
+  return *cache;
+}
+
+}  // namespace
+
+std::shared_ptr<const LayoutPiece> layout_piece(std::u16string_view text, Range context, Range piece, bool rtl,
+                                                const Paint& paint, StartHyphenEdit start_hyphen,
+                                                EndHyphenEdit end_hyphen) {
+  std::u16string_view ctx = text.substr(context.start, context.length());
+  Range in_ctx{piece.start - context.start, piece.end - context.start};
+  if (piece.length() >= kCharLimitForCache) {
+    return std::make_shared<const LayoutPiece>(shape_piece(ctx, in_ctx, rtl, paint, start_hyphen, end_hyphen));
+  }
+  std::string key = cache_key(ctx, in_ctx, rtl, paint, start_hyphen, end_hyphen);
+  if (auto hit = layout_cache().get(key)) return hit;
+  auto lp = std::make_shared<const LayoutPiece>(shape_piece(ctx, in_ctx, rtl, paint, start_hyphen, end_hyphen));
+  layout_cache().put(std::move(key), paint.font, lp);
+  return lp;
+}
+}  // namespace detail
+
+namespace {
+
 // Layout::doLayoutRunCached over pieces; `on_piece` gets each piece, its
 // offset in the run and the advance before it.
 template <typename Fn>
@@ -518,11 +620,10 @@ float layout_run(std::u16string_view text, Range range, bool rtl, const Paint& p
   for (const auto& [context, piece] : split_pieces(text, range, rtl)) {
     StartHyphenEdit sh = piece.start == range.start ? start_hyphen : StartHyphenEdit::kNoEdit;
     EndHyphenEdit eh = piece.end == range.end ? end_hyphen : EndHyphenEdit::kNoEdit;
-    std::u16string_view ctx = text.substr(context.start, context.length());
-    LayoutPiece lp = shape_piece(ctx, Range{piece.start - context.start, piece.end - context.start}, rtl, paint, sh, eh);
+    std::shared_ptr<const LayoutPiece> lp = layout_piece(text, context, piece, rtl, paint, sh, eh);
     float word_spacing = piece.length() == 1 && is_word_space(text[piece.start]) ? paint.word_spacing : 0;
-    on_piece(lp, piece, advance, word_spacing);
-    advance += lp.advance + word_spacing;
+    on_piece(*lp, piece, advance, word_spacing);
+    advance += lp->advance + word_spacing;
   }
   return advance;
 }
@@ -751,10 +852,8 @@ Extent text_extent(std::u16string_view text, size_t start, size_t count, Bidi bi
   for (const BidiRunInfo& run : bidi_runs(text, Range{start, start + count}, bidi)) {
     if (!run.valid) continue;
     for (const auto& [context, piece] : split_pieces(text, run.range, run.rtl)) {
-      std::u16string_view ctx = text.substr(context.start, context.length());
-      LayoutPiece lp = shape_piece(ctx, Range{piece.start - context.start, piece.end - context.start}, run.rtl, paint,
-                                   StartHyphenEdit::kNoEdit, EndHyphenEdit::kNoEdit);
-      extent.extend(lp.extent);
+      extent.extend(
+          layout_piece(text, context, piece, run.rtl, paint, StartHyphenEdit::kNoEdit, EndHyphenEdit::kNoEdit)->extent);
     }
   }
   return extent;
@@ -770,16 +869,14 @@ TextRect text_bounds(std::u16string_view text, size_t start, size_t count, Bidi 
     for (const auto& [context, piece] : split_pieces(text, run.range, run.rtl)) {
       StartHyphenEdit sh = piece.start == range.start ? start_hyphen : StartHyphenEdit::kNoEdit;
       EndHyphenEdit eh = piece.end == range.end ? end_hyphen : EndHyphenEdit::kNoEdit;
-      std::u16string_view ctx = text.substr(context.start, context.length());
-      LayoutPiece lp = shape_piece(ctx, Range{piece.start - context.start, piece.end - context.start}, run.rtl, paint,
-                                   sh, eh);
-      TextRect b = piece_bounds(lp, paint);
-      if (lp.vertical) {
+      std::shared_ptr<const LayoutPiece> lp = layout_piece(text, context, piece, run.rtl, paint, sh, eh);
+      TextRect b = piece_bounds(*lp, paint);
+      if (lp->vertical) {
         out.join(b, 0, advance);
       } else {
         out.join(b, advance, 0);
       }
-      advance += lp.advance;
+      advance += lp->advance;
       if (piece.length() == 1 && is_word_space(text[piece.start])) advance += paint.word_spacing;
     }
   }

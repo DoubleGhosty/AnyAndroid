@@ -11,6 +11,7 @@
 #include "dex-engine/runtime.h"
 #include "framework-bridge/bridge.h"
 #include "text/font_collection.h"
+#include "text/layout.h"
 #include "vfs/vfs.h"
 
 namespace aa::bridge {
@@ -124,6 +125,13 @@ TypefaceInfo resolve_typeface(rt::Runtime& rt, int64_t handle);
 // Installs the text engine's Unicode services over the ICU4J of the libcore
 // (text_services.cpp), answering through `rt`. Called before using the engine.
 void ensure_text_services(rt::Runtime& rt);
+// The minikin paint of a Paint handle (MinikinUtils::prepareMinikinPaint, in
+// framework_paint.cpp) and the locale list id of the paint.
+text::Paint minikin_paint_of(rt::Runtime& rt, int64_t paint);
+uint32_t paint_locale_list_id(rt::Runtime& rt, int64_t paint);
+// android.graphics.text.MeasuredText and LineBreaker (framework_text.cpp),
+// registered by register_framework_graphics.
+void register_framework_text(rt::NativeRegistry& r);
 void register_parcel_natives(rt::NativeRegistry& r);
 void register_appmem_natives(rt::NativeRegistry& r);
 void register_resource_natives(rt::NativeRegistry& r);

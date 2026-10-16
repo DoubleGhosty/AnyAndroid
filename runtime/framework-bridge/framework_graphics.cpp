@@ -452,6 +452,7 @@ void register_framework_graphics(rt::NativeRegistry& r) {
   register_render_node(r);
   register_framework_paint(r);
   register_framework_fonts(r);
+  register_framework_text(r);
   register_framework_path(r);
   register_framework_matrix(r);
   register_framework_images(r);

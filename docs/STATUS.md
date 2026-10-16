@@ -42,20 +42,20 @@ le nombre de fichiers.
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
 | G2    | Vraie libcore d'AOSP (Android 17)                           | 92 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 66 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J2 et J4 faits, J5 avancé (vrai `ActivityThread` jusqu'à la fenêtre logique et la première mesure des vues), J6 (texte : FreeType + HarfBuzz) commencé |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 69 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J2 et J4 faits, J5 avancé (vrai `ActivityThread` jusqu'à la mesure complète des vues et `relayoutWindow`), J6 (texte : mesure et coupure de lignes) bien avancé |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
-| **Total** | **Android natif sur Windows**                          | **≈ 44 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
+| **Total** | **Android natif sur Windows**                          | **≈ 45 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
 
 ```
 G0 ██████████ 100 %
 G1 ██████████ 100 %
 G2 █████████░  92 %
-G3 ██████▋░░░  66 %
+G3 ██████▉░░░  69 %
 G4 ░░░░░░░░░░   0 %
 G5 ░░░░░░░░░░   0 %
    ───────────────
-   ████▍░░░░░ ≈ 44 % vers « Android natif sur Windows »
+   ████▌░░░░░ ≈ 45 % vers « Android natif sur Windows »
 ```
 
 ## Ce qui marche aujourd'hui (vérifié par 36 suites de tests et 138 tests unitaires)
@@ -245,21 +245,26 @@ principale, `handleBindApplication` crée l'`Application`, puis `TransactionExec
 `WindowManager.addView` → `ViewRootImpl` → `IWindowSession.addToDisplayAsUser` ouvre la fenêtre
 logique (cadres 1080×1920, inset, configuration fusionnée, paire d'`InputChannel`),
 `activityResumed` est reçu, le vsync à 60 Hz (`DisplayEventReceiver`, minuteurs de la file native
-servis par `nativePollOnce`) déclenche `performTraversals`, qui mesure les vues jusqu'au premier
-`TextView`. La mesure du texte est le blocage suivant : elle demande le moteur de texte (J6).
+servis par `nativePollOnce`) déclenche `performTraversals`. La hiérarchie entière se mesure, texte
+compris (`BoringLayout` et `StaticLayout`), puis `relayoutWindow` demande la surface de la fenêtre :
+`SurfaceControl.nativeCreate` est le blocage suivant.
 
-**J6 commencé : moteur de texte.** Android mesure le texte avec minikin, sur HarfBuzz (mise en
+**J6 bien avancé : moteur de texte.** Android mesure le texte avec minikin, sur HarfBuzz (mise en
 forme) et sur FreeType via Skia (métriques et avances, avec l'indication `FT_LOAD_TARGET_NORMAL`
 sans auto-hinter). AnyAndroid reprend les mêmes composants, aux versions d'AOSP : FreeType 2.13.2
 (miroir AOSP, configuration d'Android) et HarfBuzz 10.2.0, réduits aux fichiers utiles dans
 `runtime/third_party` ([ADR-007](adr/ADR-007-moteur-de-texte.md)). La logique de minikin (choix de la police par couverture, mise en forme par
-mots, espacements) et celle du scaler FreeType de Skia sont réécrites d'après le code d'AOSP.
+mots, espacements) et celle du scaler FreeType de Skia sont réécrites d'après le code d'AOSP. Les
+natives de mesure de `Paint` sont branchées, ainsi que `MeasuredText` et `LineBreaker` : coupure
+gloutonne et optimale de minikin, frontières de lignes de l'ICU4J de la libcore, césure aux traits
+d'union et tirets conditionnels (les motifs `.hyb` attendent `Hyphenator.init`).
 
 **Suite prévue, dans l'ordre** :
-1. J6 : natives de mesure de `Paint` (métriques, avances, bornes), puis `MeasuredText` et
-   `LineBreaker` pour `StaticLayout`.
-2. J5, fin : `relayout` calculé, première traversée complète (mesure et mise en page), test de
-   bout en bout du démarrage par les gestionnaires. Le pilotage déterministe des tests est à
+1. J5, fin : `SurfaceControl` et `relayout` calculé (cadres, surface logique), première
+   traversée complète (mesure, mise en page, dessin logiciel à vide), test de bout en bout du
+   démarrage par les gestionnaires.
+2. J6, fin : `TextRunShaper`/`PositionedGlyphs` et les glyphes pour le dessin (J7), motifs de
+   césure. Le pilotage déterministe des tests est à
    concevoir sur l'horloge commune (`common/clock.h`).
 
 **À savoir pour la suite** :
@@ -295,7 +300,7 @@ vrais gestionnaires d'`ActivityThread`.
 2. **J3-J5** (en cours) : services système v1 et démarrage d'une application jusqu'à `onResume`,
    en direct (J4, fait) puis par `handleBindApplication` … `handleResumeActivity` et la fenêtre
    logique (J5, avancé).
-3. **J6-J8** : texte (J6, commencé), rendu logiciel du vrai framework (`drawSoftware`, moteur 2D choisi par
+3. **J6-J8** : texte (J6, bien avancé), rendu logiciel du vrai framework (`drawSoftware`, moteur 2D choisi par
    l'ADR-007), fenêtre Win32 et entrées.
 4. **J9-J10, sortie de G3** : navigation, puis une application réelle affichée et utilisable :
    un exemple Java sur les widgets du framework, puis `Music` de la GSI (la Calculatrice AOSP

@@ -48,6 +48,14 @@ substitutions `GPOS`/`GSUB`, à l'échelle `taille × 256`.
    les utilise.
 5. **Concurrence** : FreeType n'est pas réentrant sur une même face ; un verrou unique protège le
    moteur (le texte se mesure surtout sur le thread principal).
+6. **Coupure de lignes** : `MeasuredText`, `WordBreaker`, les deux algorithmes de minikin
+   (glouton pour `BREAK_STRATEGY_SIMPLE` et le texte à tabulations, optimal pour `HIGH_QUALITY` et
+   `BALANCED`) et `Hyphenator` sont portés avec leurs types numériques, pour que les mêmes lignes
+   sortent. L'itérateur de lignes d'ICU (`BreakIterator.getLineInstance` avec les options
+   `-u-lb-`/`-u-lw-`) donne les frontières d'un paragraphe en une passe, mises en cache, que le
+   port parcourt comme `ubrk_following`/`ubrk_next`. Les mots déjà mis en forme sont gardés dans
+   un cache de 5 000 entrées (le `LayoutCache` de minikin), qui remplace aussi les `LayoutPieces`
+   que minikin garde dans chaque `MeasuredText`.
 
 ## Alternatives écartées
 
@@ -63,6 +71,10 @@ substitutions `GPOS`/`GSUB`, à l'échelle `taille × 256`.
   des applications sont des données non fiables : FreeType et HarfBuzz sont fuzzés en continu
   (OSS-Fuzz) ; les mises à jour suivent les versions d'AOSP.
 - Le rendu des glyphes (J7) pourra s'appuyer sur les contours et le rastériseur de FreeType.
+- Césure : les motifs (`/system/usr/hyphen-data/*.hyb`) ne sont chargés que par
+  `Hyphenator.init()`, que le zygote appelle et que notre démarrage n'appelle pas encore ; seuls les
+  traits d'union et les tirets conditionnels (U+00AD) coupent donc un mot. `TextView` n'active pas
+  la césure par défaut depuis Android 13.
 - Tests : un générateur de police TrueType minimale dans les tests unitaires vérifie métriques,
   avances, indication et mise en forme sans fichier extrait d'une image ; les mesures sur les
   polices de l'image se vérifient par les tests facultatifs sur image.

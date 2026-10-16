@@ -617,6 +617,10 @@ void register_paint_text(rt::NativeRegistry& r) {
 
 }  // namespace
 
+text::Paint minikin_paint_of(Runtime& rt, int64_t paint) { return minikin_paint(rt, snapshot(rt, paint)); }
+
+uint32_t paint_locale_list_id(Runtime& rt, int64_t paint) { return uint32_t(snapshot(rt, paint).locale_list_id); }
+
 void register_framework_paint(rt::NativeRegistry& r) {
   const char* p = "Landroid/graphics/Paint;";
   static const int64_t paint_free = register_free_function([](int64_t h) { tables().paints.remove(h); });

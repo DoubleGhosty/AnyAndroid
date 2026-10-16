@@ -13,6 +13,7 @@ add_library(aa_bridge STATIC
   framework_path.cpp
   framework_region.cpp
   framework_surface.cpp
+  framework_text.cpp
   framework_vector_drawable.cpp
   framework_natives.cpp
   framework_parcel.cpp

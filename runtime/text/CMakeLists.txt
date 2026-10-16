@@ -5,7 +5,10 @@ add_library(aa_text STATIC
   font_collection.cpp
   font_face.cpp
   layout.cpp
+  line_breaker.cpp
   locale.cpp
-  unicode.cpp)
+  measured_text.cpp
+  unicode.cpp
+  word_breaker.cpp)
 target_include_directories(aa_text PUBLIC ${AA_RUNTIME_DIR})
 target_link_libraries(aa_text PUBLIC aa_compile_options PRIVATE aa_freetype aa_harfbuzz)

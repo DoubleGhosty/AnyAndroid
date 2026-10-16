@@ -38,6 +38,13 @@ enum class GraphemeBreakProp : int8_t {
 
 enum class EmojiProperty : uint8_t { kEmoji, kEmojiModifier, kEmojiModifierBase, kExtendedPictographic };
 
+// u_getIntPropertyValue properties that minikin reads (UProperty values).
+enum class IntProperty : uint32_t { kJoiningType = 0x1007, kLineBreak = 0x1008 };
+// ULineBreak and UJoiningType values used by the engine.
+constexpr int32_t kLineBreakOpenPunctuation = 20, kLineBreakQuotation = 23;
+constexpr int32_t kJoiningNon = 0, kJoiningCausing = 1, kJoiningDual = 2, kJoiningLeft = 3, kJoiningRight = 4,
+                  kJoiningTransparent = 5;
+
 // One run of a paragraph in visual order, as ubidi_getVisualRun gives it.
 struct BidiRun {
   uint32_t start = 0, length = 0;
@@ -56,12 +63,17 @@ class UnicodeServices {
   // default RTL), then its visual runs. Returns false on failure; *para_rtl
   // receives the paragraph direction.
   virtual bool bidi_runs(std::u16string_view text, uint8_t level, std::vector<BidiRun>* runs, bool* para_rtl) = 0;
+  virtual int32_t int_property(char32_t c, IntProperty p) = 0;
+  // ubrk_open(UBRK_LINE) for the locale of BCP 47 tag `tag` (with its -u-lb-
+  // and -u-lw- options) over `text`: every boundary, 0 and text.size()
+  // included, in order. Returns false on failure.
+  virtual bool line_boundaries(std::u16string_view text, std::string_view tag, std::vector<uint32_t>* out) = 0;
 };
 
 // The services in use. Until the embedder installs its own, a fallback
 // without ICU data: locale tags kept as written, no emoji property,
 // grapheme breaks from the general category only, every paragraph left to
-// right.
+// right, line breaks after spaces only.
 UnicodeServices& unicode_services();
 void set_unicode_services(UnicodeServices* services);  // nullptr: the fallback
 

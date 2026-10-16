@@ -53,12 +53,23 @@ constexpr bool kIsUtf16Text =
     (std::is_pointer_v<std::decay_t<T>> &&
      std::is_same_v<std::remove_cv_t<std::remove_pointer_t<std::decay_t<T>>>, char16_t>);
 
+template <typename T>
+struct IsVector : std::false_type {};
+template <typename E, typename A>
+struct IsVector<std::vector<E, A>> : std::true_type {};
+
 // What check_eq prints for a value: UTF-16 text escaped, enumerations and
 // byte-sized integers (uint8_t would print as a raw char) as numbers,
-// anything else unchanged.
+// vectors as [a, b...], anything else unchanged.
 template <typename T>
 decltype(auto) printable(const T& v) {
-  if constexpr (kIsUtf16Text<T>) {
+  if constexpr (IsVector<T>::value) {
+    std::ostringstream os;
+    os << '[';
+    for (size_t i = 0; i < v.size(); ++i) os << (i ? ", " : "") << printable(v[i]);
+    os << ']';
+    return os.str();
+  } else if constexpr (kIsUtf16Text<T>) {
     if constexpr (std::is_pointer_v<std::decay_t<T>>) {
       const char16_t* p = v;
       return p ? escape_utf16(p) : std::string("nullptr");

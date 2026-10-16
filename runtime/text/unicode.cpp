@@ -51,6 +51,26 @@ class FallbackServices final : public UnicodeServices {
     *para_rtl = rtl;
     return true;
   }
+  int32_t int_property(char32_t c, IntProperty p) override {
+    if (p != IntProperty::kLineBreak) return kJoiningNon;
+    switch (hb_unicode_general_category(hb_unicode_funcs_get_default(), c)) {
+      case HB_UNICODE_GENERAL_CATEGORY_OPEN_PUNCTUATION: return kLineBreakOpenPunctuation;
+      case HB_UNICODE_GENERAL_CATEGORY_INITIAL_PUNCTUATION:
+      case HB_UNICODE_GENERAL_CATEGORY_FINAL_PUNCTUATION: return kLineBreakQuotation;
+      default: return c == '"' || c == '\'' ? kLineBreakQuotation : 2;  // AL
+    }
+  }
+  // A break before each character that follows white space (UAX #14's LB18
+  // alone), and after each line feed.
+  bool line_boundaries(std::u16string_view text, std::string_view, std::vector<uint32_t>* out) override {
+    out->assign(1, 0);
+    auto space = [](char16_t c) { return c == ' ' || c == '\t' || c == 0x3000; };
+    for (size_t i = 1; i < text.size(); ++i) {
+      if (text[i - 1] == '\n' || (space(text[i - 1]) && !space(text[i]))) out->push_back(uint32_t(i));
+    }
+    if (!text.empty()) out->push_back(uint32_t(text.size()));
+    return true;
+  }
 };
 
 FallbackServices& fallback() {
