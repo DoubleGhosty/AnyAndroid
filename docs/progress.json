@@ -2,7 +2,7 @@
   "metadata": {
     "project": "AnyAndroid for Windows",
     "version": "0.1.0",
-    "generated_at": "2026-10-16T07:42:14.603717+00:00",
+    "generated_at": "2026-10-16T07:53:05.943082+00:00",
     "target": "Android natif sur Windows (sans VM ni hyperviseur)"
   },
   "summary": {
@@ -11088,7 +11088,7 @@
     "total_suites": 36,
     "passed_suites": 33,
     "optional_suites": 3,
-    "unit_tests": 134,
+    "unit_tests": 135,
     "e2e_suites": 32,
     "fuzz_suites": 3,
     "percent_core": 100.0,
