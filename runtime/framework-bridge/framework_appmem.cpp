@@ -6,11 +6,13 @@
 // that invalidate binder caches. AnyAndroid's process plays both roles, so
 // the region is ordinary process memory behind bounded handles (one per
 // mapping, one for its nonce block); the "file descriptor" is /dev/zero of
-// the VFS, as an anonymous mapping's would be.
+// the VFS, as an anonymous mapping's would be, and names the region: every
+// mapping of it, or of a descriptor duplicated from it, shares its contents.
 #include "framework-bridge/internal.h"
 
 #include <array>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -43,17 +45,30 @@ struct SharedState {
   std::array<int8_t, kMaxByte> bytes{};
   int32_t byte_hash = 0;
   int64_t nonce_handle = 0;  // handle of this state in the nonce table, once asked for
+  int32_t mapped = 0;        // live mappings
 };
 
 // Kind tags: unique across the runtime (tests/check_handle_kinds.cmake).
 struct Tables {
   HandleTable<SharedState> mappings{0x1001};
   HandleTable<SharedState> nonce_blocks{0x1002};
+  std::mutex lock;
+  std::map<int32_t, std::shared_ptr<SharedState>> regions;  // by descriptor
 };
+
 
 Tables& tables() {
   static auto* t = new Tables;
   return *t;
+}
+
+// The region a descriptor names (a new one for an unknown descriptor).
+std::shared_ptr<SharedState> region_of(int32_t fd) {
+  Tables& t = tables();
+  std::lock_guard<std::mutex> guard(t.lock);
+  auto& region = t.regions[fd];
+  if (!region) region = std::make_shared<SharedState>();
+  return region;
 }
 
 std::shared_ptr<SharedState> mapping(Runtime& rt, int64_t h) {
@@ -85,18 +100,35 @@ void check_flag(Runtime& rt, int32_t bit) {
 void register_appmem_natives(rt::NativeRegistry& r) {
   const char* asm_ = "Lcom/android/internal/os/ApplicationSharedMemory;";
   r.bind(asm_, "nativeCreate", "()I", [](Runtime& rt, NativeArgs&) -> uint64_t {
-    return rt::ret_int(open_zero(rt, vfs::kO_RDWR));
+    int32_t fd = open_zero(rt, vfs::kO_RDWR);
+    Tables& t = tables();
+    std::lock_guard<std::mutex> guard(t.lock);
+    t.regions[fd] = std::make_shared<SharedState>();
+    return rt::ret_int(fd);
   }, S::kPartial, "mémoire du processus (pas d'ashmem)");
-  r.bind(asm_, "nativeDupAsReadOnly", "(I)I", [](Runtime& rt, NativeArgs&) -> uint64_t {
-    return rt::ret_int(open_zero(rt, vfs::kO_RDONLY));
+  r.bind(asm_, "nativeDupAsReadOnly", "(I)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::shared_ptr<SharedState> region = region_of(a.i32(0));
+    int32_t fd = open_zero(rt, vfs::kO_RDONLY);
+    Tables& t = tables();
+    std::lock_guard<std::mutex> guard(t.lock);
+    t.regions[fd] = std::move(region);
+    return rt::ret_int(fd);
   });
-  r.bind(asm_, "nativeMap", "(IZ)J", [](Runtime&, NativeArgs&) -> uint64_t {
-    return uint64_t(tables().mappings.add(std::make_shared<SharedState>()));
+  r.bind(asm_, "nativeMap", "(IZ)J", [](Runtime&, NativeArgs& a) -> uint64_t {
+    std::shared_ptr<SharedState> region = region_of(a.i32(0));
+    {
+      std::lock_guard<std::mutex> guard(region->lock);
+      ++region->mapped;
+    }
+    return uint64_t(tables().mappings.add(std::move(region)));
   });
   r.bind(asm_, "nativeUnmap", "(J)V", [](Runtime&, NativeArgs& a) -> uint64_t {
     if (auto s = tables().mappings.get(a.i64(0))) {
       std::lock_guard<std::mutex> guard(s->lock);
-      if (s->nonce_handle) tables().nonce_blocks.remove(s->nonce_handle);
+      if (--s->mapped == 0 && s->nonce_handle) {
+        tables().nonce_blocks.remove(s->nonce_handle);
+        s->nonce_handle = 0;
+      }
     }
     tables().mappings.remove(a.i64(0));
     return 0;

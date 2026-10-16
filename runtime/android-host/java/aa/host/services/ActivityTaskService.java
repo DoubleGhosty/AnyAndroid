@@ -27,5 +27,15 @@ public final class ActivityTaskService extends IActivityTaskManager.Stub {
     /** Shown in recents, which do not exist. */
     @Override
     public void setTaskDescription(IBinder token, ActivityManager.TaskDescription description) {}
+
+    /** ResumeActivityItem.postExecute: the activity is in the foreground. */
+    @Override
+    public void activityResumed(IBinder token, boolean handleSplashScreenExit) {
+      Runnable r = onResumed;
+      if (r != null) r.run();
+    }
   }
+
+  /** Called when an activity reports itself resumed (the host's launcher watches it). */
+  public static volatile Runnable onResumed;
 }

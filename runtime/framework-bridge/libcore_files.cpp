@@ -395,6 +395,16 @@ void register_linux(rt::NativeRegistry& r) {
     guarded(rt, "listxattr", [&] { the_vfs().stat(path); });
     return string_array(rt, {});
   });
+  // The host areas (NTFS) keep no Linux extended attributes: writing one fails
+  // as on a file system without xattr support.
+  r.bind(lx, "setxattr", "(Ljava/lang/String;Ljava/lang/String;[BI)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::string path = path_arg(rt, a.h(1));
+    guarded(rt, "setxattr", [&] {
+      the_vfs().stat(path);
+      throw vfs::VfsError{vfs::kEOPNOTSUPP, path};
+    });
+    return 0;
+  }, S::kUnsupported, "pas d'attributs étendus dans le bac à sable (EOPNOTSUPP)");
   r.bind(lx, "removexattr", "(Ljava/lang/String;Ljava/lang/String;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     std::string path = path_arg(rt, a.h(1));
     guarded(rt, "removexattr", [&] {

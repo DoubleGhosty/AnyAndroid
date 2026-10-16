@@ -319,9 +319,67 @@ void register_render_node(rt::NativeRegistry& r) {
   }
 }
 
+// android.graphics.HardwareRenderer, process-wide settings only: HWUI and its
+// render thread are outside G3 (ADR-006, software drawing by ViewRootImpl),
+// so the settings handleBindApplication makes are kept without effect, and
+// the renderer itself (nCreateProxy, nCreateRootRenderNode...) stays unbound.
+void register_hardware_renderer(rt::NativeRegistry& r) {
+  const char* hr = "Landroid/graphics/HardwareRenderer;";
+  static std::atomic<bool> drawing_enabled{true};
+  auto noop = [](Runtime&, NativeArgs&) -> uint64_t { return 0; };
+  const char* note = "pas de rendu matériel (HWUI hors G3) : réglage sans effet";
+  for (const auto& [name, sig] : std::initializer_list<std::pair<const char*, const char*>>{
+           {"nSetDebuggingEnabled", "(Z)V"}, {"nSetIsolatedProcess", "(Z)V"}, {"nSetContextPriority", "(I)V"},
+           {"nSetDisplayDensityDpi", "(I)V"}, {"nSetHighContrastText", "(Z)V"}, {"nSetIsHighEndGfx", "(Z)V"},
+           {"nSetIsLowRam", "(Z)V"}, {"nSetIsSystemOrPersistent", "(Z)V"}, {"nSetRtAnimationsEnabled", "(Z)V"},
+           {"nSetProcessStatsBuffer", "(I)V"}, {"nRotateProcessStatsBuffer", "()V"},
+           {"nOverrideProperty", "(Ljava/lang/String;Ljava/lang/String;)V"}, {"nInitDisplayInfo", "(IIFIJJZZZ)V"},
+           {"disableVsync", "()V"}, {"nEnableOopr", "()V"}, {"preInitBufferAllocator", "()V"},
+           {"setupPersistentGraphicsCache", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"},
+           {"nTrimMemory", "(I)V"}, {"nTrimCaches", "(I)V"},
+           {"nDumpGlobalProfileInfo", "(Ljava/io/FileDescriptor;I)V"}}) {
+    r.bind(hr, name, sig, noop, S::kStub, note);
+  }
+  r.bind(hr, "preload", "()I", noop, S::kStub, note);
+  r.bind(hr, "isWebViewOverlaysEnabled", "()Z", noop);
+  r.bind(hr, "nIsOoprEnabled", "()Z", noop);
+  r.bind(hr, "nSetDrawingEnabledForProcess", "(Z)V", [](Runtime&, NativeArgs& a) -> uint64_t {
+    drawing_enabled = a.i32(0) != 0;
+    return 0;
+  });
+  r.bind(hr, "nIsDrawingEnabledForProcess", "()Z", [](Runtime&, NativeArgs&) -> uint64_t {
+    return rt::ret_bool(drawing_enabled);
+  });
+}
+
+// android.os.GraphicsEnvironment: GPU driver, ANGLE and Vulkan/GLES debug
+// layers. There is no GPU driver (software drawing): settings go nowhere,
+// the application is not debuggable and no layer is injected.
+void register_graphics_environment(rt::NativeRegistry& r) {
+  const char* ge = "Landroid/os/GraphicsEnvironment;";
+  auto noop = [](Runtime&, NativeArgs&) -> uint64_t { return 0; };
+  const char* note = "pas de pilote GPU (rendu logiciel) : réglage sans effet";
+  for (const auto& [name, sig] : std::initializer_list<std::pair<const char*, const char*>>{
+           {"hintActivityLaunch", "()V"}, {"nativeEarlyInitEgl", "()V"},
+           {"nativeSetAngleInfo", "(Ljava/lang/String;ZLjava/lang/String;[Ljava/lang/String;)V"},
+           {"nativeToggleAngleAsSystemDriver", "(Z)V"}, {"setDebugLayers", "(Ljava/lang/String;)V"},
+           {"setDebugLayersGLES", "(Ljava/lang/String;)V"},
+           {"setDriverPathAndSphalLibraries", "(Ljava/lang/String;Ljava/lang/String;)V"},
+           {"setGpuStats", "(Ljava/lang/String;Ljava/lang/String;JJLjava/lang/String;I)V"},
+           {"setLayerPaths", "(Ljava/lang/ClassLoader;Ljava/lang/String;)V"}}) {
+    r.bind(ge, name, sig, noop, S::kStub, note);
+  }
+  r.bind(ge, "isDebuggable", "()Z", noop);
+  r.bind(ge, "setInjectLayersPrSetDumpable", "()Z", noop);
+  r.bind(ge, "nativeGetPersistGraphicsEgl", "()Ljava/lang/String;",
+         [](Runtime& rt, NativeArgs&) -> uint64_t { return rt.new_string_utf8(""); });
+}
+
 }  // namespace
 
 void register_framework_graphics(rt::NativeRegistry& r) {
+  register_hardware_renderer(r);
+  register_graphics_environment(r);
   register_color_space(r);
   register_render_node(r);
   register_framework_paint(r);

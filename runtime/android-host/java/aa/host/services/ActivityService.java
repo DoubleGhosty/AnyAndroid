@@ -1,5 +1,6 @@
 package aa.host.services;
 
+import android.app.ApplicationErrorReport;
 import android.app.ContentProviderHolder;
 import android.app.IActivityManager;
 import android.app.IApplicationThread;
@@ -15,8 +16,46 @@ public final class ActivityService extends IActivityManager.Stub {
   /** Process.SYSTEM_UID: the providers of the system run as system. */
   private static final int SYSTEM_UID = 1000;
 
+  /**
+   * What zygote and the activity manager do once a process attaches (ADR-006 J5): bind the
+   * application and launch its activity. Set by the host's launcher before ActivityThread.main.
+   */
+  public interface AttachHandler {
+    void attached(IApplicationThread thread);
+  }
+
+  private static AttachHandler attachHandler;
+
   private final PackageService packages;
   private ContentProviderHolder settings;
+
+  public static void onAttach(AttachHandler handler) {
+    attachHandler = handler;
+  }
+
+  /**
+   * Log.wtf ("what a terrible failure") reported to the system: shown on stderr, and the
+   * process is never killed for it (false), as for a non-system application by default.
+   */
+  @Override
+  public boolean handleApplicationWtf(
+      android.os.IBinder app, String tag, boolean system, ApplicationErrorReport.ParcelableCrashInfo crashInfo,
+      int immediateCallerPid) {
+    System.err.println("WTF/" + tag + ": " + (crashInfo == null ? "" : crashInfo.exceptionClassName + ": "
+        + crashInfo.exceptionMessage + "\n" + crashInfo.stackTrace));
+    return false;
+  }
+
+  /** The compiler filter of the application's code, kept by the system for dumps: nothing to keep. */
+  @Override
+  public void reportOptimizationInfo(android.os.IBinder app, String compilerFilter, String compilationReason) {}
+
+  /** ActivityThread.attach: the process announces itself; the launcher takes it from there. */
+  @Override
+  public void attachApplication(IApplicationThread app, long startSeq) {
+    if (attachHandler == null) throw new IllegalStateException("[AnyAndroid] processus attaché sans lanceur");
+    attachHandler.attached(app);
+  }
 
   public ActivityService(PackageService packages) {
     super(LocalPermissionEnforcer.INSTANCE);

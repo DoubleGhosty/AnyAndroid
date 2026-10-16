@@ -112,9 +112,11 @@ using S = rt::ApiStatus;
 // Linux errno values (asm-generic), also published through OsConstants.
 enum Errno : int32_t { kENOENT = 2 };
 
-// Fixed environment of the emulated Android process (never the host's).
-const std::vector<std::pair<std::string, std::string>>& android_environment() {
-  static const std::vector<std::pair<std::string, std::string>> env = {
+// Environment of the emulated Android process: Android's at start (never the
+// host's), then what the process itself sets (Os.setenv, unsetenv).
+struct Environment {
+  std::mutex lock;
+  std::vector<std::pair<std::string, std::string>> vars = {
       {"ANDROID_ROOT", "/system"},
       {"ANDROID_DATA", "/data"},
       {"ANDROID_STORAGE", "/storage"},
@@ -124,7 +126,17 @@ const std::vector<std::pair<std::string, std::string>>& android_environment() {
       {"PATH", "/product/bin:/apex/com.android.runtime/bin:/system/bin:/system/xbin"},
       {"TMPDIR", "/data/local/tmp"},
   };
-  return env;
+};
+
+Environment& environment() {
+  static auto* e = new Environment;  // never destroyed
+  return *e;
+}
+
+std::vector<std::pair<std::string, std::string>> android_environment() {
+  Environment& e = environment();
+  std::lock_guard<std::mutex> guard(e.lock);
+  return e.vars;
 }
 
 using aa::clock::monotonic_nanos;
@@ -609,8 +621,20 @@ void register_vm(rt::NativeRegistry& r) {
   r.bind(vm, "isValidClassLoaderContext", "(Ljava/lang/String;)Z", boolean(true));
   r.bind(vm, "isBootClassPathOnDisk", "(Ljava/lang/String;)Z", boolean(true));
   r.bind(vm, "getSystemDaemonNiceness", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
+  // The base APK's state as ART reports it: interpreted straight from the APK,
+  // no ahead-of-time compilation (compiler filter, compilation reason).
   r.bind(vm, "getBaseApkOptimizationInfo", "()Ldalvik/system/DexFile$OptimizationInfo;",
-         [](Runtime&, NativeArgs&) -> uint64_t { return kNull; }, S::kStub, "pas de compilation anticipée");
+         [](Runtime& rt, NativeArgs&) -> uint64_t {
+           rt::Class* cls = rt.find_class("Ldalvik/system/DexFile$OptimizationInfo;");
+           rt::GlobalRef info(rt, rt.alloc(cls));
+           rt::Object& o = rt.nonnull(info.get(), "OptimizationInfo");
+           const std::pair<const char*, const char*> values[] = {{"status", "run-from-apk"}, {"reason", "unknown"}};
+           for (const auto& [name, value] : values) {
+             rt::Field* f = find_field(cls, name, "Ljava/lang/String;");
+             if (f) o.fields.at(f->slot) = rt.new_string_utf8(value);
+           }
+           return info.get();
+         });
   r.bind(vm, "requestConcurrentGC", "()V", [](Runtime& rt, NativeArgs&) -> uint64_t {
     rt.request_gc();
     return 0;
@@ -661,6 +685,13 @@ void register_vm(rt::NativeRegistry& r) {
     r.bind(dbg, name, sig, noop, S::kStub, "pas de débogueur ni de traçage dans AnyAndroid");
   }
   r.bind(dbg, "isDebuggerConnected", "()Z", boolean(false));
+  // DDM (Android Studio's debugging channel): no transport, chunks go nowhere.
+  const char* ddm = "Lorg/apache/harmony/dalvik/ddmc/DdmServer;";
+  r.bind(ddm, "isDdmDisabled", "()Z", boolean(true));
+  r.bind(ddm, "nativeSendChunk", "(I[BII)V", noop, S::kStub, "pas de canal DDM dans AnyAndroid");
+  // ICU4C's default locale (uloc_setDefault): there is no ICU4C, ICU4J keeps its own in Java.
+  r.bind("Lcom/android/icu/util/LocaleNative;", "setDefaultNative", "(Ljava/lang/String;)V", noop, S::kPartial,
+         "pas d'ICU4C : la locale par défaut d'ICU4J suffit");
   r.bind(dbg, "isDebuggingEnabled", "()Z", boolean(false));
   r.bind(dbg, "lastDebuggerActivity", "()J", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_long(-1); });
   r.bind(dbg, "getMethodTracingMode", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
@@ -844,12 +875,40 @@ void register_os(rt::NativeRegistry& r) {
       if (k == name) return rt.new_string_utf8(v);
     }
     return kNull;
-  }, S::kPartial, "environnement Android fixe, jamais celui de l'hôte");
+  }, S::kPartial, "environnement Android, jamais celui de l'hôte");
   r.bind(lx, "environ", "()[Ljava/lang/String;", [](Runtime& rt, NativeArgs&) -> uint64_t {
     std::vector<std::string> items;
     for (const auto& [k, v] : android_environment()) items.push_back(k + "=" + v);
     return string_array(rt, items);
-  }, S::kPartial, "environnement Android fixe, jamais celui de l'hôte");
+  }, S::kPartial, "environnement Android, jamais celui de l'hôte");
+  // setenv(3) and unsetenv(3): EINVAL for an empty name or one with '='.
+  auto env_name = [](Runtime& rt, Handle h, const char* function) {
+    if (h == kNull) rt.throw_npe("name == null");
+    std::string name = rt.string_utf8(h);
+    if (name.empty() || name.find('=') != std::string::npos) throw_errno(rt, function, 22);
+    return name;
+  };
+  r.bind(lx, "setenv", "(Ljava/lang/String;Ljava/lang/String;Z)V", [env_name](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::string name = env_name(rt, a.h(1), "setenv");
+    if (a.h(2) == kNull) rt.throw_npe("value == null");
+    std::string value = rt.string_utf8(a.h(2));
+    Environment& e = environment();
+    std::lock_guard<std::mutex> guard(e.lock);
+    for (auto& [k, v] : e.vars) {
+      if (k != name) continue;
+      if (a.i32(3)) v = value;  // overwrite
+      return 0;
+    }
+    e.vars.emplace_back(name, value);
+    return 0;
+  });
+  r.bind(lx, "unsetenv", "(Ljava/lang/String;)V", [env_name](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::string name = env_name(rt, a.h(1), "unsetenv");
+    Environment& e = environment();
+    std::lock_guard<std::mutex> guard(e.lock);
+    std::erase_if(e.vars, [&](const auto& kv) { return kv.first == name; });
+    return 0;
+  });
   auto ident = [](int32_t v) { return [v](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_int(v); }; };
   r.bind(lx, "getpid", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_int(int32_t(GetCurrentProcessId())); });
   r.bind(lx, "gettid", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_int(int32_t(GetCurrentThreadId())); });

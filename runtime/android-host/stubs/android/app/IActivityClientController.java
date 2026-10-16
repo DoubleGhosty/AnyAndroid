@@ -13,4 +13,6 @@ public interface IActivityClientController {
   }
 
   void setTaskDescription(IBinder token, ActivityManager.TaskDescription description);
+
+  void activityResumed(IBinder token, boolean handleSplashScreenExit);
 }

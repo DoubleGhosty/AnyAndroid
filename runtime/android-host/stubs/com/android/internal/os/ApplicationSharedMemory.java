@@ -6,4 +6,6 @@ public class ApplicationSharedMemory {
   }
 
   public static void setInstance(ApplicationSharedMemory instance) {}
+
+  public void writeSystemFeaturesCache(int[] versions) {}
 }

@@ -54,6 +54,14 @@ final class Reflect {
     }
   }
 
+  static Object getStatic(Class<?> cls, String name) {
+    try {
+      return field(cls, name).get(null);
+    } catch (IllegalAccessException e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
   static void setStatic(Class<?> cls, String name, Object value) {
     try {
       field(cls, name).set(null, value);

@@ -27,8 +27,12 @@ public final class SystemServer {
   public static void start(String apkPath) {
     // What ApplicationThread.bindApplication installs before anything else
     // (the shared memory is the one system_server would have created).
-    ApplicationSharedMemory.setInstance(ApplicationSharedMemory.create());
-    SystemFeaturesCache.setInstance(new SystemFeaturesCache(SystemFeatures.list()));
+    ApplicationSharedMemory memory = ApplicationSharedMemory.create();
+    ApplicationSharedMemory.setInstance(memory);
+    SystemFeaturesCache features = new SystemFeaturesCache(SystemFeatures.list());
+    SystemFeaturesCache.setInstance(features);
+    // What bindApplication reads back from the shared memory (SystemServer.startOtherServices).
+    memory.writeSystemFeaturesCache(features.getSdkFeatureVersions());
     PackageService packages = new PackageService(apkPath);
     ServiceManager.addService("package", packages);
     ServiceManager.addService("permissionmgr", new PermissionService(packages));

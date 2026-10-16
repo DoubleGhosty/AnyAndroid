@@ -15,6 +15,7 @@
 #include "common/log.h"
 #include "common/text.h"
 #include "framework-bridge/internal.h"
+#include "framework-bridge/handles.h"
 #include "image/aosp.h"
 #include "vfs/vfs.h"
 
@@ -134,6 +135,24 @@ void register_log_clock_trace(rt::NativeRegistry& r) {
     return write_event(a.i32(0), e, true);
   }, S::kPartial, "événement tenu dans le journal de débogage");
 
+  // DebugStore: the crash-diagnostics ring buffer of framework events, kept in
+  // AnyAndroid's debug log (the attribute lists are not copied).
+  const char* store = "Lcom/android/internal/os/DebugStore;";
+  static std::atomic<int64_t> next_event{1};
+  r.bind(store, "recordEventNative", "(Ljava/lang/String;Ljava/util/List;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    log::debug("debugstore", a.h(0) ? rt.string_utf8(a.h(0)) : "?");
+    return 0;
+  }, S::kPartial, "événement tenu dans le journal de débogage");
+  r.bind(store, "beginEventNative", "(Ljava/lang/String;Ljava/util/List;)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int64_t id = next_event++;
+    log::debug("debugstore", "début " + std::to_string(id) + " " + (a.h(0) ? rt.string_utf8(a.h(0)) : "?"));
+    return rt::ret_long(id);
+  }, S::kPartial, "événement tenu dans le journal de débogage");
+  r.bind(store, "endEventNative", "(JLjava/util/List;)V", [](Runtime&, NativeArgs& a) -> uint64_t {
+    log::debug("debugstore", "fin " + std::to_string(a.i64(0)));
+    return 0;
+  }, S::kPartial, "événement tenu dans le journal de débogage");
+
   const char* stats = "Landroid/util/StatsLog;";
   r.bind(stats, "writeImpl", "([BII)V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; }, S::kStub,
          "écriture des métriques StatsLog ignorée");
@@ -149,6 +168,25 @@ void register_log_clock_trace(rt::NativeRegistry& r) {
     auto now = std::chrono::system_clock::now().time_since_epoch();
     return rt::ret_long(std::chrono::duration_cast<std::chrono::microseconds>(now).count());
   });
+
+  // Perfetto data sources (ProtoLog, window tracing...): there is no tracing
+  // service, so a data source registers but never gets an instance to write
+  // to; its trace loop never runs.
+  const char* ds = "Landroid/tracing/perfetto/DataSource;";
+  static auto* sources = new HandleTable<std::string>(0x1113);  // never destroyed
+  static const int64_t source_free = register_free_function([](int64_t h) { sources->remove(h); });
+  r.bind(ds, "nativeCreate", "(Landroid/tracing/perfetto/DataSource;Ljava/lang/String;)J",
+         [](Runtime& rt, NativeArgs& a) -> uint64_t {
+           std::string name = a.h(1) ? rt.string_utf8(a.h(1)) : "";
+           return rt::ret_long(sources->add(std::make_shared<std::string>(std::move(name))));
+         }, S::kPartial, "pas de service de traçage : jamais d'instance active");
+  r.bind(ds, "nativeGetFinalizer", "()J", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_long(source_free); });
+  r.bind(ds, "nativeRegisterDataSource", "(JIZZZ[B)V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; }, S::kPartial,
+         "pas de service de traçage : jamais d'instance active");
+  r.bind(ds, "nativePerfettoDsTraceIterateBegin", "(J)Z", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
+  r.bind(ds, "nativeFlushAll", "(J)V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
+  r.bind("Landroid/tracing/perfetto/Producer;", "nativePerfettoProducerInit", "(II)V",
+         [](Runtime&, NativeArgs&) -> uint64_t { return 0; }, S::kPartial, "pas de service de traçage");
 
   // Tracing (Perfetto/atrace) is not available: tags are never enabled.
   const char* trace = "Landroid/os/Trace;";

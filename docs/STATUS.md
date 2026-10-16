@@ -236,8 +236,17 @@ Ce qui passe, avec le vrai code d'Android 17 :
   - Natives Java d'`android.graphics.Bitmap` (`nativeCreate`, `nativeGetPixel`, `nativeSetPixel`, `nativeRowBytes`, `nativeErase`, `nativeCopy`, `nativeSameAs`, cycle de vie et allocation) ;
   - Natives Java d'`android.graphics.ImageDecoder` (`nCreate` sur assets décompressés d'APK, flux et mémoire, `nDecodeBitmap`, `nGetSampledSize`).
 
+**J5 en cours : démarrage par les vrais gestionnaires.** `aa.host.ProcessLauncher` lance
+`ActivityThread.main` ; `attach` appelle `IActivityManager.attachApplication`, le lanceur répond
+par `bindApplication` (avec les arguments de `system_server` pour une application ordinaire) puis
+par une `ClientTransaction` (`LaunchActivityItem`, `ResumeActivityItem`). Sur la vraie boucle
+principale, `handleBindApplication` crée l'`Application`, puis `TransactionExecutor` exécute
+`handleLaunchActivity` et `handleResumeActivity` : `onCreate`, `onStart`, `onResume`. Le chemin
+s'arrête à `WindowManager.addView` → `ViewRootImpl` (`SurfaceControl`), début de la fenêtre
+logique.
+
 **Suite prévue, dans l'ordre** :
-1. J5 : démarrage par `handleBindApplication` … `handleResumeActivity`, fenêtre logique. Le
+1. J5, suite : démarrage par `handleBindApplication` … `handleResumeActivity`, fenêtre logique. Le
    pilote de `Looper` à horloge virtuelle esquissé plus tôt (`looper_driver.cpp`) a été retiré :
    ses natives n'existent pas dans le `MessageQueue` d'Android 17, et son mode piloté rendait la
    main sans attendre (boucle active). Le pilotage déterministe des tests est à reconcevoir sur
