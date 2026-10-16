@@ -130,6 +130,9 @@ struct ThrowablePeer final : NativePeer {
   std::vector<std::string> stack;
   Handle stack_trace = kNull;     // StackTraceElement[] once built or set (libcore mode)
   std::vector<Handle> suppressed;  // addSuppressed
+  // Throwable(String, Throwable, boolean, boolean): suppression disabled, no
+  // stack trace (neither captured nor settable).
+  bool suppression_enabled = true, stack_writable = true;
   void trace(std::vector<Handle>& out) const override {
     out.push_back(cause);
     out.push_back(stack_trace);

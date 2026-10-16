@@ -54,5 +54,14 @@
 - Le moteur de texte garde sa mesure (port du scaler FreeType de Skia, ADR-007) ; Skia dessine avec
   son propre scaler. Un test unitaire vérifie que les deux donnent les mêmes avances ; la mesure
   pourra passer à Skia si elles divergent un jour.
-- Les natives d'état de `Canvas` (matrice, découpe) et celles de `Path`, `Matrix`, `Region` du pont
-  passeront progressivement sur `SkCanvas`, `SkPath`, `SkMatrix` et `SkRegion`.
+- `N32` est configuré en RGBA (`SK_R32_SHIFT` 0, l'ordre d'Android ; Skia choisirait BGRA sous
+  Windows) : les pixels des bitmaps et des tampons de fenêtre ont les octets qu'Android donne aux
+  applications (`copyPixelsToBuffer`), et la présentation dans une fenêtre Win32 (J8) les
+  réordonne.
+- Les natives d'état de `Canvas` (matrice, découpe) sont passées sur `SkCanvas`. Celles de `Path`,
+  `Matrix` et `Region` gardent leur modèle (formules de Skia réécrites) et sont converties en
+  `SkPath`, `SkMatrix` et `SkRegion` au moment de dessiner ; elles pourront passer sur Skia
+  elles aussi.
+- Les effets des `Paint` (`Shader`, `ColorFilter`, `MaskFilter`, `PathEffect`) sont des objets
+  Skia ; la `Paint` en prend une référence quand on les pose, comme celle de HWUI. Les effets AGSL
+  (`RuntimeShader`, `RuntimeColorFilter`, `RuntimeXfermode`) restent à brancher sur SkSL.

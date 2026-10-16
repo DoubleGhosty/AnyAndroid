@@ -42,23 +42,23 @@ le nombre de fichiers.
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
 | G2    | Vraie libcore d'AOSP (Android 17)                           | 92 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 71 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J2 et J4 faits, J5 presque fini (première traversée complète jusqu'au dessin logiciel), J6 (texte : mesure et coupure de lignes) bien avancé, J7 (moteur 2D) à commencer |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 76 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J2 et J4 faits, J5 atteint (démarrage par les vrais gestionnaires jusqu'à la première image), J6 (texte) bien avancé, J7 : la fenêtre est dessinée par le Skia d'AOSP (image écrite en PNG), J8 (fenêtre Win32) à faire |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
-| **Total** | **Android natif sur Windows**                          | **≈ 45 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
+| **Total** | **Android natif sur Windows**                          | **≈ 47 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
 
 ```
 G0 ██████████ 100 %
 G1 ██████████ 100 %
 G2 █████████░  92 %
-G3 ███████░░░  71 %
+G3 ███████▌░░  76 %
 G4 ░░░░░░░░░░   0 %
 G5 ░░░░░░░░░░   0 %
    ───────────────
-   ████▌░░░░░ ≈ 45 % vers « Android natif sur Windows »
+   ████▋░░░░░ ≈ 47 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 36 suites de tests et 138 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 37 suites de tests et 162 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.
@@ -125,9 +125,13 @@ G5 ░░░░░░░░░░   0 %
   à l'échelle des rayons de `SkRRect`) et `Path.approximate` à l'identique de HWUI (les
   interpolateurs d'animation en dépendent) ; `PathParser` (chemins SVG de `VectorDrawable` :
   analyse et messages d'erreur de HWUI, arcs en coniques comme `SkPath::arcTo`, morphing) ;
-  `Matrix` avec les formules de `SkMatrix` ; l'état de `Canvas` sans pixels (pile de
-  sauvegardes de HWUI avec ses sauvegardes partielles, matrice courante, bornes de découpe
-  arrondies comme `SkCanvas`, cible bitmap), le dessin attendant le moteur de rendu (J7) ;
+  `Matrix` avec les formules de `SkMatrix` ; `Canvas` et `BaseCanvas` sur un vrai `SkCanvas`
+  du Skia d'Android 17 ([ADR-008](adr/ADR-008-moteur-2d.md)), port de `SkiaCanvas` de HWUI
+  (sauvegardes partielles et découpes persistantes, calques, ombres de `setShadowLayer`,
+  `PaintFlagsDrawFilter`, formes, chemins, régions, bitmaps avec la mise à l'échelle des
+  densités, 9-patchs en treillis, maillages, texte par la mise en page du moteur de texte puis
+  des passes de glyphes, soulignés et barrés, texte sur un chemin) ; les effets des `Paint`
+  (`BitmapShader`, dégradés, `ComposeShader`, filtres de couleur, de masque, effets de chemin) ;
   `Region` sur le modèle de `SkRegion` (bandes canoniques, opérations booléennes, itération et
   `toString` de Skia) ; l'arbre de `VectorDrawable` (groupes, chemins, valeurs par défaut et
   disposition des propriétés de HWUI, possédé par `VirtualRefBasePtr`) ; `Font`,
@@ -250,8 +254,12 @@ compris (`BoringLayout` et `StaticLayout`). `relayoutWindow` crée la surface c�
 (Android 17 gère la mise en page de la fenêtre localement : `SurfaceControl`, transactions et
 couches logiques), `IWindowSession.relayout` renvoie les cadres de l'écran avec une
 `WindowConfiguration` plein écran, puis `BLASTBufferQueue` fournit la `Surface`. La mise en page se
-fait aux vraies tailles et `drawSoftware` verrouille la surface : le premier appel de dessin
-(`Canvas.drawRect` du fond de `DecorView`) est le début de J7, le moteur 2D logiciel.
+fait aux vraies tailles et `drawSoftware` verrouille la surface : **la fenêtre est dessinée**
+par le Skia d'AOSP dans le tampon de la `Surface` (fond de `DecorView`, barre d'action avec son
+titre, bouton Material avec son ombre et son texte), l'image est publiée
+(`unlockCanvasAndPost`), la synchronisation de `SurfaceSyncGroup` se termine et l'activité passe
+au premier plan. `exec --frame-out <fichier.png>` écrit chaque image publiée ; le test e2e
+`process-launch` vérifie ce démarrage et l'image de 1080×1920 qu'il produit.
 
 **J6 bien avancé : moteur de texte.** Android mesure le texte avec minikin, sur HarfBuzz (mise en
 forme) et sur FreeType via Skia (métriques et avances, avec l'indication `FT_LOAD_TARGET_NORMAL`
@@ -263,14 +271,20 @@ natives de mesure de `Paint` sont branchées, ainsi que `MeasuredText` et `LineB
 gloutonne et optimale de minikin, frontières de lignes de l'ICU4J de la libcore, césure aux traits
 d'union et tirets conditionnels (les motifs `.hyb` attendent `Hyphenator.init`).
 
+**J7 : moteur 2D, le Skia d'Android.** Les natives de dessin reprennent `SkiaCanvas` de HWUI
+sur un `SkCanvas` posé sur les pixels des bitmaps et des tampons de fenêtre (RGBA prémultiplié,
+l'ordre d'Android) ; les polices du moteur de texte deviennent des `SkTypeface` FreeType comme
+dans `MinikinFontSkia` ([ADR-008](adr/ADR-008-moteur-2d.md)).
+
 **Suite prévue, dans l'ordre** :
-1. J7 : moteur 2D logiciel (choix à fixer par un ADR) derrière les natives de dessin de
-   `Canvas`/`BaseCanvas`, dans le tampon de la `Surface` ; image de la fenêtre écrite en PNG en
-   mode sans fenêtre, puis présentée dans une fenêtre Win32 (J8). Test de bout en bout du
-   démarrage par les gestionnaires (J5) sur l'image produite.
-2. J6, fin : `TextRunShaper`/`PositionedGlyphs` et les glyphes pour le dessin (J7), motifs de
-   césure. Le pilotage déterministe des tests est à
-   concevoir sur l'horloge commune (`common/clock.h`).
+1. J8 : présenter les images publiées dans une fenêtre Win32 (un compositeur minimal pour les
+   couches de `SurfaceControl`), puis les entrées (`InputChannel` : souris, clavier) vers
+   `ViewRootImpl`.
+2. J7, fin : `RuntimeShader` et `RuntimeColorFilter` (AGSL, utilisés par les ondulations de
+   Material), `drawGlyphs`, les rotations 3D de `RenderNode`, et des sondes de pixels dans le
+   test `process-launch`.
+3. J6, fin : `TextRunShaper`/`PositionedGlyphs`, motifs de césure. Le pilotage déterministe des
+   tests est à concevoir sur l'horloge commune (`common/clock.h`).
 
 **À savoir pour la suite** :
 - dans le bac à sable `/data`, `unlink` et `rename` d'un fichier ouvert suivent Linux (nom libéré
@@ -305,8 +319,9 @@ vrais gestionnaires d'`ActivityThread`.
 2. **J3-J5** (en cours) : services système v1 et démarrage d'une application jusqu'à `onResume`,
    en direct (J4, fait) puis par `handleBindApplication` … `handleResumeActivity` et la fenêtre
    logique (J5, avancé).
-3. **J6-J8** : texte (J6, bien avancé), rendu logiciel du vrai framework (`drawSoftware`, moteur 2D choisi par
-   l'ADR-007), fenêtre Win32 et entrées.
+3. **J6-J8** : texte (J6, bien avancé), rendu logiciel du vrai framework (J7 : `drawSoftware` sur
+   le Skia d'AOSP, [ADR-008](adr/ADR-008-moteur-2d.md), la fenêtre est dessinée), fenêtre Win32 et
+   entrées (J8).
 4. **J9-J10, sortie de G3** : navigation, puis une application réelle affichée et utilisable :
    un exemple Java sur les widgets du framework, puis `Music` de la GSI (la Calculatrice AOSP
    n'existe pas dans les images d'Android 17).

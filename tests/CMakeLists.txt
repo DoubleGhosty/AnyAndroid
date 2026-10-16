@@ -40,12 +40,14 @@ set(E ${CMAKE_CURRENT_SOURCE_DIR}/e2e)
 # Cross builds run the CLI through their emulator (for example Wine).
 set(CLI ${CMAKE_CROSSCOMPILING_EMULATOR} $<TARGET_FILE:anyandroid>)
 
-# aa_e2e(<nom> CODE <n> [GOLDEN <fichier>] [MATCH <regex>] ARGS <arguments...>)
+# aa_e2e(<nom> CODE <n> [GOLDEN <fichier>] [MATCH <regex>] [FRAME <largeur>x<hauteur>] ARGS <arguments...>)
 # The `exec --bootclasspath` tests get their own data directory (--data-dir:
 # /data and /sdcard of the emulated process), emptied before each run, so that
 # they stay independent under `ctest -j` and a failed run leaves nothing behind.
+# FRAME: the last frame a window posts is written as a PNG (exec --frame-out),
+# which must exist with that size.
 function(aa_e2e name)
-  cmake_parse_arguments(T "" "CODE;GOLDEN;MATCH" "ARGS" ${ARGN})
+  cmake_parse_arguments(T "" "CODE;GOLDEN;MATCH;FRAME" "ARGS" ${ARGN})
   set(args ${T_ARGS})
   set(defs "")
   list(GET args 0 command)
@@ -53,6 +55,11 @@ function(aa_e2e name)
     set(data ${CMAKE_CURRENT_BINARY_DIR}/e2e-data/${name})
     list(INSERT args 1 --data-dir ${data})
     list(APPEND defs -DFRESH_DIR=${data})
+  endif()
+  if(T_FRAME)
+    set(frame ${CMAKE_CURRENT_BINARY_DIR}/e2e-${name}.png)
+    list(INSERT args 1 --frame-out ${frame})
+    list(APPEND defs -DFRAME=${frame} -DFRAME_SIZE=${T_FRAME})
   endif()
   string(REPLACE ";" "|" cmd "${CLI};${args}")
   list(APPEND defs -DCMD=${cmd} -DEXPECT_CODE=${T_CODE} -DACTUAL=${CMAKE_CURRENT_BINARY_DIR}/e2e-${name}.txt)
@@ -124,6 +131,11 @@ if(AA_LIBCORE_DIR)
       aa_e2e(launch CODE 0 GOLDEN launch.txt
         ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
              ${S}/basic-activity.apk aa.host.Launcher com.anyandroid.samples.basic)
+      # J5 and J7: launch by ActivityThread's real handlers, the window's first
+      # frame drawn in software (Skia) and written as a PNG.
+      aa_e2e(process-launch CODE 0 GOLDEN process-launch.txt FRAME 1080x1920
+        ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
+             ${S}/basic-activity.apk aa.host.ProcessLauncher com.anyandroid.samples.basic)
     endif()
     # G3 entry point: utility classes of the real framework.jar.
     aa_e2e(framework-demo CODE 0 GOLDEN framework-demo.txt

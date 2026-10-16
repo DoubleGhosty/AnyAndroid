@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "dex-engine/runtime.h"
 #include "framework-bridge/ui_model.h"
@@ -120,6 +121,20 @@ void register_libcore_natives(rt::NativeRegistry& registry);
 // libcore expects to be ready first (java.lang.System before anything that
 // reaches dalvik.system.VMRuntime). Call inside a Runtime::Scope.
 void start_libcore(rt::Runtime& rt);
+// A frame posted to a window's buffer queue (Surface.unlockCanvasAndPost):
+// width x height pixels, RGBA bytes premultiplied (Skia's N32 as Android
+// lays it out), rows packed. A copy, for the host to show or record.
+struct PostedFrame {
+  int32_t layer_id = 0;
+  std::string layer_name;
+  int64_t frame_number = 0;
+  int32_t width = 0, height = 0;
+  bool opaque = false;
+  std::shared_ptr<const std::vector<uint32_t>> pixels;
+};
+// Called on the posting thread for every frame; none by default (the frames
+// are then not copied).
+void set_frame_listener(std::function<void(const PostedFrame&)> listener);
 // Opaque sun.misc.Unsafe offset of an instance field slot (Field.getOffset()).
 int64_t unsafe_field_offset(uint32_t slot);
 

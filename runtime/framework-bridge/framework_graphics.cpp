@@ -492,10 +492,19 @@ void register_framework_graphics(rt::NativeRegistry& r) {
   register_framework_path(r);
   register_framework_matrix(r);
   register_framework_images(r);
+  register_framework_effects(r);
   register_framework_canvas(r);
   register_framework_region(r);
   register_framework_vector_drawable(r);
   register_framework_surface(r);
+}
+
+bool color_space_params(int64_t handle, std::array<float, 7>& transfer, std::array<float, 9>& to_xyz) {
+  auto c = tables().color_spaces.get(handle);
+  if (!c) return false;
+  transfer = c->transfer;
+  to_xyz = c->to_xyz;
+  return true;
 }
 
 }  // namespace aa::bridge

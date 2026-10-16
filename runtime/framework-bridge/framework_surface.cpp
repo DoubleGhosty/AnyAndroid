@@ -98,7 +98,7 @@ struct BufferQueue {
   std::shared_ptr<Layer> layer;
   int32_t width = 0, height = 0, format = 0;
   int64_t frame_number = 0;          // of the last frame posted (acquired at once)
-  std::vector<uint32_t> pixels;      // RGBA, width x height, rows packed
+  std::shared_ptr<PixelBuffer> pixels = std::make_shared<PixelBuffer>();  // width x height
   bool has_frame = false;            // a frame of the current size was posted
   std::vector<std::function<void()>> next_frame_changes;  // mergeWithNextTransaction
   Callbacks next_frame_callbacks;
@@ -301,6 +301,17 @@ int32_t rect_field(Runtime& rt, Handle rect, const char* name) {
   return int32_t(o.fields.at(f->slot));
 }
 
+// The host's frame listener (set_frame_listener).
+std::mutex frame_listener_lock;
+std::shared_ptr<std::function<void(const PostedFrame&)>>& frame_listener_slot() {
+  static auto* slot = new std::shared_ptr<std::function<void(const PostedFrame&)>>;  // never destroyed
+  return *slot;
+}
+std::shared_ptr<std::function<void(const PostedFrame&)>> frame_listener() {
+  std::lock_guard<std::mutex> guard(frame_listener_lock);
+  return frame_listener_slot();
+}
+
 void register_buffer_queue(rt::NativeRegistry& r) {
   const char* bq = "Landroid/graphics/BLASTBufferQueue;";
   r.bind(bq, "nativeCreate", "(Ljava/lang/String;Z)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
@@ -326,7 +337,8 @@ void register_buffer_queue(rt::NativeRegistry& r) {
       if (q->width != int32_t(w) || q->height != int32_t(h)) {
         q->width = int32_t(w);
         q->height = int32_t(h);
-        q->pixels.assign(size_t(w) * size_t(h), 0);
+        // A new buffer: a canvas still drawing keeps the old one.
+        q->pixels = std::make_shared<PixelBuffer>(PixelBuffer{std::vector<uint32_t>(size_t(w) * size_t(h), 0)});
         q->has_frame = false;
       }
     }
@@ -426,11 +438,16 @@ void register_buffer_queue(rt::NativeRegistry& r) {
            Handle dirty_rect = a.h(3);
            int32_t width, height, format;
            bool has_frame;
+           PixelTarget target;
            {
              std::lock_guard<std::mutex> guard(s->queue->lock);
              width = s->queue->width, height = s->queue->height, format = s->queue->format;
              has_frame = s->queue->has_frame;
+             target.pixels = s->queue->pixels;
            }
+           target.width = width;
+           target.height = height;
+           target.opaque = opaque_format(format);
            {
              std::lock_guard<std::mutex> guard(s->lock);
              if (s->locked) rt.throw_new("Ljava/lang/IllegalArgumentException;", "surface déjà verrouillée");
@@ -444,7 +461,7 @@ void register_buffer_queue(rt::NativeRegistry& r) {
              dirty[3] = std::min(height, rect_field(rt, dirty_rect, "bottom"));
              if (dirty[0] >= dirty[2] || dirty[1] >= dirty[3]) dirty[0] = dirty[1] = dirty[2] = dirty[3] = 0;
            }
-           canvas_target_surface(rt, a.h(2), width, height, opaque_format(format), dirty_rect != kNull ? dirty : nullptr);
+           canvas_target_surface(rt, a.h(2), target, dirty_rect != kNull ? dirty : nullptr);
            if (dirty_rect != kNull) {
              rt::Object& o = rt.nonnull(dirty_rect, "Rect");
              set_int(o, "left", dirty[0]);
@@ -452,12 +469,14 @@ void register_buffer_queue(rt::NativeRegistry& r) {
              set_int(o, "right", dirty[2]);
              set_int(o, "bottom", dirty[3]);
            }
-           return rt::ret_long(surfaces().add(s));  // another reference, released after the post
-         }, S::kPartial, "dessin logiciel à venir (J7) : le tampon reste vide");
+           // The same surface with one more reference, released after the post.
+           surfaces().retain(a.i64(0));
+           return rt::ret_long(a.i64(0));
+         });
   r.bind(sf, "nativeUnlockCanvasAndPost", "(JLandroid/graphics/Canvas;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto s = surfaces().get(a.i64(0));
     if (!s || !s->queue) rt.throw_new("Ljava/lang/IllegalArgumentException;", "");
-    canvas_target_surface(rt, a.h(2), 0, 0, false, nullptr);
+    canvas_target_surface(rt, a.h(2), PixelTarget{}, nullptr);
     {
       std::lock_guard<std::mutex> guard(s->lock);
       if (!s->locked) rt.throw_new("Ljava/lang/IllegalStateException;", "surface non verrouillée");
@@ -465,15 +484,34 @@ void register_buffer_queue(rt::NativeRegistry& r) {
     }
     std::vector<std::function<void()>> changes;
     Callbacks callbacks;
+    std::shared_ptr<std::function<void(const PostedFrame&)>> listener = frame_listener();
+    PostedFrame frame;
+    std::shared_ptr<Layer> layer;
     {
       std::lock_guard<std::mutex> guard(s->queue->lock);
       s->queue->frame_number++;
       s->queue->has_frame = true;
       changes.swap(s->queue->next_frame_changes);
       callbacks.take(s->queue->next_frame_callbacks);
+      if (listener) {
+        frame.frame_number = s->queue->frame_number;
+        frame.width = s->queue->width;
+        frame.height = s->queue->height;
+        frame.opaque = opaque_format(s->queue->format);
+        frame.pixels = std::make_shared<const std::vector<uint32_t>>(s->queue->pixels->data);
+        layer = s->queue->layer;
+      }
     }
     for (auto& change : changes) change();
     run_callbacks(rt, callbacks);
+    if (listener) {
+      if (layer) {
+        std::lock_guard<std::mutex> guard(layer->lock);
+        frame.layer_id = layer->id;
+        frame.layer_name = layer->name;
+      }
+      (*listener)(frame);
+    }
     return 0;
   }, S::kPartial, "image publiée sans compositeur (présentation : J8)");
 }
@@ -508,6 +546,12 @@ void bind_layer_property(rt::NativeRegistry& r, const char* cls, const char* nam
 }
 
 }  // namespace
+
+void set_frame_listener(std::function<void(const PostedFrame&)> listener) {
+  std::lock_guard<std::mutex> guard(frame_listener_lock);
+  frame_listener_slot() =
+      listener ? std::make_shared<std::function<void(const PostedFrame&)>>(std::move(listener)) : nullptr;
+}
 
 void register_framework_surface(rt::NativeRegistry& r) {
   const char* der = "Landroid/view/DisplayEventReceiver;";
@@ -789,6 +833,12 @@ void register_framework_surface(rt::NativeRegistry& r) {
     for (auto& change : src->changes) dst->changes.push_back(std::move(change));
     src->changes.clear();
     dst->callbacks.take(src->callbacks);
+    return 0;
+  });
+  // Transaction::sanitize drops what the sending process may not change
+  // (privileged layer flags...): the changes of an application are kept.
+  r.bind(sc, "nativeSanitize", "(JII)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    transaction(rt, a.i64(0));
     return 0;
   });
 

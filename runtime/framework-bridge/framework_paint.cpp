@@ -16,6 +16,7 @@
 
 #include "common/text.h"
 #include "framework-bridge/handles.h"
+#include "framework-bridge/skia_bridge.h"
 #include "text/layout.h"
 
 namespace aa::bridge {
@@ -45,7 +46,12 @@ struct PaintState {
   int32_t start_hyphen = 0, end_hyphen = 0;
   int32_t locale_list_id = 0;
   std::u16string font_features;
-  int64_t typeface = 0, shader = 0, color_filter = 0, mask_filter = 0, path_effect = 0, xfermode = 0;
+  int64_t typeface = 0, xfermode = 0;
+  // The effects, referenced when set (HWUI's Paint holds the Skia objects).
+  sk_sp<SkShader> shader;
+  sk_sp<SkColorFilter> color_filter;
+  sk_sp<SkMaskFilter> mask_filter;
+  sk_sp<SkPathEffect> path_effect;
   int32_t blend_mode = 3;  // SRC_OVER
   float shadow_radius = 0, shadow_dx = 0, shadow_dy = 0;
   int64_t shadow_color_space = 0, shadow_color = 0;
@@ -621,6 +627,83 @@ text::Paint minikin_paint_of(Runtime& rt, int64_t paint) { return minikin_paint(
 
 uint32_t paint_locale_list_id(Runtime& rt, int64_t paint) { return uint32_t(snapshot(rt, paint).locale_list_id); }
 
+int32_t SkiaPaint::java_flags() const {
+  int32_t flags = paint.isAntiAlias() ? kAntiAlias : 0;
+  if (paint.isDither()) flags |= kDither;
+  if (filter_bitmap) flags |= kFilterBitmap;
+  if (underline) flags |= kUnderline;
+  if (strike_thru) flags |= kStrikeThru;
+  if (font.isEmbolden()) flags |= kFakeBold;
+  if (font.isLinearMetrics()) flags |= kLinearText;
+  if (font.isSubpixel()) flags |= kSubpixelText;
+  if (font.isEmbeddedBitmaps()) flags |= kEmbeddedBitmapText;
+  if (font.isForceAutoHinting()) flags |= kForceAutoHinting;
+  return flags;
+}
+
+void SkiaPaint::set_java_flags(int32_t flags) {
+  paint.setAntiAlias((flags & kAntiAlias) != 0);
+  paint.setDither((flags & kDither) != 0);
+  font.setEmbolden((flags & kFakeBold) != 0);
+  font.setLinearMetrics((flags & kLinearText) != 0);
+  font.setSubpixel((flags & kSubpixelText) != 0);
+  font.setEmbeddedBitmaps((flags & kEmbeddedBitmapText) != 0);
+  font.setForceAutoHinting((flags & kForceAutoHinting) != 0);
+  font.setEdging((flags & kAntiAlias) ? SkFont::Edging::kAntiAlias : SkFont::Edging::kAlias);
+  filter_bitmap = (flags & kFilterBitmap) != 0;
+  underline = (flags & kUnderline) != 0;
+  strike_thru = (flags & kStrikeThru) != 0;
+}
+
+SkiaPaint skia_paint_of(Runtime& rt, int64_t handle, bool with_text) {
+  SkiaPaint p;
+  if (handle == 0) return p;
+  PaintState s = snapshot(rt, handle);
+  if (s.wide_color) {
+    p.paint.setColor(color4f_of_long(s.color_long), skia_color_space(rt, s.color_space).get());
+  } else {
+    p.paint.setColor(SkColor(uint32_t(s.color)));
+  }
+  // Paint.Style, Cap and Join use Skia's order; out of range values are
+  // refused by Java's enums.
+  p.paint.setStyle(SkPaint::Style(std::clamp(s.style, 0, 2)));
+  p.paint.setStrokeCap(SkPaint::Cap(std::clamp(s.cap, 0, 2)));
+  p.paint.setStrokeJoin(SkPaint::Join(std::clamp(s.join, 0, 2)));
+  p.paint.setStrokeWidth(s.stroke_width);  // negative: ignored, as SkPaint
+  p.paint.setStrokeMiter(s.stroke_miter);
+  if (s.xfermode == 0) p.paint.setBlendMode(SkBlendMode(std::clamp(s.blend_mode, 0, int(SkBlendMode::kLastMode))));
+  p.paint.setShader(s.shader);
+  p.paint.setColorFilter(s.color_filter);
+  p.paint.setMaskFilter(s.mask_filter);
+  p.paint.setPathEffect(s.path_effect);
+  p.set_java_flags(s.flags);
+  if (s.text_size >= 0) p.font.setSize(s.text_size);
+  p.font.setScaleX(s.text_scale_x);
+  p.font.setSkewX(s.text_skew_x);
+  p.font.setHinting(s.hinting == 0 ? SkFontHinting::kNone : SkFontHinting::kNormal);
+  p.align = s.align;
+  // Paint.setShadowLayer: BlurDrawLooper::Make, Blur::convertRadiusToSigma.
+  if (s.shadow_radius > 0) {
+    ShadowLooper l;
+    l.color = color4f_of_long(s.shadow_color);
+    if (sk_sp<SkColorSpace> cs = skia_color_space(rt, s.shadow_color_space)) {
+      SkPaint tmp;
+      tmp.setColor(l.color, cs.get());  // converted to sRGB
+      l.color = tmp.getColor4f();
+    }
+    l.sigma = 0.57735f * s.shadow_radius + 0.5f;
+    l.offset = {s.shadow_dx, s.shadow_dy};
+    p.looper = l;
+  }
+  if (with_text) {
+    p.minikin = minikin_paint(rt, s);
+    p.start_hyphen = start_hyphen_of(s);
+    p.end_hyphen = end_hyphen_of(s);
+    p.run_flag = run_flag_of(s);
+  }
+  return p;
+}
+
 void register_framework_paint(rt::NativeRegistry& r) {
   const char* p = "Landroid/graphics/Paint;";
   static const int64_t paint_free = register_free_function([](int64_t h) { tables().paints.remove(h); });
@@ -714,18 +797,21 @@ void register_framework_paint(rt::NativeRegistry& r) {
     return 0;
   }));
 
-  // Effects: the paint keeps the other native object's handle and, as HWUI,
-  // returns it (0 clears).
-  using HandleField = int64_t PaintState::*;
-  for (const auto& [name, field] : std::initializer_list<std::pair<const char*, HandleField>>{
-           {"nSetShader", &PaintState::shader}, {"nSetColorFilter", &PaintState::color_filter},
-           {"nSetMaskFilter", &PaintState::mask_filter}, {"nSetPathEffect", &PaintState::path_effect}}) {
-    HandleField f = field;
-    r.bind(p, name, "(JJ)J", with_paint([f](PaintState& s, NativeArgs& a) -> uint64_t {
-      s.*f = a.i64(2);
-      return rt::ret_long(s.*f);
-    }), S::kPartial, "référence conservée (effet appliqué au rendu : J7)");
-  }
+  // Effects: the paint takes a reference to the Skia object and, as HWUI,
+  // returns the handle (0 clears).
+  auto set_effect = [&r, p](const char* name, auto resolve, auto field) {
+    r.bind(p, name, "(JJ)J", [resolve, field](Runtime& rt, NativeArgs& a) -> uint64_t {
+      auto value = resolve(rt, a.i64(2));
+      auto pt = paint(rt, a.i64(0));
+      std::lock_guard<std::mutex> guard(pt->lock);
+      pt->s.*field = std::move(value);
+      return rt::ret_long(pt->s.*field ? a.i64(2) : 0);
+    });
+  };
+  set_effect("nSetShader", skia_shader, &PaintState::shader);
+  set_effect("nSetColorFilter", skia_color_filter, &PaintState::color_filter);
+  set_effect("nSetMaskFilter", skia_mask_filter, &PaintState::mask_filter);
+  set_effect("nSetPathEffect", skia_path_effect, &PaintState::path_effect);
   r.bind(p, "nSetXfermode", "(JI)V", with_paint([](PaintState& s, NativeArgs& a) -> uint64_t {
     s.blend_mode = a.i32(2);
     s.xfermode = 0;
@@ -734,7 +820,7 @@ void register_framework_paint(rt::NativeRegistry& r) {
   r.bind(p, "nSetXfermode", "(JJ)V", with_paint([](PaintState& s, NativeArgs& a) -> uint64_t {
     s.xfermode = a.i64(2);
     return 0;
-  }), S::kPartial, "référence conservée (effet appliqué au rendu : J7)");
+  }), S::kPartial, "RuntimeXfermode (AGSL) non appliqué : mélange SRC_OVER");
   r.bind(p, "nSetTypeface", "(JJ)V", with_paint([](PaintState& s, NativeArgs& a) -> uint64_t {
     s.typeface = a.i64(2);
     return 0;

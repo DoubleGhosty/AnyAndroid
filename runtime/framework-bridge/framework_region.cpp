@@ -374,4 +374,10 @@ void register_framework_region(rt::NativeRegistry& r) {
   });
 }
 
+std::vector<std::array<int32_t, 4>> region_rects(Runtime& rt, int64_t handle) {
+  std::vector<std::array<int32_t, 4>> out;
+  for (const IRect& r : rects(copy_of(rt, handle))) out.push_back({r.l, r.t, r.r, r.b});
+  return out;
+}
+
 }  // namespace aa::bridge

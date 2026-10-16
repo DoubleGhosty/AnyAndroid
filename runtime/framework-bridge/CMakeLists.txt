@@ -5,6 +5,7 @@ add_library(aa_bridge STATIC
   bridge.cpp
   framework_appmem.cpp
   framework_canvas.cpp
+  framework_effects.cpp
   framework_fonts.cpp
   framework_graphics.cpp
   framework_images.cpp
@@ -30,6 +31,7 @@ add_library(aa_bridge STATIC
   libcore_regex.cpp
   libcore_zip.cpp
   native_memory.cpp
+  skia_bridge.cpp
   text_services.cpp)
-target_link_libraries(aa_bridge PRIVATE aa_miniz aa_regex)
+target_link_libraries(aa_bridge PRIVATE aa_miniz aa_regex aa_skia)
 target_link_libraries(aa_bridge PUBLIC aa_dex aa_vfs aa_res aa_text)

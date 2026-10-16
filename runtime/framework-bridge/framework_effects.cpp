@@ -1,0 +1,374 @@
+// Paint effects (G3, J7 of ADR-006, ADR-008), each signature checked
+// against the framework.jar of Android 17: Shader (BitmapShader, gradients,
+// ComposeShader), ColorFilter (blend mode, lighting, colour matrix),
+// MaskFilter (blur, emboss, table) and PathEffect, as HWUI's jni/Shader.cpp,
+// ColorFilter.cpp, MaskFilter.cpp and PathEffect.cpp make them with Skia.
+// Paints take a reference when the effect is set (Paint.nSetShader...).
+// Not yet: RuntimeShader and RuntimeColorFilter (AGSL), gainmaps.
+#include <algorithm>
+#include <cstring>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "framework-bridge/handles.h"
+#include "framework-bridge/skia_bridge.h"
+#include "include/core/SkBlurTypes.h"
+#include "include/core/SkColorFilter.h"
+#include "include/core/SkImage.h"
+#include "include/core/SkMaskFilter.h"
+#include "include/core/SkPathEffect.h"
+#include "include/core/SkShader.h"
+#include "include/core/SkTileMode.h"
+#include "include/effects/Sk1DPathEffect.h"
+#include "include/effects/SkBlurMaskFilter.h"
+#include "include/effects/SkCornerPathEffect.h"
+#include "include/effects/SkDashPathEffect.h"
+#include "include/effects/SkDiscretePathEffect.h"
+#include "include/effects/SkGradient.h"
+#include "include/effects/SkTableMaskFilter.h"
+
+namespace aa::bridge {
+
+namespace {
+
+using rt::Handle;
+using rt::kNull;
+using rt::NativeArgs;
+using rt::Runtime;
+
+// uirenderer::ColorFilter: what the Java filter describes, and the Skia
+// instance made from it (in the sRGB working space), remade after a change.
+struct ColorFilterState {
+  enum class Kind { kBlendMode, kLighting, kMatrix } kind = Kind::kBlendMode;
+  SkColor color = 0, mul = 0, add = 0;
+  SkBlendMode mode = SkBlendMode::kSrcOver;
+  std::vector<float> matrix;
+  std::mutex lock;
+  sk_sp<SkColorFilter> instance;
+
+  sk_sp<SkColorFilter> get() {
+    std::lock_guard<std::mutex> guard(lock);
+    if (!instance) {
+      switch (kind) {
+        case Kind::kBlendMode:
+          instance = SkColorFilters::Blend(color, mode);
+          break;
+        case Kind::kLighting:
+          instance = SkColorFilters::Lighting(mul, add);
+          break;
+        case Kind::kMatrix:
+          instance = SkColorFilters::Matrix(matrix.data(), SkColorFilters::Clamp::kNo);
+          break;
+      }
+      if (instance) instance = instance->makeWithWorkingColorSpace(SkColorSpace::MakeSRGB());
+    }
+    return instance;
+  }
+};
+
+template <typename T>
+struct Ref {
+  sk_sp<T> value;
+};
+
+// Kind tags: unique across the runtime (tests/check_handle_kinds.cmake).
+struct Tables {
+  HandleTable<Ref<SkShader>> shaders{0x1122};
+  HandleTable<ColorFilterState> color_filters{0x1123};
+  HandleTable<Ref<SkMaskFilter>> mask_filters{0x1124};
+  HandleTable<Ref<SkPathEffect>> path_effects{0x1125};
+};
+
+Tables& tables() {
+  static auto* t = new Tables;  // never destroyed: handles may be freed at exit
+  return *t;
+}
+
+template <typename T>
+int64_t add(HandleTable<Ref<T>>& table, sk_sp<T> value) {
+  if (!value) return 0;
+  return table.add(std::make_shared<Ref<T>>(Ref<T>{std::move(value)}));
+}
+
+template <typename T>
+sk_sp<T> lookup(Runtime& rt, HandleTable<Ref<T>>& table, int64_t handle, const char* what) {
+  if (handle == 0) return nullptr;
+  auto r = table.get(handle);
+  if (!r) rt.throw_new("Ljava/lang/IllegalStateException;", std::string("[AnyAndroid] ") + what + " invalide");
+  return r->value;
+}
+
+std::shared_ptr<ColorFilterState> color_filter(Runtime& rt, int64_t handle) {
+  auto f = tables().color_filters.get(handle);
+  if (!f) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] ColorFilter invalide");
+  return f;
+}
+
+[[noreturn]] void throw_iae(Runtime& rt, const char* message = "") {
+  rt.throw_new("Ljava/lang/IllegalArgumentException;", message);
+}
+
+// The local matrix of a shader (a Matrix handle; 0: none).
+std::optional<SkMatrix> local_matrix(Runtime& rt, int64_t handle) {
+  if (handle == 0) return std::nullopt;
+  skmatrix::Values v = skmatrix::of(rt, handle);
+  SkMatrix m;
+  m.set9(v.data());
+  return m;
+}
+
+sk_sp<SkShader> with_matrix(sk_sp<SkShader> shader, const std::optional<SkMatrix>& m) {
+  return m ? shader->makeWithLocalMatrix(*m) : shader;
+}
+
+SkTileMode tile_mode(int32_t mode) { return SkTileMode(std::clamp(mode, 0, int(SkTileMode::kLastTileMode))); }
+
+std::vector<float> floats_of(Runtime& rt, Handle array, size_t min_length) {
+  if (array == kNull) rt.throw_npe("float[]");
+  rt::ArrayObject& a = rt.array(array, "float[]");
+  if (a.width != 4) throw_iae(rt);
+  if (a.length < min_length) rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "");
+  std::vector<float> out(a.length);
+  std::memcpy(out.data(), a.data.data(), size_t(a.length) * 4);
+  return out;
+}
+
+// AutoSkGradient: Color longs, optional positions (at least one per colour)
+// and premultiplied interpolation, as gradients before Skia's newer default.
+struct Gradient {
+  std::vector<SkColor4f> colors;
+  std::vector<float> positions;
+  sk_sp<SkColorSpace> color_space;
+  SkTileMode mode = SkTileMode::kClamp;
+
+  SkGradient get() const {
+    static constexpr SkGradient::Interpolation kInterpolation = {
+        SkGradient::Interpolation::InPremul::kYes, SkGradient::Interpolation::ColorSpace::kDestination,
+        SkGradient::Interpolation::HueMethod::kShorter};
+    SkSpan<const float> pos = positions.empty() ? SkSpan<const float>() : SkSpan<const float>(positions.data(), colors.size());
+    return SkGradient(SkGradient::Colors(colors, pos, mode, color_space), kInterpolation);
+  }
+};
+
+Gradient gradient(Runtime& rt, Handle colors, Handle positions, int64_t color_space, int32_t mode) {
+  Gradient g;
+  if (colors == kNull) rt.throw_npe("colors");
+  rt::ArrayObject& c = rt.array(colors, "long[]");
+  if (c.width != 8) throw_iae(rt);
+  for (uint32_t i = 0; i < c.length; i++) {
+    int64_t v;
+    std::memcpy(&v, c.data.data() + size_t(i) * 8, 8);
+    g.colors.push_back(color4f_of_long(v));
+  }
+  if (positions != kNull) g.positions = floats_of(rt, positions, g.colors.size());
+  g.color_space = skia_color_space(rt, color_space);
+  g.mode = tile_mode(mode);
+  return g;
+}
+
+// MaskFilter.cpp's convertRadiusToSigma.
+float radius_to_sigma(float radius) { return radius > 0 ? 0.57735f * radius + 0.5f : 0.0f; }
+
+// ColorMatrixColorFilter: Java biases the translations by 255.
+std::vector<float> color_matrix(Runtime& rt, Handle array) {
+  std::vector<float> m = floats_of(rt, array, 20);
+  m.resize(20);
+  for (size_t i : {4, 9, 14, 19}) m[i] *= 1.0f / 255;
+  return m;
+}
+
+void register_shaders(rt::NativeRegistry& r) {
+  static const int64_t shader_free = register_free_function([](int64_t h) { tables().shaders.remove(h); });
+  r.bind("Landroid/graphics/Shader;", "nativeGetFinalizer", "()J",
+         [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_long(shader_free); });
+  r.bind("Landroid/graphics/BitmapShader;", "nativeCreate", "(JJIIIZZJ)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::optional<SkMatrix> m = local_matrix(rt, a.i64(0));
+    int32_t aniso = a.i32(6);
+    SkSamplingOptions sampling =
+        aniso > 0 ? SkSamplingOptions::Aniso(aniso)
+                  : SkSamplingOptions(a.z(7) ? SkFilterMode::kLinear : SkFilterMode::kNearest, SkMipmapMode::kNone);
+    sk_sp<SkImage> image = a.i64(2) != 0 ? skia_bitmap_image(rt, a.i64(2)) : nullptr;
+    if (!image) return rt::ret_long(add(tables().shaders, SkShaders::Empty()));
+    sk_sp<SkShader> shader = a.z(8) ? image->makeRawShader(tile_mode(a.i32(4)), tile_mode(a.i32(5)), sampling)
+                                    : image->makeShader(tile_mode(a.i32(4)), tile_mode(a.i32(5)), sampling);
+    if (!shader) throw_iae(rt);
+    return rt::ret_long(add(tables().shaders, with_matrix(std::move(shader), m)));
+  }, rt::ApiStatus::kPartial, "sans gainmap");
+  r.bind("Landroid/graphics/LinearGradient;", "nativeCreate", "(JFFFF[J[FIJ)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::optional<SkMatrix> m = local_matrix(rt, a.i64(0));
+    SkPoint pts[2] = {{a.f32(2), a.f32(3)}, {a.f32(4), a.f32(5)}};
+    Gradient g = gradient(rt, a.h(6), a.h(7), a.i64(9), a.i32(8));
+    sk_sp<SkShader> shader = SkShaders::LinearGradient(pts, g.get());
+    if (!shader) throw_iae(rt);
+    return rt::ret_long(add(tables().shaders, with_matrix(std::move(shader), m)));
+  });
+  r.bind("Landroid/graphics/RadialGradient;", "nativeCreate", "(JFFFFFF[J[FIJ)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::optional<SkMatrix> m = local_matrix(rt, a.i64(0));
+    Gradient g = gradient(rt, a.h(8), a.h(9), a.i64(11), a.i32(10));
+    sk_sp<SkShader> shader =
+        SkShaders::TwoPointConicalGradient({a.f32(2), a.f32(3)}, a.f32(4), {a.f32(5), a.f32(6)}, a.f32(7), g.get());
+    if (!shader) throw_iae(rt);
+    return rt::ret_long(add(tables().shaders, with_matrix(std::move(shader), m)));
+  });
+  r.bind("Landroid/graphics/SweepGradient;", "nativeCreate", "(JFF[J[FJ)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::optional<SkMatrix> m = local_matrix(rt, a.i64(0));
+    Gradient g = gradient(rt, a.h(4), a.h(5), a.i64(6), int32_t(SkTileMode::kClamp));
+    sk_sp<SkShader> shader = SkShaders::SweepGradient({a.f32(2), a.f32(3)}, g.get());
+    if (!shader) throw_iae(rt);
+    return rt::ret_long(add(tables().shaders, with_matrix(std::move(shader), m)));
+  });
+  r.bind("Landroid/graphics/ComposeShader;", "nativeCreate", "(JJJI)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::optional<SkMatrix> m = local_matrix(rt, a.i64(0));
+    sk_sp<SkShader> dst = lookup(rt, tables().shaders, a.i64(2), "Shader");
+    sk_sp<SkShader> src = lookup(rt, tables().shaders, a.i64(4), "Shader");
+    SkBlendMode mode = SkBlendMode(std::clamp(a.i32(6), 0, int(SkBlendMode::kLastMode)));
+    return rt::ret_long(add(tables().shaders, with_matrix(SkShaders::Blend(mode, dst, src), m)));
+  });
+}
+
+void register_color_filters(rt::NativeRegistry& r) {
+  static const int64_t filter_free = register_free_function([](int64_t h) { tables().color_filters.remove(h); });
+  r.bind("Landroid/graphics/ColorFilter;", "nativeGetFinalizer", "()J",
+         [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_long(filter_free); });
+  auto blend_mode = [](Runtime&, NativeArgs& a) -> uint64_t {
+    auto f = std::make_shared<ColorFilterState>();
+    f->kind = ColorFilterState::Kind::kBlendMode;
+    f->color = SkColor(uint32_t(a.i32(0)));
+    f->mode = SkBlendMode(std::clamp(a.i32(1), 0, int(SkBlendMode::kLastMode)));
+    return rt::ret_long(tables().color_filters.add(std::move(f)));
+  };
+  r.bind("Landroid/graphics/PorterDuffColorFilter;", "native_CreateBlendModeFilter", "(II)J", blend_mode);
+  r.bind("Landroid/graphics/BlendModeColorFilter;", "native_CreateBlendModeFilter", "(II)J", blend_mode);
+  const char* lighting = "Landroid/graphics/LightingColorFilter;";
+  r.bind(lighting, "native_CreateLightingFilter", "(II)J", [](Runtime&, NativeArgs& a) -> uint64_t {
+    auto f = std::make_shared<ColorFilterState>();
+    f->kind = ColorFilterState::Kind::kLighting;
+    f->mul = SkColor(uint32_t(a.i32(0)));
+    f->add = SkColor(uint32_t(a.i32(1)));
+    return rt::ret_long(tables().color_filters.add(std::move(f)));
+  });
+  r.bind(lighting, "native_SetLightingFilterAdd", "(JI)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto f = color_filter(rt, a.i64(0));
+    std::lock_guard<std::mutex> guard(f->lock);
+    f->add = SkColor(uint32_t(a.i32(2)));
+    f->instance = nullptr;
+    return 0;
+  });
+  r.bind(lighting, "native_SetLightingFilterMul", "(JI)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto f = color_filter(rt, a.i64(0));
+    std::lock_guard<std::mutex> guard(f->lock);
+    f->mul = SkColor(uint32_t(a.i32(2)));
+    f->instance = nullptr;
+    return 0;
+  });
+  const char* matrix = "Landroid/graphics/ColorMatrixColorFilter;";
+  r.bind(matrix, "nativeColorMatrixFilter", "([F)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto f = std::make_shared<ColorFilterState>();
+    f->kind = ColorFilterState::Kind::kMatrix;
+    f->matrix = color_matrix(rt, a.h(0));
+    return rt::ret_long(tables().color_filters.add(std::move(f)));
+  });
+  r.bind(matrix, "nativeSetColorMatrix", "(J[F)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::vector<float> m = color_matrix(rt, a.h(2));
+    auto f = color_filter(rt, a.i64(0));
+    std::lock_guard<std::mutex> guard(f->lock);
+    f->matrix = std::move(m);
+    f->instance = nullptr;
+    return 0;
+  });
+}
+
+void register_mask_filters(rt::NativeRegistry& r) {
+  r.bind("Landroid/graphics/MaskFilter;", "nativeDestructor", "(J)V", [](Runtime&, NativeArgs& a) -> uint64_t {
+    tables().mask_filters.remove(a.i64(0));
+    return 0;
+  });
+  r.bind("Landroid/graphics/BlurMaskFilter;", "nativeConstructor", "(FI)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    sk_sp<SkMaskFilter> f = SkMaskFilter::MakeBlur(SkBlurStyle(std::clamp(a.i32(1), 0, int(kLastEnum_SkBlurStyle))),
+                                                   radius_to_sigma(a.f32(0)));
+    if (!f) throw_iae(rt);
+    return rt::ret_long(add(tables().mask_filters, std::move(f)));
+  });
+  r.bind("Landroid/graphics/EmbossMaskFilter;", "nativeConstructor", "([FFFF)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::vector<float> direction = floats_of(rt, a.h(0), 3);
+    sk_sp<SkMaskFilter> f = SkBlurMaskFilter::MakeEmboss(radius_to_sigma(a.f32(3)), direction.data(), a.f32(1), a.f32(2));
+    if (!f) throw_iae(rt);
+    return rt::ret_long(add(tables().mask_filters, std::move(f)));
+  });
+  const char* table = "Landroid/graphics/TableMaskFilter;";
+  r.bind(table, "nativeNewTable", "([B)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (a.h(0) == kNull) rt.throw_npe("table");
+    rt::ArrayObject& t = rt.array(a.h(0), "byte[]");
+    if (t.width != 1 || t.length < 256) rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "");
+    return rt::ret_long(add(tables().mask_filters, sk_sp<SkMaskFilter>(SkTableMaskFilter::Create(t.data.data()))));
+  });
+  r.bind(table, "nativeNewClip", "(II)J", [](Runtime&, NativeArgs& a) -> uint64_t {
+    return rt::ret_long(add(tables().mask_filters,
+                            sk_sp<SkMaskFilter>(SkTableMaskFilter::CreateClip(uint8_t(a.i32(0)), uint8_t(a.i32(1))))));
+  });
+  r.bind(table, "nativeNewGamma", "(F)J", [](Runtime&, NativeArgs& a) -> uint64_t {
+    return rt::ret_long(add(tables().mask_filters, sk_sp<SkMaskFilter>(SkTableMaskFilter::CreateGamma(a.f32(0)))));
+  });
+}
+
+void register_path_effects(rt::NativeRegistry& r) {
+  r.bind("Landroid/graphics/PathEffect;", "nativeDestructor", "(J)V", [](Runtime&, NativeArgs& a) -> uint64_t {
+    tables().path_effects.remove(a.i64(0));
+    return 0;
+  });
+  r.bind("Landroid/graphics/ComposePathEffect;", "nativeCreate", "(JJ)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    sk_sp<SkPathEffect> outer = lookup(rt, tables().path_effects, a.i64(0), "PathEffect");
+    sk_sp<SkPathEffect> inner = lookup(rt, tables().path_effects, a.i64(2), "PathEffect");
+    return rt::ret_long(add(tables().path_effects, SkPathEffect::MakeCompose(outer, inner)));
+  });
+  r.bind("Landroid/graphics/SumPathEffect;", "nativeCreate", "(JJ)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    sk_sp<SkPathEffect> first = lookup(rt, tables().path_effects, a.i64(0), "PathEffect");
+    sk_sp<SkPathEffect> second = lookup(rt, tables().path_effects, a.i64(2), "PathEffect");
+    return rt::ret_long(add(tables().path_effects, SkPathEffect::MakeSum(first, second)));
+  });
+  r.bind("Landroid/graphics/DashPathEffect;", "nativeCreate", "([FF)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::vector<float> intervals = floats_of(rt, a.h(0), 0);
+    intervals.resize(intervals.size() & ~size_t(1));  // an even number
+    return rt::ret_long(add(tables().path_effects, SkDashPathEffect::Make(intervals, a.f32(1))));
+  });
+  r.bind("Landroid/graphics/PathDashPathEffect;", "nativeCreate", "(JFFI)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    SkPath shape = skia_path_of(rt, a.i64(0));
+    auto style = SkPath1DPathEffect::Style(std::clamp(a.i32(4), 0, int(SkPath1DPathEffect::kLastEnum_Style)));
+    return rt::ret_long(add(tables().path_effects, SkPath1DPathEffect::Make(shape, a.f32(2), a.f32(3), style)));
+  });
+  r.bind("Landroid/graphics/CornerPathEffect;", "nativeCreate", "(F)J", [](Runtime&, NativeArgs& a) -> uint64_t {
+    return rt::ret_long(add(tables().path_effects, SkCornerPathEffect::Make(a.f32(0))));
+  });
+  r.bind("Landroid/graphics/DiscretePathEffect;", "nativeCreate", "(FF)J", [](Runtime&, NativeArgs& a) -> uint64_t {
+    return rt::ret_long(add(tables().path_effects, SkDiscretePathEffect::Make(a.f32(0), a.f32(1))));
+  });
+}
+
+}  // namespace
+
+sk_sp<SkShader> skia_shader(Runtime& rt, int64_t handle) { return lookup(rt, tables().shaders, handle, "Shader"); }
+
+sk_sp<SkColorFilter> skia_color_filter(Runtime& rt, int64_t handle) {
+  if (handle == 0) return nullptr;
+  return color_filter(rt, handle)->get();
+}
+
+sk_sp<SkMaskFilter> skia_mask_filter(Runtime& rt, int64_t handle) {
+  return lookup(rt, tables().mask_filters, handle, "MaskFilter");
+}
+
+sk_sp<SkPathEffect> skia_path_effect(Runtime& rt, int64_t handle) {
+  return lookup(rt, tables().path_effects, handle, "PathEffect");
+}
+
+void register_framework_effects(rt::NativeRegistry& r) {
+  register_shaders(r);
+  register_color_filters(r);
+  register_mask_filters(r);
+  register_path_effects(r);
+}
+
+}  // namespace aa::bridge

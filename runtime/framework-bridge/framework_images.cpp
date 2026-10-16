@@ -19,6 +19,9 @@
 
 #include "framework-bridge/handles.h"
 #include "framework-bridge/native_memory.h"
+#include "include/core/SkColorSpace.h"
+#include "include/core/SkImageInfo.h"
+#include "include/core/SkPixmap.h"
 #include "third_party/miniz/miniz.h"
 
 namespace aa::bridge {
@@ -279,7 +282,9 @@ struct BitmapState {
   bool has_alpha = true;
   bool has_mipmap = false;
   int32_t generation_id = 1;
-  std::vector<uint32_t> pixels;  // 0xAARRGGBB
+  // Skia's N32 (RGBA bytes), premultiplied unless !is_premultiplied, shared
+  // with the canvases that draw into it.
+  std::shared_ptr<PixelBuffer> pixels = std::make_shared<PixelBuffer>();
   std::vector<uint8_t> nine_patch_chunk;
   int64_t color_space_ptr = 0;
   bool recycled = false;
@@ -294,12 +299,41 @@ struct BitmapState {
     has_alpha = o.has_alpha;
     has_mipmap = o.has_mipmap;
     generation_id = o.generation_id;
-    pixels = o.pixels;
+    pixels = std::make_shared<PixelBuffer>(*o.pixels);
     nine_patch_chunk = o.nine_patch_chunk;
     color_space_ptr = o.color_space_ptr;
     recycled = o.recycled;
   }
+
+  // The pixels as Skia sees them: sRGB (as Android's bitmaps by default),
+  // opaque when they have no alpha.
+  SkImageInfo info() const {
+    SkAlphaType at = !has_alpha ? kOpaque_SkAlphaType : is_premultiplied ? kPremul_SkAlphaType : kUnpremul_SkAlphaType;
+    return SkImageInfo::Make(width, height, kN32_SkColorType, at, SkColorSpace::MakeSRGB());
+  }
+  SkPixmap pixmap() const { return SkPixmap(info(), pixels->data.data(), size_t(width) * 4); }
+  void allocate() { pixels = std::make_shared<PixelBuffer>(PixelBuffer{std::vector<uint32_t>(size_t(width) * size_t(height), 0)}); }
 };
+
+// SkColor values (unpremultiplied ARGB, as Java's int colors), as Android's
+// GraphicsJNI reads and writes them: kBGRA_8888 unpremultiplied sRGB.
+SkImageInfo color_info(int32_t w, int32_t h) {
+  return SkImageInfo::Make(w, h, kBGRA_8888_SkColorType, kUnpremul_SkAlphaType, SkColorSpace::MakeSRGB());
+}
+
+// Bitmap_getPixels: the colors of [x, x+w) x [y, y+h) into dst (row stride).
+void read_colors(const BitmapState& b, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t* dst, size_t stride) {
+  if (w <= 0 || h <= 0) return;
+  b.pixmap().readPixels(color_info(w, h), dst, stride * 4, x, y);
+}
+
+// GraphicsJNI::SetPixels: colors written at (x, y) with the bitmap's format.
+void write_colors(BitmapState& b, int32_t x, int32_t y, int32_t w, int32_t h, const uint32_t* src, size_t stride) {
+  if (w <= 0 || h <= 0) return;
+  SkPixmap colors(color_info(w, h), src, stride * 4);
+  SkPixmap dst = b.pixmap();
+  colors.readPixels(dst.info().makeWH(w, h), dst.writable_addr(x, y), dst.rowBytes());
+}
 
 struct NinePatchChunkState {
   std::vector<uint8_t> chunk;
@@ -418,6 +452,21 @@ void register_nine_patch(rt::NativeRegistry& r) {
 // Bitmap Natives
 // -----------------------------------------------------------------------------
 
+// A Color long (android.graphics.Color): sRGB as ARGB in the high 32 bits
+// (color space id 0), otherwise half-float red, green, blue and a 10-bit
+// alpha; the components are taken as sRGB (GraphicsJNI::convertColorLong).
+SkColor4f color4f_of_long(int64_t color) {
+  uint64_t c = uint64_t(color);
+  if ((c & 0x3f) == 0) return SkColor4f::FromColor(SkColor(uint32_t(c >> 32)));
+  auto half = [](uint16_t h) {
+    int32_t e = (h >> 10) & 0x1f, m = h & 0x3ff;
+    float v = e == 0 ? std::ldexp(float(m), -24) : e == 31 ? INFINITY : std::ldexp(float(m | 0x400), e - 25);
+    return (h & 0x8000) ? -v : v;
+  };
+  return SkColor4f{half(uint16_t(c >> 48)), half(uint16_t(c >> 32)), half(uint16_t(c >> 16)),
+                   float((c >> 6) & 0x3ff) / 1023.0f};
+}
+
 void register_bitmap(rt::NativeRegistry& r) {
   const char* bm = "Landroid/graphics/Bitmap;";
   static const int64_t bm_free = register_free_function([](int64_t h) { img_tables().bitmaps.remove(h); });
@@ -447,19 +496,17 @@ void register_bitmap(rt::NativeRegistry& r) {
            state->config = config;
            state->is_mutable = is_mutable;
            state->color_space_ptr = cs_ptr;
-           state->pixels.resize(size_t(width) * size_t(height), 0);
+           state->allocate();
 
            if (a.h(0) != kNull) {
              rt::ArrayObject& colors = rt.array(a.h(0), "int[]");
-             const int32_t* src = reinterpret_cast<const int32_t*>(colors.data.data());
-             for (int32_t y = 0; y < height; ++y) {
-               for (int32_t x = 0; x < width; ++x) {
-                 size_t src_idx = size_t(offset + y * stride + x);
-                 if (src_idx < colors.length) {
-                   state->pixels[size_t(y * width + x)] = uint32_t(src[src_idx]);
-                 }
-               }
+             // Bitmap.createBitmap checked the offset and stride against the array.
+             if (offset < 0 || stride < width ||
+                 int64_t(offset) + int64_t(stride) * (height - 1) + width > int64_t(colors.length)) {
+               rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "");
              }
+             const uint32_t* src = reinterpret_cast<const uint32_t*>(colors.data.data()) + offset;
+             write_colors(*state, 0, 0, width, height, src, size_t(stride));
            }
 
            int64_t handle = img_tables().bitmaps.add(std::move(state));
@@ -524,7 +571,7 @@ void register_bitmap(rt::NativeRegistry& r) {
     if (b1->width != b2->width || b1->height != b2->height || b1->config != b2->config) {
       return rt::ret_bool(false);
     }
-    return rt::ret_bool(b1->pixels == b2->pixels);
+    return rt::ret_bool(b1->pixels->data == b2->pixels->data);
   });
 
   r.bind(bm, "nativePrepareToDraw", "(J)V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
@@ -536,7 +583,9 @@ void register_bitmap(rt::NativeRegistry& r) {
     if (x < 0 || x >= b->width || y < 0 || y >= b->height) {
       rt.throw_new("Ljava/lang/IllegalArgumentException;", "coordinates out of range");
     }
-    return rt::ret_int(int32_t(b->pixels[size_t(y * b->width + x)]));
+    uint32_t color = 0;
+    read_colors(*b, x, y, 1, 1, &color, 1);
+    return rt::ret_int(int32_t(color));
   });
 
   r.bind(bm, "nativeSetPixel", "(JIII)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
@@ -546,7 +595,8 @@ void register_bitmap(rt::NativeRegistry& r) {
     if (x < 0 || x >= b->width || y < 0 || y >= b->height) {
       rt.throw_new("Ljava/lang/IllegalArgumentException;", "coordinates out of range");
     }
-    b->pixels[size_t(y * b->width + x)] = uint32_t(color);
+    uint32_t c = uint32_t(color);
+    write_colors(*b, x, y, 1, 1, &c, 1);
     ++b->generation_id;
     return 0;
   });
@@ -559,18 +609,13 @@ void register_bitmap(rt::NativeRegistry& r) {
     int32_t width = a.i32(7), height = a.i32(8);
 
     std::lock_guard<std::mutex> guard(b->lock);
-    int32_t* dst = reinterpret_cast<int32_t*>(dst_arr.data.data());
-    for (int32_t row = 0; row < height; ++row) {
-      for (int32_t col = 0; col < width; ++col) {
-        int32_t src_x = x + col, src_y = y + row;
-        if (src_x >= 0 && src_x < b->width && src_y >= 0 && src_y < b->height) {
-          size_t d_idx = size_t(offset + row * stride + col);
-          if (d_idx < dst_arr.length) {
-            dst[d_idx] = int32_t(b->pixels[size_t(src_y * b->width + src_x)]);
-          }
-        }
-      }
+    // Bitmap.getPixels checked the rectangle, the offset and the stride.
+    if (x < 0 || y < 0 || width < 0 || height < 0 || int64_t(x) + width > b->width ||
+        int64_t(y) + height > b->height || offset < 0 || (height > 0 && stride < width) ||
+        (height > 0 && int64_t(offset) + int64_t(stride) * (height - 1) + width > int64_t(dst_arr.length))) {
+      rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "");
     }
+    read_colors(*b, x, y, width, height, reinterpret_cast<uint32_t*>(dst_arr.data.data()) + offset, size_t(stride));
     return 0;
   });
 
@@ -582,18 +627,13 @@ void register_bitmap(rt::NativeRegistry& r) {
     int32_t width = a.i32(7), height = a.i32(8);
 
     std::lock_guard<std::mutex> guard(b->lock);
-    const int32_t* src = reinterpret_cast<const int32_t*>(src_arr.data.data());
-    for (int32_t row = 0; row < height; ++row) {
-      for (int32_t col = 0; col < width; ++col) {
-        int32_t dst_x = x + col, dst_y = y + row;
-        if (dst_x >= 0 && dst_x < b->width && dst_y >= 0 && dst_y < b->height) {
-          size_t s_idx = size_t(offset + row * stride + col);
-          if (s_idx < src_arr.length) {
-            b->pixels[size_t(dst_y * b->width + dst_x)] = uint32_t(src[s_idx]);
-          }
-        }
-      }
+    if (x < 0 || y < 0 || width < 0 || height < 0 || int64_t(x) + width > b->width ||
+        int64_t(y) + height > b->height || offset < 0 || (height > 0 && stride < width) ||
+        (height > 0 && int64_t(offset) + int64_t(stride) * (height - 1) + width > int64_t(src_arr.length))) {
+      rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "");
     }
+    write_colors(*b, x, y, width, height, reinterpret_cast<const uint32_t*>(src_arr.data.data()) + offset,
+                 size_t(stride));
     ++b->generation_id;
     return 0;
   });
@@ -639,8 +679,7 @@ void register_bitmap(rt::NativeRegistry& r) {
   r.bind(bm, "nativeRecycle", "(J)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto b = bitmap(rt, a.i64(0));
     std::lock_guard<std::mutex> guard(b->lock);
-    b->pixels.clear();
-    b->pixels.shrink_to_fit();
+    b->pixels = std::make_shared<PixelBuffer>();  // canvases keep the old ones
     b->recycled = true;
     return 0;
   });
@@ -652,25 +691,27 @@ void register_bitmap(rt::NativeRegistry& r) {
     b->height = a.i32(3);
     b->config = a.i32(4);
     b->is_premultiplied = a.z(5);
-    b->pixels.resize(size_t(b->width) * size_t(b->height), 0);
+    // The memory is kept when it is large enough, as Android's reconfigure.
+    size_t needed = size_t(b->width) * size_t(b->height);
+    if (needed > b->pixels->data.size()) b->allocate();
     ++b->generation_id;
     return 0;
   });
 
   r.bind(bm, "nativeErase", "(JI)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto b = bitmap(rt, a.i64(0));
-    uint32_t color = uint32_t(a.i32(2));
+    SkColor color = SkColor(uint32_t(a.i32(2)));
     std::lock_guard<std::mutex> guard(b->lock);
-    std::fill(b->pixels.begin(), b->pixels.end(), color);
+    b->pixmap().erase(color);  // SkBitmap::eraseColor
     ++b->generation_id;
     return 0;
   });
 
   r.bind(bm, "nativeErase", "(JJJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto b = bitmap(rt, a.i64(0));
-    uint32_t color = uint32_t(a.i64(4));
+    SkColor4f color = color4f_of_long(a.i64(4));
     std::lock_guard<std::mutex> guard(b->lock);
-    std::fill(b->pixels.begin(), b->pixels.end(), color);
+    b->pixmap().erase(color);
     ++b->generation_id;
     return 0;
   });
@@ -870,8 +911,10 @@ void register_image_decoder(rt::NativeRegistry& r) {
            auto bm_state = std::make_shared<BitmapState>();
            bm_state->width = dec->decoded.width;
            bm_state->height = dec->decoded.height;
-           bm_state->pixels = dec->decoded.pixels;
            bm_state->config = 5;  // ARGB_8888
+           bm_state->allocate();
+           write_colors(*bm_state, 0, 0, bm_state->width, bm_state->height, dec->decoded.pixels.data(),
+                        size_t(bm_state->width));
            bm_state->is_mutable = false;
            bm_state->nine_patch_chunk = dec->decoded.nptc_chunk;
 
@@ -915,13 +958,24 @@ void register_image_decoder(rt::NativeRegistry& r) {
 
 }  // namespace
 
-void bitmap_canvas_info(rt::Runtime& rt, int64_t handle, int32_t& width, int32_t& height, bool& opaque) {
+NinePatchDivs nine_patch_divs(rt::Runtime& rt, int64_t chunk) {
+  auto c = img_tables().nine_patch_chunks.get(chunk);
+  if (!c) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] NinePatch invalide");
+  return NinePatchDivs{c->patch.x_divs, c->patch.y_divs, c->patch.colors};
+}
+
+PixelTarget bitmap_pixels(rt::Runtime& rt, int64_t handle) {
   auto b = bitmap(rt, handle);
   std::lock_guard<std::mutex> guard(b->lock);
-  width = b->width;
-  height = b->height;
+  PixelTarget t;
+  t.pixels = b->pixels;
+  t.width = b->width;
+  t.height = b->height;
   // SkImageInfo::isOpaque: RGB_565 (3) always, ARGB_8888 and others without alpha.
-  opaque = b->config == 3 || (b->config != 1 && !b->has_alpha);
+  t.opaque = b->config == 3 || (b->config != 1 && !b->has_alpha);
+  t.premultiplied = b->is_premultiplied;
+  t.owner = b;
+  return t;
 }
 
 void register_framework_images(rt::NativeRegistry& r) {

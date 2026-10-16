@@ -172,6 +172,17 @@ void add_throwable_ctors(ClassBuilder& b) {
     init_throwable(rt, a.h(0), a.h(1) ? &msg : nullptr, a.h(1));
     return 0;
   });
+  b.ctor("(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::u16string msg = a.h(1) ? rt.string_value(a.h(1)) : u"";
+    init_throwable(rt, a.h(0), a.h(1) ? &msg : nullptr, a.h(2));
+    ThrowablePeer& p = throwable_peer(rt, a.h(0));
+    p.suppression_enabled = a.z(3);
+    if (!a.z(4)) {
+      p.stack_writable = false;
+      p.stack.clear();
+    }
+    return 0;
+  });
 }
 
 void register_object(NativeRegistry& r) {
@@ -639,7 +650,8 @@ void register_throwables(NativeRegistry& r) {
   t.method("addSuppressed", "(Ljava/lang/Throwable;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     if (a.h(1) == a.h(0)) rt.throw_new("Ljava/lang/IllegalArgumentException;", "Self-suppression not permitted");
     if (a.h(1) == kNull) rt.throw_npe("Cannot suppress a null exception.");
-    throwable_peer(rt, a.h(0)).suppressed.push_back(a.h(1));
+    ThrowablePeer& p = throwable_peer(rt, a.h(0));
+    if (p.suppression_enabled) p.suppressed.push_back(a.h(1));
     return 0;
   });
   t.method("getSuppressed", "()[Ljava/lang/Throwable;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
@@ -666,11 +678,13 @@ void register_throwables(NativeRegistry& r) {
       std::memcpy(&e, &arr.data[size_t(i) * 4], 4);
       if (e == kNull) rt.throw_npe("stackTrace[" + std::to_string(i) + "]");
     }
-    throwable_peer(rt, a.h(0)).stack_trace = copy;
+    ThrowablePeer& p = throwable_peer(rt, a.h(0));
+    if (p.stack_writable) p.stack_trace = copy;
     return 0;
   });
   t.method("fillInStackTrace", "()Ljava/lang/Throwable;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     ThrowablePeer& p = throwable_peer(rt, a.h(0));
+    if (!p.stack_writable) return a.h(0);
     p.stack = rt.capture_stack();
     // Without this native frame and those of fillInStackTrace overrides.
     while (!p.stack.empty() && p.stack.front().find(".fillInStackTrace(") != std::string::npos) p.stack.erase(p.stack.begin());

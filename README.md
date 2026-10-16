@@ -7,7 +7,7 @@
 Couche de compatibilité qui exécute des applications Android (bytecode DEX) **comme des processus
 Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 
-> **Avancement : ≈ 45 % vers « Android natif sur Windows »**
+> **Avancement : ≈ 47 % vers « Android natif sur Windows »**
 > 📊 Détail des jalons et carte complète dans [docs/STATUS.md](docs/STATUS.md) · [Données brutes](docs/progress.json).
 >
 > **Statut : prototype de recherche.** La preuve de concept de l'annexe A du cadrage fonctionne :
@@ -63,8 +63,10 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
   `PackageParser`, `activity`, `window`, `display`, `permissionmgr`, réglages persistés) et
   `java.util.regex` sur un moteur compatible ICU. Le vrai `ActivityThread` démarre l'application
   par ses propres gestionnaires (`bindApplication`, `LaunchActivityItem`, `ResumeActivityItem`) :
-  `onCreate`, `onStart`, `onResume`, puis fenêtre logique (`addToDisplayAsUser`), vsync à 60 Hz et
-  première traversée de `ViewRootImpl` jusqu'à la mesure des vues.
+  `onCreate`, `onStart`, `onResume`, puis fenêtre logique (`addToDisplayAsUser`), vsync à 60 Hz,
+  mesure et mise en page des vues, et **première image dessinée** par le vrai framework avec le
+  Skia d'Android 17 ([ADR-008](docs/adr/ADR-008-moteur-2d.md)) : barre d'action, bouton Material,
+  texte (`exec --frame-out` l'écrit en PNG).
 
 ## Avancement récent
 
@@ -73,10 +75,11 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 | J0-J2 — outillage Java/D8, `ServiceManager` local, vrais chargeurs de classes | fait |
 | J3 — services système v1 | en cours (chaque appel manquant est tracé) |
 | J4 — `Application` et activité jusqu'à `onResume`, en direct | fait |
-| J5 — démarrage par les vrais gestionnaires d'`ActivityThread`, fenêtre logique | presque fini : première traversée complète (mesure, relayout, mise en page) jusqu'au dessin logiciel |
+| J5 — démarrage par les vrais gestionnaires d'`ActivityThread`, fenêtre logique | atteint : jusqu'à la première image publiée (test e2e `process-launch`) |
 | J6 — texte (FreeType + HarfBuzz, logique de minikin) | bien avancé : mesure (`Paint`), `MeasuredText`, coupure de lignes (`LineBreaker`) |
-| J7 — moteur 2D logiciel (dessin des vues dans la `Surface`) | prochain : le premier `Canvas.drawRect` est atteint |
-| J8-J10 — fenêtre Win32 et entrées, navigation, une application AOSP affichée | à faire |
+| J7 — moteur 2D logiciel (dessin des vues dans la `Surface`) | la fenêtre est dessinée : `SkiaCanvas` de HWUI sur le Skia d'AOSP, effets des `Paint` ; reste AGSL (`RuntimeShader`) |
+| J8 — fenêtre Win32 et entrées | prochain : présenter les images publiées, puis souris et clavier |
+| J9-J10 — navigation, une application AOSP affichée | à faire |
 
 ## Limites actuelles
 

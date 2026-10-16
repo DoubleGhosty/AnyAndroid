@@ -56,6 +56,14 @@ void register_framework_path(rt::NativeRegistry& r);
 // (unit tests).
 void path_contents(rt::Runtime& rt, int64_t handle, std::vector<uint8_t>& verbs, std::vector<float>& coords,
                    std::vector<float>& weights);
+// The same, with the fill type (Path.FillType's native values, in
+// SkPathFillType's order), read under one lock for drawing.
+struct PathSnapshot {
+  std::vector<uint8_t> verbs;
+  std::vector<float> coords, weights;
+  int32_t fill_type = 0;
+};
+PathSnapshot path_snapshot(rt::Runtime& rt, int64_t handle);
 // An SVG path string as HWUI's PathParser keeps it (framework_path.cpp), shared
 // with VectorDrawable: verb letters, the float count of each, the floats.
 struct SvgPathData {
@@ -94,17 +102,45 @@ void assign(rt::Runtime& rt, int64_t handle, const Values& values);
 }  // namespace skmatrix
 // Images: ImageDecoder, Bitmap, NinePatch (framework_images.cpp), registered by register_framework_graphics.
 void register_framework_images(rt::NativeRegistry& r);
-// Size and opacity (SkImageInfo::isOpaque) of a Bitmap handle (IllegalStateException if invalid).
-void bitmap_canvas_info(rt::Runtime& rt, int64_t handle, int32_t& width, int32_t& height, bool& opaque);
+// The divisions and colours of a NinePatch chunk handle (Res_png_9patch),
+// IllegalStateException if invalid.
+struct NinePatchDivs {
+  std::vector<int32_t> x_divs, y_divs;
+  std::vector<uint32_t> colors;
+};
+NinePatchDivs nine_patch_divs(rt::Runtime& rt, int64_t chunk);
+// Pixels of a Bitmap or of a window buffer, shared with the canvases that
+// draw into them: Skia's N32 layout (RGBA bytes, as Android), rows packed.
+struct PixelBuffer {
+  std::vector<uint32_t> data;
+};
+// A drawing target: width x height pixels, premultiplied unless said
+// otherwise, opaque when its format has no alpha (SkImageInfo::isOpaque).
+struct PixelTarget {
+  std::shared_ptr<PixelBuffer> pixels;
+  int32_t width = 0, height = 0;
+  bool opaque = false, premultiplied = true;
+  std::shared_ptr<void> owner;  // the Bitmap, when there is one
+};
+// The pixels of a Bitmap handle (IllegalStateException if invalid).
+PixelTarget bitmap_pixels(rt::Runtime& rt, int64_t handle);
+// Shader, ColorFilter, MaskFilter and PathEffect (framework_effects.cpp),
+// registered by register_framework_graphics.
+void register_framework_effects(rt::NativeRegistry& r);
 // Canvas state (framework_canvas.cpp), registered by register_framework_graphics.
 void register_framework_canvas(rt::NativeRegistry& r);
-// Points a Java Canvas at a surface buffer of width x height (0 x 0: none),
-// clipped to dirty (left, top, right, bottom) when given, as Surface's
-// nativeLockCanvas sets an SkBitmap on the native canvas.
-void canvas_target_surface(rt::Runtime& rt, rt::Handle canvas, int32_t width, int32_t height, bool opaque,
-                           const int32_t* dirty);
+// Points a Java Canvas at a window buffer (none: no pixels), clipped to
+// dirty (left, top, right, bottom) when given, as Surface's nativeLockCanvas
+// sets an SkBitmap on the native canvas.
+void canvas_target_surface(rt::Runtime& rt, rt::Handle canvas, const PixelTarget& target, const int32_t* dirty);
 // Region and RegionIterator (framework_region.cpp), registered by register_framework_graphics.
 void register_framework_region(rt::NativeRegistry& r);
+// The rectangles of a Region handle (left, top, right, bottom), top to bottom
+// and left to right (IllegalStateException if invalid).
+std::vector<std::array<int32_t, 4>> region_rects(rt::Runtime& rt, int64_t handle);
+// The transfer parameters (a, b, c, d, e, f, g) and RGB to XYZ (D50) matrix,
+// in Java's order, of a ColorSpace.Rgb native handle; false if invalid.
+bool color_space_params(int64_t handle, std::array<float, 7>& transfer, std::array<float, 9>& to_xyz);
 // VectorDrawable and VirtualRefBasePtr (framework_vector_drawable.cpp), registered by register_framework_graphics.
 void register_framework_vector_drawable(rt::NativeRegistry& r);
 // SurfaceControl, its Transaction and Surface (framework_surface.cpp), registered by register_framework_graphics.

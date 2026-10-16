@@ -6,6 +6,7 @@
 //   anyandroid compat          prints the API compatibility matrix
 
 #include <algorithm>
+#include <cstring>
 #include <cstdio>
 #include <filesystem>
 #include <io.h>
@@ -32,6 +33,7 @@
 #include "resources/asset_manager.h"
 #include "vfs/vfs.h"
 #include "lifecycle/app_host.h"
+#include "miniz.h"
 #include "windows/windowing/win32_backend.h"
 
 #include <windows.h>
@@ -83,6 +85,7 @@ void usage() {
       "      --data-dir <dossier> : bac à sable des zones inscriptibles (/data, /sdcard) ;\n"
       "      --profile : à la fin, les méthodes les plus coûteuses (instructions, appels) sur stderr.\n"
       "      --trace-services : écrit sur stdout chaque appel du framework aux services de l'hôte.\n"
+      "      --frame-out <fichier.png> : écrit chaque image publiée par une fenêtre (la dernière reste).\n"
       "  libcore natives --bootclasspath <dossier> [--libcore-only] [--all] [--core]\n"
       "      Couverture des méthodes natives de la libcore par AnyAndroid ; --core liste les membres\n"
       "      des classes du cœur de la VM référencés mais absents.\n"
@@ -129,7 +132,7 @@ bool parse_args(const std::vector<std::string>& argv, Args& a) {
   static const std::set<std::string> with_value = {"--log-level", "--log-file", "--disasm", "--activity",
                                                    "--script",    "--do",       "--max-instructions", "--top", "--output",
                                                    "--partition", "--bootclasspath", "--system-image", "--data-dir", "--host-dex",
-                                                   "--get",       "--locale",   "--density"};
+                                                   "--get",       "--locale",   "--density", "--frame-out"};
   for (size_t i = 1; i < argv.size(); ++i) {
     const std::string& s = argv[i];
     if (a.command.empty() && !text::starts_with(s, "--")) {
@@ -156,6 +159,32 @@ bool parse_args(const std::vector<std::string>& argv, Args& a) {
     }
   }
   return true;
+}
+
+// A posted frame as an RGBA PNG (alpha unpremultiplied, as PNG stores it).
+void write_frame_png(const fs::path& path, const bridge::PostedFrame& f) {
+  if (!f.pixels || f.width <= 0 || f.height <= 0) return;
+  std::vector<uint8_t> rgba(f.pixels->size() * 4);
+  std::memcpy(rgba.data(), f.pixels->data(), rgba.size());
+  for (size_t i = 0; i < rgba.size(); i += 4) {
+    uint32_t alpha = f.opaque ? 255 : rgba[i + 3];
+    if (alpha != 0 && alpha != 255) {
+      for (size_t c = 0; c < 3; c++) rgba[i + c] = uint8_t(std::min<uint32_t>(255, (rgba[i + c] * 255 + alpha / 2) / alpha));
+    }
+    rgba[i + 3] = uint8_t(alpha);
+  }
+  size_t length = 0;
+  void* png = tdefl_write_image_to_png_file_in_memory_ex(rgba.data(), f.width, f.height, 4, &length, 6, MZ_FALSE);
+  if (!png) {
+    err("image " + std::to_string(f.frame_number) + " : encodage PNG impossible");
+    return;
+  }
+  try {
+    write_file(path, std::span<const uint8_t>(static_cast<const uint8_t*>(png), length));
+  } catch (const std::exception& e) {
+    err("image non écrite : " + std::string(e.what()));
+  }
+  mz_free(png);
 }
 
 bool setup_logging(const Args& a, log::Level fallback) {
@@ -555,6 +584,10 @@ int cmd_exec(const Args& a) {
   for (const auto* d : dex_files) runtime.add_dex(d);
   lifecycle::ConsoleHost host(package);
   bridge::install(runtime.registry(), host);
+  if (a.has("--frame-out")) {
+    fs::path frame_path = path_from_utf8(a.get("--frame-out"));
+    bridge::set_frame_listener([frame_path](const bridge::PostedFrame& f) { write_frame_png(frame_path, f); });
+  }
   if (!boot.dex.empty()) {
     std::string bcp;
     for (const auto& p : boot.device_paths) bcp += (bcp.empty() ? "" : ":") + p;

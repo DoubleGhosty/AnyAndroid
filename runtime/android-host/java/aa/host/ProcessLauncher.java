@@ -56,6 +56,9 @@ public final class ProcessLauncher implements ActivityService.AttachHandler {
     } catch (Stop stop) {
       Launcher.log("boucle principale quittée");
     }
+    // An Android process ends when it is killed, not when main returns: the
+    // framework's HandlerThreads are not daemons.
+    System.exit(0);
   }
 
   @Override

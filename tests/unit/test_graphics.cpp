@@ -854,6 +854,76 @@ TEST(graphics_canvas_state_follows_skia) {
            std::string("java.lang.IllegalStateException"));
 }
 
+// Drawing (J7): BaseCanvas natives into a Bitmap's pixels through Skia, with
+// HWUI's persistent clips, paint effects and pixel conversions.
+TEST(graphics_canvas_draws_into_bitmaps_with_skia) {
+  Vm vm;
+  rt::Runtime& rt = *vm.rt;
+  const char* cv = "Landroid/graphics/Canvas;";
+  const char* bc = "Landroid/graphics/BaseCanvas;";
+  const char* pt = "Landroid/graphics/Paint;";
+  const char* bmc = "Landroid/graphics/Bitmap;";
+  rt::Handle bm = rt::Handle(call(rt, bmc, "nativeCreate", "([IIIIIIZJ)Landroid/graphics/Bitmap;",
+                                  Args().h(rt::kNull).i(0).i(20).i(20).i(10).i(5).z(true).j(0)));
+  rt::GlobalRef keep(rt, bm);
+  int64_t bitmap = get_native_ptr(rt, bm);
+  auto pixel = [&](int32_t x, int32_t y) {
+    return uint32_t(call(rt, bmc, "nativeGetPixel", "(JII)I", Args().j(bitmap).i(x).i(y)));
+  };
+  int64_t c = int64_t(call(rt, cv, "nInitRaster", "(J)J", Args().j(bitmap)));
+  call(rt, bc, "nDrawColor", "(JII)V", Args().j(c).i(int32_t(0xFFFFFFFF)).i(3));
+  CHECK_EQ(pixel(0, 0), 0xFFFFFFFFu);
+
+  // A plain rectangle, edges on pixel boundaries (no antialiasing by default).
+  int64_t paint = int64_t(call(rt, pt, "nInit", "()J"));
+  call(rt, pt, "nSetColor", "(JI)V", Args().j(paint).i(int32_t(0xFFFF0000)));
+  call(rt, bc, "nDrawRect", "(JFFFFJ)V", Args().j(c).f(2).f(2).f(6).f(6).j(paint));
+  CHECK_EQ(pixel(3, 3), 0xFFFF0000u);
+  CHECK_EQ(pixel(6, 3), 0xFFFFFFFFu);
+
+  // A matrix-only save keeps its clip after restore (HWUI's partial saves).
+  call(rt, cv, "nSave", "(JI)I", Args().j(c).i(1));
+  call(rt, cv, "nClipRect", "(JFFFFI)Z", Args().j(c).f(10).f(0).f(20).f(10).i(1));
+  call(rt, cv, "nRestore", "(J)Z", Args().j(c));
+  call(rt, pt, "nSetColor", "(JI)V", Args().j(paint).i(int32_t(0xFF0000FF)));
+  call(rt, bc, "nDrawRect", "(JFFFFJ)V", Args().j(c).f(0).f(8).f(20).f(10).j(paint));
+  CHECK_EQ(pixel(15, 9), 0xFF0000FFu);
+  CHECK_EQ(pixel(5, 9), 0xFFFFFFFFu);
+  call(rt, cv, "nSetBitmap", "(JJ)V", Args().j(c).j(bitmap));  // a new target: no clip
+
+  // A colour filter (BlendModeColorFilter, SRC_IN) replaces the colour.
+  int64_t filter = int64_t(call(rt, "Landroid/graphics/BlendModeColorFilter;", "native_CreateBlendModeFilter", "(II)J",
+                                Args().i(int32_t(0xFF00FF00)).i(5)));
+  call(rt, pt, "nSetColorFilter", "(JJ)J", Args().j(paint).j(filter));
+  call(rt, bc, "nDrawRect", "(JFFFFJ)V", Args().j(c).f(0).f(0).f(1).f(1).j(paint));
+  CHECK_EQ(pixel(0, 0), 0xFF00FF00u);
+  call(rt, pt, "nSetColorFilter", "(JJ)J", Args().j(paint).j(0));
+
+  // A horizontal gradient from red to blue (Color longs, sRGB).
+  rt::Handle colors = rt.new_array("[J", 2);
+  int64_t longs[2] = {int64_t(uint64_t(0xFFFF0000u) << 32), int64_t(uint64_t(0xFF0000FFu) << 32)};
+  std::memcpy(rt.array(colors, "long[]").data.data(), longs, sizeof longs);
+  int64_t shader = int64_t(call(rt, "Landroid/graphics/LinearGradient;", "nativeCreate", "(JFFFF[J[FIJ)J",
+                                Args().j(0).f(0).f(0).f(20).f(0).h(colors).h(rt::kNull).i(0).j(0)));
+  CHECK(shader != 0);
+  call(rt, pt, "nSetShader", "(JJ)J", Args().j(paint).j(shader));
+  call(rt, bc, "nDrawPaint", "(JJ)V", Args().j(c).j(paint));
+  uint32_t left = pixel(0, 5), right = pixel(19, 5);
+  CHECK((left >> 16 & 0xFF) > 0xE0 && (left & 0xFF) < 0x20);
+  CHECK((right & 0xFF) > 0xE0 && (right >> 16 & 0xFF) < 0x20);
+
+  // An antialiased circle: partly covered pixels at its edge.
+  call(rt, pt, "nSetShader", "(JJ)J", Args().j(paint).j(0));
+  call(rt, bc, "nDrawColor", "(JII)V", Args().j(c).i(int32_t(0xFFFFFFFF)).i(3));
+  call(rt, pt, "nSetColor", "(JI)V", Args().j(paint).i(int32_t(0xFF000000)));
+  call(rt, pt, "nSetAntiAlias", "(JZ)V", Args().j(paint).z(true));
+  call(rt, bc, "nDrawCircle", "(JFFFJ)V", Args().j(c).f(10).f(5).f(4).j(paint));
+  CHECK_EQ(pixel(10, 5), 0xFF000000u);
+  uint32_t edge = pixel(6, 3) & 0xFF;  // the circle crosses this pixel
+  CHECK(edge > 0x10 && edge < 0xF0);
+  CHECK_EQ(pixel(5, 5), 0xFFFFFFFFu);
+}
+
 // Region: SkRegion's canonical bands, boolean operations, iteration order
 // and toString, the instance natives reading Region.mNativeRegion.
 TEST(graphics_region_follows_skregion) {

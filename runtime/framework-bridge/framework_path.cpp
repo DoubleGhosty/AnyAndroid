@@ -1372,4 +1372,21 @@ void path_contents(Runtime& rt, int64_t handle, std::vector<uint8_t>& verbs, std
   weights = p->d.weights;
 }
 
+PathSnapshot path_snapshot(Runtime& rt, int64_t handle) {
+  PathSnapshot s;
+  {
+    auto p = path(rt, handle);
+    std::lock_guard<std::mutex> guard(p->lock);
+    s.verbs = p->d.verbs;
+    s.coords.reserve(p->d.points.size() * 2);
+    for (const Pt& pt : p->d.points) {
+      s.coords.push_back(pt.x);
+      s.coords.push_back(pt.y);
+    }
+    s.weights = p->d.weights;
+    s.fill_type = p->d.fill_type;
+  }
+  return s;
+}
+
 }  // namespace aa::bridge

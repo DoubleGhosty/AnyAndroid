@@ -10,7 +10,9 @@ namespace aa::bridge {
 // Native objects handed to Java as `long` values (AssetManager.mObject,
 // XmlBlock.mNative...). Handles are never pointers: they carry a kind tag, a
 // generation and a slot index, so a forged, stale or mistyped value is
-// rejected instead of reaching memory.
+// rejected instead of reaching memory. A handle may be shared by several
+// owners (RefBase's strong references): retain adds one, remove drops one and
+// frees the slot with the last.
 template <typename T>
 class HandleTable {
  public:
@@ -27,6 +29,7 @@ class HandleTable {
       slots_.emplace_back();
     }
     slots_[index].value = std::move(value);
+    slots_[index].refs = 1;
     ++live_;
     return (int64_t(kind_) << 48) | (int64_t(slots_[index].gen) << 32) | int64_t(index + 1);
   }
@@ -37,10 +40,19 @@ class HandleTable {
     return s ? s->value : nullptr;
   }
 
+  bool retain(int64_t handle) {
+    std::lock_guard<std::mutex> guard(lock_);
+    Slot* s = const_cast<Slot*>(slot(handle));
+    if (!s) return false;
+    ++s->refs;
+    return true;
+  }
+
   bool remove(int64_t handle) {
     std::lock_guard<std::mutex> guard(lock_);
     Slot* s = const_cast<Slot*>(slot(handle));
     if (!s) return false;
+    if (--s->refs > 0) return true;
     s->value.reset();
     ++s->gen;
     free_.push_back(uint32_t(handle & 0xffffffff) - 1);
@@ -56,6 +68,7 @@ class HandleTable {
  private:
   struct Slot {
     std::shared_ptr<T> value;
+    uint32_t refs = 0;
     uint16_t gen = 1;
   };
 
