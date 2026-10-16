@@ -14,9 +14,10 @@ add_executable(aa_unit_tests
   unit/test_zip.cpp
   unit/test_regex.cpp
   unit/test_resources.cpp
-  unit/test_res_compiler.cpp)
+  unit/test_res_compiler.cpp
+  unit/test_text.cpp)
 target_include_directories(aa_unit_tests PRIVATE unit)
-target_link_libraries(aa_unit_tests PRIVATE aa_tooling aa_bridge aa_dex aa_apk aa_image aa_vfs aa_regex)
+target_link_libraries(aa_unit_tests PRIVATE aa_tooling aa_bridge aa_dex aa_apk aa_image aa_vfs aa_regex aa_text)
 add_test(NAME unit COMMAND aa_unit_tests)
 # Every HandleTable has its own kind tag (framework-bridge/handles.h).
 add_test(NAME handle-kinds COMMAND ${CMAKE_COMMAND} -DROOT=${PROJECT_SOURCE_DIR}
