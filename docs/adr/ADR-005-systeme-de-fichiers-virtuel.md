@@ -36,6 +36,16 @@ Règles :
   `CON` ou `NUL`, point ou espace final, `%`) sont encodés `%XX` de façon réversible ; tout point
   d'analyse de l'hôte (lien, jonction) est refusé (`EACCES`), jamais traversé. Les fichiers sont
   ouverts avec `FILE_FLAG_OPEN_REPARSE_POINT`.
+- **Suppression et renommage à la Linux** : `unlink` et `rename` d'un fichier encore ouvert
+  libèrent ou remplacent le nom tout de suite, et les descripteurs ouverts gardent le fichier
+  qu'ils avaient (SQLite, `AtomicFile`, `SharedPreferences` en dépendent). Par défaut, Windows
+  laisse le nom pris (« suppression en attente ») jusqu'à la dernière fermeture. Le bac à sable
+  utilise la sémantique POSIX de NTFS (`FileDispositionInfoEx`, `FileRenameInfoEx`, Windows 10
+  1709 et suivants) ; à défaut (FAT, systèmes plus anciens, wine 9), le fichier part d'abord sous
+  un nom unique dans un répertoire caché de la zone (`%%corbeille`, nom qu'aucun nom encodé ne
+  peut produire), puis il est supprimé à sa dernière fermeture. `rename` suit aussi les autres
+  règles de Linux : un répertoire vide est remplacé, `EISDIR`/`ENOTDIR`/`ENOTEMPTY`, `EINVAL` vers
+  son propre sous-répertoire, et un simple changement de casse n'est pas pris pour un remplacement.
 - **Erreurs** : valeurs `errno` Linux, converties en `android.system.ErrnoException` ; un nom de
   l'hôte n'apparaît jamais dans un message.
 - **Descripteurs** : 0 à 2 sont les flux standard de l'hôte ; les autres (à partir de 3, 1 024 au
@@ -63,7 +73,7 @@ drapeaux), attributs étendus (aucun), droits et propriétaires (sans effet) ; `
 
 `tests/unit/test_image.cpp` : normalisation et encodage des noms, bac à sable (écriture, ajout,
 lecture et écriture positionnelles, troncature, répertoires, renommage entre montages refusé,
-`..` contenu), `/dev`, image système en lecture seule, liens internes et vers un montage
+`..` contenu), suppression et renommage de fichiers ouverts (sémantique POSIX et repli), `/dev`, image système en lecture seule, liens internes et vers un montage
 inscriptible, boucle de liens, module APEX ouvert à la demande, points de montage listés.
 Bout en bout : `libcore-demo` écrit, relit, liste et supprime un fichier, et lit les données ICU du
 module i18n, avec la libcore extraite comme racine et avec l'image système (`libcore-demo-image`).

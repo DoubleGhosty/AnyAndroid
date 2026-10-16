@@ -2,8 +2,10 @@
 #include "vfs/vfs.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <chrono>
+#include <cstddef>
 #include <cstring>
 #include <mutex>
 #include <stdexcept>
@@ -458,6 +460,110 @@ class HostFile final : public OpenFile {
   bool readable_, writable_;
 };
 
+// Linux lets a program delete or replace a file that is still open: the name
+// changes at once and open descriptors keep the file they had. SQLite,
+// AtomicFile and SharedPreferences rely on it. Windows's default marks the file
+// "delete pending" instead: the name stays taken until the last handle closes,
+// and creating the file again fails. NTFS offers the Linux behaviour since
+// Windows 10 1709 (FileDispositionInfoEx, FileRenameInfoEx); elsewhere the
+// file is first moved into a hidden directory of the area, then deleted when
+// its last handle closes.
+std::atomic<bool> g_posix_semantics{true};
+
+#ifdef _WIN32
+constexpr DWORD kDispositionDelete = 0x1, kDispositionPosix = 0x2, kDispositionIgnoreReadOnly = 0x10;
+constexpr DWORD kRenameReplace = 0x1, kRenamePosix = 0x2, kRenameIgnoreReadOnly = 0x40;
+constexpr auto kFileDispositionInfoEx = FILE_INFO_BY_HANDLE_CLASS(21);
+constexpr auto kFileRenameInfoEx = FILE_INFO_BY_HANDLE_CLASS(22);
+// Host name of the hidden directory: "%%" never occurs in an encoded name.
+constexpr wchar_t kTrashName[] = L"%%corbeille";
+
+int32_t host_errno(DWORD e) {
+  switch (e) {
+    case ERROR_FILE_NOT_FOUND:
+    case ERROR_PATH_NOT_FOUND: return kENOENT;
+    case ERROR_ACCESS_DENIED: return kEACCES;
+    case ERROR_SHARING_VIOLATION: return kEBUSY;
+    case ERROR_DIR_NOT_EMPTY: return kENOTEMPTY;
+    case ERROR_DISK_FULL: return kENOSPC;
+    default: return kEIO;
+  }
+}
+
+// An existing file or directory, opened only to delete or rename it.
+HANDLE open_for_delete(const std::filesystem::path& p) {
+  return CreateFileW(p.c_str(), DELETE | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                     nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+}
+
+// Whether two host paths name the same file: NTFS ignores case ("a" and "A"),
+// and 8.3 short names alias long ones.
+bool same_host_file(const std::filesystem::path& a, const std::filesystem::path& b) {
+  auto id = [](const std::filesystem::path& p, BY_HANDLE_FILE_INFORMATION& info) {
+    HANDLE h = CreateFileW(p.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    bool ok = GetFileInformationByHandle(h, &info);
+    CloseHandle(h);
+    return ok;
+  };
+  BY_HANDLE_FILE_INFORMATION x, y;
+  return id(a, x) && id(b, y) && x.dwVolumeSerialNumber == y.dwVolumeSerialNumber &&
+         x.nFileIndexHigh == y.nFileIndexHigh && x.nFileIndexLow == y.nFileIndexLow;
+}
+
+// unlink(2) of a regular file.
+void host_unlink(const std::filesystem::path& p, const std::filesystem::path& trash_dir, const std::string& rel) {
+  if (g_posix_semantics) {
+    HANDLE h = open_for_delete(p);
+    if (h == INVALID_HANDLE_VALUE) throw VfsError{host_errno(GetLastError()), rel};
+    struct {
+      DWORD flags;  // FILE_DISPOSITION_INFO_EX
+    } info{kDispositionDelete | kDispositionPosix | kDispositionIgnoreReadOnly};
+    bool done = SetFileInformationByHandle(h, kFileDispositionInfoEx, &info, sizeof info);
+    CloseHandle(h);
+    if (done) return;
+  }
+  // Fallback: out of the way under a unique name, then deleted on last close.
+  static std::atomic<uint32_t> counter{0};
+  CreateDirectoryW(trash_dir.c_str(), nullptr);
+  wchar_t name[64];
+  swprintf(name, 64, L"%lx-%llx-%x", GetCurrentProcessId(), (unsigned long long)GetTickCount64(), unsigned(++counter));
+  std::filesystem::path parked = trash_dir / name;
+  if (!MoveFileExW(p.c_str(), parked.c_str(), 0)) throw VfsError{host_errno(GetLastError()), rel};
+  DeleteFileW(parked.c_str());
+}
+
+// rename(2) between two names of the same area; `to`, if it exists, is a file.
+void host_rename(const std::filesystem::path& from, const std::filesystem::path& to, bool replace,
+                 const std::filesystem::path& trash_dir, const std::string& rel) {
+  if (g_posix_semantics) {
+    HANDLE h = open_for_delete(from);
+    if (h == INVALID_HANDLE_VALUE) throw VfsError{host_errno(GetLastError()), rel};
+    // FILE_RENAME_INFO, with the flags of FileRenameInfoEx in place of ReplaceIfExists.
+    struct Info {
+      DWORD flags;
+      HANDLE root;
+      DWORD length;
+      WCHAR name[1];
+    };
+    std::wstring target = to.wstring();
+    std::vector<uint8_t> buf(offsetof(Info, name) + (target.size() + 1) * sizeof(WCHAR));
+    auto* info = reinterpret_cast<Info*>(buf.data());
+    info->flags = kRenameReplace | kRenamePosix | kRenameIgnoreReadOnly;
+    info->root = nullptr;
+    info->length = DWORD(target.size() * sizeof(WCHAR));
+    std::memcpy(info->name, target.c_str(), (target.size() + 1) * sizeof(WCHAR));
+    bool done = SetFileInformationByHandle(h, kFileRenameInfoEx, info, DWORD(buf.size()));
+    CloseHandle(h);
+    if (done) return;
+  }
+  // Fallback: the target leaves first (not atomic, but open files survive).
+  if (replace) host_unlink(to, trash_dir, rel);
+  if (!MoveFileExW(from.c_str(), to.c_str(), 0)) throw VfsError{host_errno(GetLastError()), rel};
+}
+#endif
+
 class HostMount final : public Mount {
  public:
   HostMount(std::filesystem::path dir, bool read_only) : root_(std::move(dir)), read_only_(read_only) {
@@ -502,7 +608,9 @@ class HostMount final : public Mount {
     std::vector<std::string> out;
     std::error_code ec;
     for (const auto& e : std::filesystem::directory_iterator(host(rel), ec)) {
-      out.push_back(decode_host_name(path_utf8(e.path().filename())));
+      std::string name = path_utf8(e.path().filename());
+      if (name.starts_with("%%")) continue;  // the hidden directory of unlinked open files
+      out.push_back(decode_host_name(name));
     }
     return out;
   }
@@ -552,15 +660,41 @@ class HostMount final : public Mount {
     if (!directory && st->type == NodeType::kDirectory) throw VfsError{kEISDIR, rel};
     std::error_code ec;
     if (directory && !std::filesystem::is_empty(host(rel), ec)) throw VfsError{kENOTEMPTY, rel};
+#ifdef _WIN32
+    if (!directory) return host_unlink(host(rel), root_ / kTrashName, rel);
+#endif
     if (!std::filesystem::remove(host(rel), ec)) throw VfsError{kEIO, rel};
   }
   void rename(const std::string& from, const std::string& to) override {
     if (read_only_) throw VfsError{kEROFS, from};
-    if (!lstat(from)) throw VfsError{kENOENT, from};
+    auto src = lstat(from);
+    if (!src) throw VfsError{kENOENT, from};
     check_parent(to);
+    if (from == to) return;
+    if (from == "/" || to == "/") throw VfsError{kEBUSY, from};  // the area itself
+    if (to.starts_with(from + "/")) throw VfsError{kEINVAL, to};  // into itself
+    bool dir = src->type == NodeType::kDirectory;
     std::error_code ec;
+    auto dst = lstat(to);
+#ifdef _WIN32
+    if (dst && same_host_file(host(from), host(to))) dst.reset();  // a change of case only
+#endif
+    if (dst) {
+      bool dst_dir = dst->type == NodeType::kDirectory;
+      if (dir && !dst_dir) throw VfsError{kENOTDIR, to};
+      if (!dir && dst_dir) throw VfsError{kEISDIR, to};
+      if (dir) {  // an empty directory is replaced, as on Linux (NTFS cannot replace one)
+        if (!std::filesystem::is_empty(host(to), ec)) throw VfsError{kENOTEMPTY, to};
+        if (!std::filesystem::remove(host(to), ec)) throw VfsError{kEIO, to};
+        dst.reset();
+      }
+    }
+#ifdef _WIN32
+    host_rename(host(from), host(to), dst.has_value(), root_ / kTrashName, from);
+#else
     std::filesystem::rename(host(from), host(to), ec);
     if (ec) throw VfsError{kEIO, from};
+#endif
   }
   void set_mtime(const std::string& rel, int64_t seconds) override {
     if (read_only_) throw VfsError{kEROFS, rel};
@@ -738,6 +872,7 @@ std::unique_ptr<Mount> memory_mount(std::map<std::string, std::shared_ptr<const 
 std::unique_ptr<Mount> host_mount(const std::filesystem::path& dir, bool read_only) {
   return std::make_unique<HostMount>(dir, read_only);
 }
+void use_posix_file_semantics(bool enabled) { g_posix_semantics = enabled; }
 std::unique_ptr<Mount> dev_mount() { return std::make_unique<DevMount>(); }
 
 // --- Vfs ---------------------------------------------------------------------------------------

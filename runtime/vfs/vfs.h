@@ -28,7 +28,7 @@ namespace aa::vfs {
 
 // Linux errno values used by the VFS.
 enum : int32_t {
-  kEPERM = 1, kENOENT = 2, kEIO = 5, kEBADF = 9, kENOMEM = 12, kEACCES = 13, kEEXIST = 17, kEXDEV = 18, kENOTDIR = 20,
+  kEPERM = 1, kENOENT = 2, kEIO = 5, kEBADF = 9, kENOMEM = 12, kEACCES = 13, kEBUSY = 16, kEEXIST = 17, kEXDEV = 18, kENOTDIR = 20,
   kEISDIR = 21, kEINVAL = 22, kEMFILE = 24, kENOTTY = 25, kEFBIG = 27, kENOSPC = 28, kESPIPE = 29,
   kEROFS = 30, kENAMETOOLONG = 36, kENOTEMPTY = 39, kELOOP = 40, kENODATA = 61,
 };
@@ -92,8 +92,13 @@ std::unique_ptr<Mount> alias_mount(std::shared_ptr<image::FileSystem> fs, const 
 // Read-only flat directory of files held in memory (`files` maps an entry
 // name to its bytes), such as an application's APK under /data/app/<package>.
 std::unique_ptr<Mount> memory_mount(std::map<std::string, std::shared_ptr<const std::vector<uint8_t>>> files);
-// A host directory (created if needed). Writable unless read_only.
+// A host directory (created if needed). Writable unless read_only. unlink and
+// rename follow Linux even on open files: the name changes at once, open
+// descriptors keep the file they had.
 std::unique_ptr<Mount> host_mount(const std::filesystem::path& dir, bool read_only);
+// For tests: false makes host areas use the fallback for file systems without
+// POSIX semantics (FAT, Windows before 10 1709) instead of NTFS's.
+void use_posix_file_semantics(bool enabled);
 // /dev: null, zero, random, urandom.
 std::unique_ptr<Mount> dev_mount();
 

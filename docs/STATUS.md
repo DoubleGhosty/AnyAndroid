@@ -58,7 +58,7 @@ G5 ░░░░░░░░░░   0 %
    ████▎░░░░░ ≈ 43 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 36 suites de tests et 132 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 36 suites de tests et 134 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.
@@ -222,6 +222,10 @@ Ce qui passe déjà, avec le vrai code d'Android 17 :
    l'horloge commune (`common/clock.h`).
 
 **À savoir pour la suite** :
+- dans le bac à sable `/data`, `unlink` et `rename` d'un fichier ouvert suivent Linux (nom libéré
+  ou remplacé tout de suite) : sémantique POSIX de NTFS, avec un repli par répertoire caché quand
+  elle manque (wine 9 n'a pas `FileDispositionInfoEx`/`FileRenameInfoEx` : sous wine, c'est le
+  repli qui est testé ; le chemin POSIX l'est par la CI Windows) ;
 - toutes les lectures de temps passent par `runtime/common/clock.h` : une seule horloge monotone
   pour `System.nanoTime`, `SystemClock` et les échéances des attentes. Le runtime demande au
   démarrage des minuteries à 1 ms (`timeBeginPeriod`) : sans cela, sur Windows, chaque attente

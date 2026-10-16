@@ -1381,6 +1381,111 @@ TEST(vfs_sandboxed_data_areas) {
   std::filesystem::remove_all(root);
 }
 
+// SQLite, AtomicFile and SharedPreferences delete or replace files that are
+// still open, as Linux allows: the name changes at once, open descriptors keep
+// the file they had. Windows's default (delete pending until the last handle
+// closes) would keep the name taken and make the next create fail.
+namespace {
+
+void open_files_scenario(bool posix) {
+  vfs::use_posix_file_semantics(posix);
+  struct Restore {
+    ~Restore() { vfs::use_posix_file_semantics(true); }
+  } restore;
+  auto root = fresh_dir(posix ? "vfs-posix" : "vfs-posix-fallback");
+  vfs::LayoutOptions lo;
+  lo.data_root = root;
+  lo.package = "com.example.app";
+  auto v = vfs::make_android_vfs(lo);
+  const std::string d = "/data/local/tmp/";
+  auto pread_all = [&](int32_t fd) {
+    Bytes buf(64);
+    buf.resize(v->pread(fd, buf, 0));
+    return str(buf);
+  };
+  auto listed = [&](const std::string& name) {
+    auto names = v->list(d);
+    return std::find(names.begin(), names.end(), name) != names.end();
+  };
+
+  // unlink of an open file: the name is free at once, the descriptor still reads.
+  v->write_file(d + "journal", bytes("ancien"));
+  int32_t fd = v->open(d + "journal", vfs::kO_RDONLY, 0);
+  v->unlink(d + "journal");
+  CHECK(!v->exists(d + "journal"));
+  CHECK(!listed("journal"));
+  v->write_file(d + "journal", bytes("nouveau"));
+  CHECK_EQ(pread_all(fd), std::string("ancien"));
+  v->close(fd);
+  CHECK_EQ(str(v->read_file(d + "journal")), std::string("nouveau"));
+
+  // rename over an open target (AtomicFile): the path shows the new content,
+  // the old descriptor the old one.
+  v->write_file(d + "prefs.xml", bytes("v1"));
+  int32_t old = v->open(d + "prefs.xml", vfs::kO_RDONLY, 0);
+  v->write_file(d + "prefs.xml.new", bytes("v2"));
+  v->rename(d + "prefs.xml.new", d + "prefs.xml");
+  CHECK_EQ(str(v->read_file(d + "prefs.xml")), std::string("v2"));
+  CHECK(!v->exists(d + "prefs.xml.new"));
+  CHECK_EQ(pread_all(old), std::string("v1"));
+  v->close(old);
+  CHECK_EQ(str(v->read_file(d + "prefs.xml")), std::string("v2"));
+
+  // rename of an open source: writes through the descriptor reach the new name.
+  int32_t w = v->open(d + "db", vfs::kO_RDWR | vfs::kO_CREAT, 0600);
+  v->write(w, bytes("abc"));
+  v->rename(d + "db", d + "db2");
+  v->write(w, bytes("def"));
+  v->close(w);
+  CHECK_EQ(str(v->read_file(d + "db2")), std::string("abcdef"));
+  CHECK(!v->exists(d + "db"));
+
+  // The other rules of rename(2).
+  v->rename(d + "db2", d + "db2");  // same name: nothing to do
+  CHECK_EQ(str(v->read_file(d + "db2")), std::string("abcdef"));
+  v->mkdir(d + "dir", 0700);
+  v->mkdir(d + "empty", 0700);
+  v->mkdir(d + "full", 0700);
+  v->write_file(d + "full/x", bytes("x"));
+  CHECK_EQ(vfs_errno([&] { v->rename(d + "db2", d + "dir"); }), vfs::kEISDIR);
+  CHECK_EQ(vfs_errno([&] { v->rename(d + "dir", d + "db2"); }), vfs::kENOTDIR);
+  CHECK_EQ(vfs_errno([&] { v->rename(d + "dir", d + "full"); }), vfs::kENOTEMPTY);
+  CHECK_EQ(vfs_errno([&] { v->rename(d + "dir", d + "dir/sub"); }), vfs::kEINVAL);
+  v->rename(d + "dir", d + "empty");  // an empty directory is replaced
+  CHECK(!v->exists(d + "dir"));
+  CHECK(v->stat(d + "empty").type == vfs::NodeType::kDirectory);
+  // NTFS ignores case: renaming "db2" to "DB2" names the same host file, which
+  // must not be taken for a target to replace (and deleted).
+  v->rename(d + "db2", d + "DB2");
+  CHECK_EQ(str(v->read_file(d + "DB2")), std::string("abcdef"));
+  v->rename(d + "DB2", d + "db2");
+
+  // Nothing left behind on the host once every descriptor is closed. The
+  // fallback's hidden directory may remain, empty (also in POSIX mode where the
+  // system lacks it: wine 9 refuses FileDispositionInfoEx and FileRenameInfoEx).
+  std::vector<std::string> host_names;
+  for (const auto& e : std::filesystem::recursive_directory_iterator(root / "com.example.app" / "tmp")) {
+    std::string name = e.path().filename().string();
+    if (name.starts_with("%%")) {
+      CHECK(std::filesystem::is_empty(e.path()));
+    } else {
+      host_names.push_back(name);
+    }
+  }
+  std::sort(host_names.begin(), host_names.end());
+  std::string joined;
+  for (const auto& n : host_names) joined += n + " ";
+  CHECK_EQ(joined, std::string("db2 empty full journal prefs.xml x "));
+  CHECK(!listed("%%corbeille"));
+  std::filesystem::remove_all(root);
+}
+
+}  // namespace
+
+TEST(vfs_unlink_and_rename_of_open_files) { open_files_scenario(true); }
+
+TEST(vfs_unlink_and_rename_of_open_files_fallback) { open_files_scenario(false); }
+
 // ADR-006 J2: the application's APK under /data/app/<package>, read-only; the
 // package name (from an untrusted manifest) is a path component, so it must be
 // a Java package name.
