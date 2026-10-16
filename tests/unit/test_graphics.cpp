@@ -204,6 +204,20 @@ Contents contents(rt::Runtime& rt, int64_t path) {
 
 enum : uint8_t { kMove, kLine, kQuad, kConic, kCubic, kClose };
 
+const char* kPathParser = "Landroid/util/PathParser;";
+
+// "java.lang.X: message" of the exception thrown by f, or "".
+template <typename F>
+std::string thrown_text(rt::Runtime& rt, F&& f) {
+  try {
+    f();
+  } catch (const rt::JavaThrow& t) {
+    std::string d = rt.describe_throwable(t.exception);
+    return d.substr(0, d.find('\n'));
+  }
+  return "";
+}
+
 float float_field(rt::Runtime& rt, rt::Handle h, const char* name) {
   rt::Object& o = rt.nonnull(h, "o");
   rt::Field* f = o.klass->declared_field(name, "F");
@@ -420,6 +434,88 @@ TEST(graphics_path_shapes_follow_skpath) {
 }
 
 // Path.approximate: [fraction, x, y] triplets, as HWUI computes them.
+// android.util.PathParser: VectorDrawable's SVG path strings, parsed as HWUI
+// does (numbers split at '-' and at a second '.', exponents kept), turned
+// into SkPath verbs (smooth curves reflect the previous control point, 'z'
+// moves the pen back, arcs become conics as in SkPath::arcTo), and morphed.
+TEST(graphics_path_parser_follows_hwui) {
+  Vm vm;
+  rt::Runtime& rt = *vm.rt;
+  auto parse = [&](const std::string& s) {
+    int64_t p = int64_t(call(rt, kPath, "nInit", "()J"));
+    rt::GlobalRef str(rt, rt.new_string_utf8(s));
+    call(rt, kPathParser, "nParseStringForPath", "(JLjava/lang/String;I)V",
+         Args().j(p).h(str.get()).i(int32_t(s.size())));
+    return p;
+  };
+  auto data = [&](const std::string& s) {
+    rt::GlobalRef str(rt, rt.new_string_utf8(s));
+    return int64_t(call(rt, kPathParser, "nCreatePathDataFromString", "(Ljava/lang/String;I)J",
+                        Args().h(str.get()).i(int32_t(s.size()))));
+  };
+
+  Contents c = contents(rt, parse("M10,20 L30,40 z m5-5 10,0 h-3 v2 Z"));
+  CHECK(c.verbs == (std::vector<uint8_t>{kMove, kLine, kClose, kMove, kMove, kLine, kLine, kLine, kClose, kMove}));
+  CHECK(c.coords == (std::vector<float>{10, 20, 30, 40, 10, 20, 15, 15, 25, 15, 22, 15, 22, 17, 15, 15}));
+
+  c = contents(rt, parse("M0,0 C10,0 20,10 20,20 S30,40 40,40"));
+  CHECK(c.verbs == (std::vector<uint8_t>{kMove, kCubic, kCubic}));
+  CHECK(c.coords == (std::vector<float>{0, 0, 10, 0, 20, 10, 20, 20, 20, 30, 30, 40, 40, 40}));
+  c = contents(rt, parse("M0,0 Q10,0 10,10 T10,30 M1e-1-2 L.5.5"));
+  CHECK(c.verbs == (std::vector<uint8_t>{kMove, kQuad, kQuad, kMove, kLine}));
+  CHECK(c.coords == (std::vector<float>{0, 0, 10, 0, 10, 10, 10, 20, 10, 30, 0.1f, -2, 0.5f, 0.5f}));
+
+  // The upper half circle: two quarter conics, on integers like the input.
+  c = contents(rt, parse("M0,0 A10,10 0 0,1 20,0"));
+  CHECK(c.verbs == (std::vector<uint8_t>{kMove, kConic, kConic}));
+  CHECK(c.coords == (std::vector<float>{0, 0, 0, -10, 10, -10, 20, -10, 20, 0}));
+  CHECK_EQ(c.weights.size(), size_t(2));
+  CHECK(std::fabs(c.weights[0] - 0.70710678f) < 1e-6f);
+  // A null radius is a line; sweep 0 goes the other way round.
+  c = contents(rt, parse("M0,0 a0,5 0 0 0 5,5 A10,10 0 0,0 25,5"));
+  CHECK(c.verbs == (std::vector<uint8_t>{kMove, kLine, kConic, kConic}));
+  CHECK(c.coords == (std::vector<float>{0, 0, 5, 5, 5, 15, 15, 15, 25, 15, 25, 5}));
+
+  // HWUI's messages, word for word.
+  const std::string iae = "java.lang.IllegalArgumentException: ";
+  CHECK_EQ(thrown_text(rt, [&] { parse("M10"); }),
+           iae + "M needs to be followed by a multiple of 2 floats. However, 1 float(s) are found. "
+                 "Failure occurred at position 0 of path: M10");
+  CHECK_EQ(thrown_text(rt, [&] { parse("M1e1-2.5.5"); }),
+           iae + "M needs to be followed by a multiple of 2 floats. However, 3 float(s) are found. "
+                 "Failure occurred at position 0 of path: M1e1-2.5.5");
+  CHECK_EQ(thrown_text(rt, [&] { parse("M1,2 L3,4.5.6"); }),
+           iae + "L needs to be followed by a multiple of 2 floats. However, 3 float(s) are found. "
+                 "Failure occurred at position 5 of path: M1,2 L3,4.5.6");
+  CHECK_EQ(thrown_text(rt, [&] { parse("X1"); }),
+           iae + "X is not a valid verb. Failure occurred at position 0 of path: X1");
+  CHECK_EQ(thrown_text(rt, [&] { parse("   "); }), iae + "Path string cannot be empty.");
+
+  // Morphing: same verbs and float counts, floats interpolated.
+  int64_t a = data("M0,0 L10,0"), b = data("M0,0 L20,10"), cubic = data("M0,0 C1,1 2,2 3,3");
+  CHECK_EQ(call(rt, kPathParser, "nCanMorph", "(JJ)Z", Args().j(a).j(b)), uint64_t(1));
+  CHECK_EQ(call(rt, kPathParser, "nCanMorph", "(JJ)Z", Args().j(a).j(cubic)), uint64_t(0));
+  int64_t out = int64_t(call(rt, kPathParser, "nCreateEmptyPathData", "()J"));
+  CHECK_EQ(call(rt, kPathParser, "nInterpolatePathData", "(JJJF)Z", Args().j(out).j(a).j(b).f(0.5f)), uint64_t(1));
+  CHECK_EQ(call(rt, kPathParser, "nInterpolatePathData", "(JJJF)Z", Args().j(out).j(a).j(cubic).f(0.5f)),
+           uint64_t(0));
+  int64_t p = int64_t(call(rt, kPath, "nInit", "()J"));
+  call(rt, kPathParser, "nCreatePathFromPathData", "(JJ)V", Args().j(p).j(out));
+  c = contents(rt, p);
+  CHECK(c.verbs == (std::vector<uint8_t>{kMove, kLine}));
+  CHECK(c.coords == (std::vector<float>{0, 0, 15, 5}));
+  int64_t copy = int64_t(call(rt, kPathParser, "nCreatePathData", "(J)J", Args().j(cubic)));
+  call(rt, kPathParser, "nSetPathData", "(JJ)V", Args().j(out).j(copy));
+  call(rt, kPathParser, "nCreatePathFromPathData", "(JJ)V", Args().j(p).j(out));
+  CHECK(contents(rt, p).verbs == (std::vector<uint8_t>{kMove, kCubic}));
+  CHECK_EQ(thrown_text(rt, [&] { data("Q1"); }),
+           iae + "Q needs to be followed by a multiple of 4 floats. However, 1 float(s) are found. "
+                 "Failure occurred at position 0 of path: Q1");
+  call(rt, kPathParser, "nFinalize", "(J)V", Args().j(copy));
+  CHECK_EQ(thrown(rt, [&] { call(rt, kPathParser, "nCreatePathData", "(J)J", Args().j(copy)); }),
+           std::string("java.lang.IllegalStateException"));
+}
+
 TEST(graphics_path_approximate) {
   Vm vm;
   rt::Runtime& rt = *vm.rt;

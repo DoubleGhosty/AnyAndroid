@@ -12,14 +12,19 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
+#include <cerrno>
 #include <climits>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
+#include "common/text.h"
 #include "framework-bridge/handles.h"
 
 namespace aa::bridge {
@@ -108,6 +113,8 @@ void inject_move(PathData& d) {
 
 Pt last_point(const PathData& d) { return d.points.empty() ? Pt{} : d.points.back(); }
 
+bool same(Pt a, Pt b) { return a.x == b.x && a.y == b.y; }
+
 void line_to(PathData& d, Pt p) {
   inject_move(d);
   append(d, kLine, {p});
@@ -144,6 +151,120 @@ void close(PathData& d) {
 }
 
 Pt add(Pt a, float dx, float dy) { return {a.x + dx, a.y + dy}; }
+
+// Relative verbs: from the last point (rMoveTo: from the last contour's start
+// after a close), as SkPath.
+void r_move_to(PathData& d, float dx, float dy) {
+  Pt from;
+  if (!d.points.empty()) from = d.last_move >= 0 ? d.points.back() : d.points[size_t(~d.last_move)];
+  move_to(d, add(from, dx, dy));
+}
+
+void r_line_to(PathData& d, float dx, float dy) {
+  inject_move(d);
+  line_to(d, add(last_point(d), dx, dy));
+}
+
+void r_quad_to(PathData& d, float x1, float y1, float x2, float y2) {
+  inject_move(d);
+  Pt o = last_point(d);
+  quad_to(d, add(o, x1, y1), add(o, x2, y2));
+}
+
+void r_cubic_to(PathData& d, float x1, float y1, float x2, float y2, float x3, float y3) {
+  inject_move(d);
+  Pt o = last_point(d);
+  cubic_to(d, add(o, x1, y1), add(o, x2, y2), add(o, x3, y3));
+}
+
+void set_last_point(PathData& d, Pt p) {
+  if (d.points.empty()) {
+    move_to(d, p);
+  } else {
+    d.points.back() = p;
+    d.generation = 0;
+  }
+}
+
+// SkScalarSinSnapToZero / SkScalarCosSnapToZero.
+float snap_to_zero(float v) { return std::fabs(v) <= 1.0f / 4096 ? 0.0f : v; }
+
+// SkMatrix restricted to what arcs need: x' = sx*x + kx*y, y' = ky*x + sy*y.
+struct Linear {
+  float sx = 1, kx = 0, ky = 0, sy = 1;
+  static Linear rotate(float degrees) {
+    float rad = degrees * (3.14159265f / 180);
+    float sn = snap_to_zero(std::sin(rad)), cs = snap_to_zero(std::cos(rad));
+    return {cs, -sn, sn, cs};
+  }
+  static Linear scale(float x, float y) { return {x, 0, 0, y}; }
+  Linear then_before(const Linear& m) const {  // this * m (SkMatrix::preConcat)
+    return {sx * m.sx + kx * m.ky, sx * m.kx + kx * m.sy, ky * m.sx + sy * m.ky, ky * m.kx + sy * m.sy};
+  }
+  Pt map(Pt p) const { return {sx * p.x + kx * p.y, ky * p.x + sy * p.y}; }
+};
+
+// SkPath::arcTo(rx, ry, angle, arcLarge, arcSweep, x, y): an SVG elliptical
+// arc as conics, Skia's conversion step by step.
+void svg_arc_to(PathData& d, float rx, float ry, float angle, bool large, bool ccw, Pt end) {
+  inject_move(d);
+  Pt src[2] = {last_point(d), end};
+  if (rx == 0 || ry == 0) return line_to(d, end);
+  if (same(src[0], src[1])) return line_to(d, end);
+  rx = std::fabs(rx);
+  ry = std::fabs(ry);
+  Pt mid = Linear::rotate(-angle).map({(src[0].x - src[1].x) * 0.5f, (src[0].y - src[1].y) * 0.5f});
+  float radii_scale = mid.x * mid.x / (rx * rx) + mid.y * mid.y / (ry * ry);
+  if (radii_scale > 1) {
+    radii_scale = std::sqrt(radii_scale);
+    rx *= radii_scale;
+    ry *= radii_scale;
+  }
+  Linear to_unit = Linear::scale(1 / rx, 1 / ry).then_before(Linear::rotate(-angle));
+  Pt unit[2] = {to_unit.map(src[0]), to_unit.map(src[1])};
+  Pt delta = {unit[1].x - unit[0].x, unit[1].y - unit[0].y};
+  float dd = delta.x * delta.x + delta.y * delta.y;
+  float scale_factor = std::sqrt(std::max(1 / dd - 0.25f, 0.0f));
+  if (ccw != large) scale_factor = -scale_factor;
+  delta = {delta.x * scale_factor, delta.y * scale_factor};
+  Pt center = {(unit[0].x + unit[1].x) * 0.5f - delta.y, (unit[0].y + unit[1].y) * 0.5f + delta.x};
+  unit[0] = {unit[0].x - center.x, unit[0].y - center.y};
+  unit[1] = {unit[1].x - center.x, unit[1].y - center.y};
+  float theta1 = std::atan2(unit[0].y, unit[0].x);
+  float theta2 = std::atan2(unit[1].y, unit[1].x);
+  float theta_arc = theta2 - theta1;
+  constexpr float kPi = 3.14159265f;
+  if (theta_arc < 0 && !ccw) {
+    theta_arc += kPi * 2;
+  } else if (theta_arc > 0 && ccw) {
+    theta_arc -= kPi * 2;
+  }
+  if (std::fabs(theta_arc) < kPi / (1000 * 1000)) return line_to(d, end);  // skbug.com/9272
+  Linear from_unit = Linear::rotate(angle).then_before(Linear::scale(rx, ry));
+  // The arc may be slightly bigger than a quarter circle: up to a third per conic.
+  int segments = int(std::ceil(std::fabs(theta_arc / (2 * kPi / 3))));
+  float theta_width = theta_arc / float(segments);
+  float t = std::tan(0.5f * theta_width);
+  if (!std::isfinite(t)) return;
+  float start_theta = theta1;
+  float w = std::sqrt(0.5f + std::cos(theta_width) * 0.5f);
+  auto integer = [](float v) { return v == std::floor(v); };
+  bool expect_integers = std::fabs(kPi / 2 - std::fabs(theta_width)) <= 1.0f / 4096 && integer(rx) &&
+                         integer(ry) && integer(end.x) && integer(end.y);
+  for (int i = 0; i < segments; ++i) {
+    float end_theta = start_theta + theta_width;
+    float sin_end = snap_to_zero(std::sin(end_theta)), cos_end = snap_to_zero(std::cos(end_theta));
+    Pt on = {cos_end + center.x, sin_end + center.y};
+    Pt ctrl = {on.x + t * sin_end, on.y - t * cos_end};
+    Pt mapped[2] = {from_unit.map(ctrl), from_unit.map(on)};
+    if (expect_integers) {
+      for (Pt& m : mapped) m = {std::floor(m.x + 0.5f), std::floor(m.y + 0.5f)};
+    }
+    conic_to(d, mapped[0], mapped[1], w);
+    start_theta = end_theta;
+  }
+  set_last_point(d, end);  // exactly the requested end, whatever the rounding
+}
 
 // SkPath_PointIterator: N points visited from `start`, clockwise or not.
 template <size_t N>
@@ -388,7 +509,6 @@ rt::NativeFn edit(Fn fn) {
 
 // --- Path.approximate (hwui/jni/Path.cpp) ---
 
-bool same(Pt a, Pt b) { return a.x == b.x && a.y == b.y; }
 
 // Returns point * scale + other.
 Pt scale_add(Pt point, float scale, Pt other) { return {point.x * scale + other.x, point.y * scale + other.y}; }
@@ -628,6 +748,431 @@ Rect rect_args(NativeArgs& a, uint32_t first) {
   return {a.f32(first), a.f32(first + 1), a.f32(first + 2), a.f32(first + 3)};
 }
 
+// --- android.util.PathParser (hwui: PathParser.cpp, VectorDrawableUtils.cpp) ---
+
+// An SVG path string ("M 0 0 L 10 10 Z") parsed as VectorDrawable keeps it
+// to morph one path into another: the verb letters, the float count of each,
+// and the floats.
+struct VectorPathData {
+  std::vector<char> verbs;
+  std::vector<size_t> sizes;
+  std::vector<float> points;
+};
+
+struct VectorPath {
+  std::mutex lock;
+  VectorPathData d;
+};
+
+// Kind tag: unique across the runtime (tests/check_handle_kinds.cmake).
+HandleTable<VectorPath>& vector_paths() {
+  static auto* t = new HandleTable<VectorPath>(0x110E);  // never destroyed
+  return *t;
+}
+
+std::shared_ptr<VectorPath> vector_path(Runtime& rt, int64_t h) {
+  auto p = vector_paths().get(h);
+  if (!p) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] PathData invalide");
+  return p;
+}
+
+VectorPathData copy_of(VectorPath& p) {
+  std::lock_guard<std::mutex> guard(p.lock);
+  return p.d;
+}
+
+struct ParseResult {
+  bool failed = false;
+  std::string message;
+};
+
+// Index of the next command letter ('e' and 'E' belong to numbers).
+size_t next_start(const std::string& s, size_t length, size_t index) {
+  for (; index < length; ++index) {
+    char c = s[index];
+    if (((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) && c != 'e' && c != 'E') return index;
+  }
+  return index;
+}
+
+// End of the number starting at `start`: at a ' ' or ',', or at a '-' or a
+// second '.' that begins the next number (ends_with_sign_or_dot).
+size_t extract_number(const std::string& s, size_t start, size_t end, bool& ends_with_sign_or_dot) {
+  ends_with_sign_or_dot = false;
+  bool second_dot = false, exponential = false;
+  size_t i = start;
+  for (; i < end; ++i) {
+    bool previous_exponential = exponential;
+    exponential = false;
+    bool separator = false;
+    switch (s[i]) {
+      case ' ':
+      case ',':
+        separator = true;
+        break;
+      case '-':
+        if (i != start && !previous_exponential) separator = ends_with_sign_or_dot = true;
+        break;
+      case '.':
+        if (!second_dot) {
+          second_dot = true;
+        } else {
+          separator = ends_with_sign_or_dot = true;
+        }
+        break;
+      case 'e':
+      case 'E':
+        exponential = true;
+        break;
+    }
+    if (separator) break;
+  }
+  return i;
+}
+
+float parse_float(ParseResult& result, const std::string& s, size_t at, size_t expected_length) {
+  const char* begin = s.c_str() + at;
+  char* stop = nullptr;
+  errno = 0;
+  float v = std::strtof(begin, &stop);
+  if ((v == HUGE_VALF || v == -HUGE_VALF) && errno == ERANGE) {
+    result.failed = true;
+    result.message = "Float out of range:  " + s.substr(at, expected_length);
+  }
+  if (v == 0 && stop == begin) {
+    result.failed = true;
+    result.message = "Float format error when parsing: " + s.substr(at, expected_length);
+  }
+  return v;
+}
+
+void get_floats(std::vector<float>& out, ParseResult& result, const std::string& s, size_t start, size_t end) {
+  if (s[start] == 'z' || s[start] == 'Z') return;
+  size_t from = start + 1;
+  while (from < end) {
+    bool ends_with_sign_or_dot;
+    size_t to = extract_number(s, from, end, ends_with_sign_or_dot);
+    if (from < to) {
+      float v = parse_float(result, s, from, end - from);
+      if (result.failed) return;
+      out.push_back(v);
+    }
+    from = ends_with_sign_or_dot ? to : to + 1;
+  }
+}
+
+void validate_verb(char verb, size_t points, ParseResult& result) {
+  size_t expected;
+  switch (verb) {
+    case 'z': case 'Z': expected = 0; break;
+    case 'm': case 'l': case 't': case 'M': case 'L': case 'T': expected = 2; break;
+    case 'h': case 'v': case 'H': case 'V': expected = 1; break;
+    case 'c': case 'C': expected = 6; break;
+    case 's': case 'q': case 'S': case 'Q': expected = 4; break;
+    case 'a': case 'A': expected = 7; break;
+    default:
+      result.failed = true;
+      result.message += verb;
+      result.message += " is not a valid verb. ";
+      return;
+  }
+  if (expected == 0 && points == 0) return;
+  if (expected > 0 && points % expected == 0) return;
+  result.failed = true;
+  result.message += verb;
+  result.message += " needs to be followed by ";
+  if (expected > 0) result.message += "a multiple of ";
+  result.message += std::to_string(expected) + " floats. However, " + std::to_string(points) + " float(s) are found. ";
+}
+
+// PathParser::getPathDataFromAsciiString, messages included.
+void parse_path_data(VectorPathData& data, ParseResult& result, const std::string& s, size_t length) {
+  size_t start = 0;
+  while (start < length && std::isspace(static_cast<unsigned char>(s[start]))) ++start;
+  if (start == length) {
+    result.failed = true;
+    result.message = "Path string cannot be empty.";
+    return;
+  }
+  auto add_verb = [&](size_t at, std::vector<float> points) {
+    validate_verb(s[at], points.size(), result);
+    if (result.failed) {
+      result.message += "Failure occurred at position " + std::to_string(at) + " of path: " + s;
+      return false;
+    }
+    data.verbs.push_back(s[at]);
+    data.sizes.push_back(points.size());
+    data.points.insert(data.points.end(), points.begin(), points.end());
+    return true;
+  };
+  size_t end = start + 1;
+  while (end < length) {
+    end = next_start(s, length, end);
+    std::vector<float> points;
+    get_floats(points, result, s, start, end);
+    if (!add_verb(start, std::move(points))) return;
+    start = end;
+    ++end;
+  }
+  if (end - start == 1 && start < length) add_verb(start, {});
+}
+
+// VectorDrawableUtils::verbsToPath (PathResolver::addCommand per verb).
+void path_from_data(PathData& out, const VectorPathData& data) {
+  out = PathData{};  // SkPath::reset
+  float cur_x = 0, cur_y = 0, ctrl_x = 0, ctrl_y = 0, start_x = 0, start_y = 0;
+  char previous = 'm';
+  size_t first = 0;
+  for (size_t i = 0; i < data.verbs.size(); ++i) {
+    char cmd = data.verbs[i];
+    size_t last = first + data.sizes[i];
+    const float* v = data.points.data();
+    size_t incr = 2;
+    switch (cmd) {
+      case 'z':
+      case 'Z':
+        close(out);
+        // The pen goes back to the contour's start.
+        cur_x = ctrl_x = start_x;
+        cur_y = ctrl_y = start_y;
+        move_to(out, {cur_x, cur_y});
+        break;
+      case 'h': case 'H': case 'v': case 'V': incr = 1; break;
+      case 'c': case 'C': incr = 6; break;
+      case 's': case 'S': case 'q': case 'Q': incr = 4; break;
+      case 'a': case 'A': incr = 7; break;
+      default: break;
+    }
+    char prev = previous;
+    for (size_t k = first; k < last; k += incr) {
+      const float* p = v + k;
+      bool cubic_before = prev == 'c' || prev == 's' || prev == 'C' || prev == 'S';
+      bool quad_before = prev == 'q' || prev == 't' || prev == 'Q' || prev == 'T';
+      switch (cmd) {
+        case 'm':
+          cur_x += p[0];
+          cur_y += p[1];
+          if (k > first) {
+            r_line_to(out, p[0], p[1]);  // further pairs are implicit linetos
+          } else {
+            r_move_to(out, p[0], p[1]);
+            start_x = cur_x;
+            start_y = cur_y;
+          }
+          break;
+        case 'M':
+          cur_x = p[0];
+          cur_y = p[1];
+          if (k > first) {
+            line_to(out, {p[0], p[1]});
+          } else {
+            move_to(out, {p[0], p[1]});
+            start_x = cur_x;
+            start_y = cur_y;
+          }
+          break;
+        case 'l':
+          r_line_to(out, p[0], p[1]);
+          cur_x += p[0];
+          cur_y += p[1];
+          break;
+        case 'L':
+          line_to(out, {p[0], p[1]});
+          cur_x = p[0];
+          cur_y = p[1];
+          break;
+        case 'h':
+          r_line_to(out, p[0], 0);
+          cur_x += p[0];
+          break;
+        case 'H':
+          line_to(out, {p[0], cur_y});
+          cur_x = p[0];
+          break;
+        case 'v':
+          r_line_to(out, 0, p[0]);
+          cur_y += p[0];
+          break;
+        case 'V':
+          line_to(out, {cur_x, p[0]});
+          cur_y = p[0];
+          break;
+        case 'c':
+          r_cubic_to(out, p[0], p[1], p[2], p[3], p[4], p[5]);
+          ctrl_x = cur_x + p[2];
+          ctrl_y = cur_y + p[3];
+          cur_x += p[4];
+          cur_y += p[5];
+          break;
+        case 'C':
+          cubic_to(out, {p[0], p[1]}, {p[2], p[3]}, {p[4], p[5]});
+          cur_x = p[4];
+          cur_y = p[5];
+          ctrl_x = p[2];
+          ctrl_y = p[3];
+          break;
+        case 's': {
+          float rx = cubic_before ? cur_x - ctrl_x : 0, ry = cubic_before ? cur_y - ctrl_y : 0;
+          r_cubic_to(out, rx, ry, p[0], p[1], p[2], p[3]);
+          ctrl_x = cur_x + p[0];
+          ctrl_y = cur_y + p[1];
+          cur_x += p[2];
+          cur_y += p[3];
+          break;
+        }
+        case 'S': {
+          float rx = cubic_before ? 2 * cur_x - ctrl_x : cur_x, ry = cubic_before ? 2 * cur_y - ctrl_y : cur_y;
+          cubic_to(out, {rx, ry}, {p[0], p[1]}, {p[2], p[3]});
+          ctrl_x = p[0];
+          ctrl_y = p[1];
+          cur_x = p[2];
+          cur_y = p[3];
+          break;
+        }
+        case 'q':
+          r_quad_to(out, p[0], p[1], p[2], p[3]);
+          ctrl_x = cur_x + p[0];
+          ctrl_y = cur_y + p[1];
+          cur_x += p[2];
+          cur_y += p[3];
+          break;
+        case 'Q':
+          quad_to(out, {p[0], p[1]}, {p[2], p[3]});
+          ctrl_x = p[0];
+          ctrl_y = p[1];
+          cur_x = p[2];
+          cur_y = p[3];
+          break;
+        case 't': {
+          float rx = quad_before ? cur_x - ctrl_x : 0, ry = quad_before ? cur_y - ctrl_y : 0;
+          r_quad_to(out, rx, ry, p[0], p[1]);
+          ctrl_x = cur_x + rx;
+          ctrl_y = cur_y + ry;
+          cur_x += p[0];
+          cur_y += p[1];
+          break;
+        }
+        case 'T': {
+          float rx = quad_before ? 2 * cur_x - ctrl_x : cur_x, ry = quad_before ? 2 * cur_y - ctrl_y : cur_y;
+          quad_to(out, {rx, ry}, {p[0], p[1]});
+          ctrl_x = rx;
+          ctrl_y = ry;
+          cur_x = p[0];
+          cur_y = p[1];
+          break;
+        }
+        case 'a':
+          // (rx ry x-axis-rotation large-arc-flag sweep-flag x y); sweep 0: counterclockwise.
+          svg_arc_to(out, p[0], p[1], p[2], p[3] != 0, p[4] == 0, {p[5] + cur_x, p[6] + cur_y});
+          cur_x += p[5];
+          cur_y += p[6];
+          ctrl_x = cur_x;
+          ctrl_y = cur_y;
+          break;
+        case 'A':
+          svg_arc_to(out, p[0], p[1], p[2], p[3] != 0, p[4] == 0, {p[5], p[6]});
+          cur_x = p[5];
+          cur_y = p[6];
+          ctrl_x = cur_x;
+          ctrl_y = cur_y;
+          break;
+      }
+      prev = cmd;
+    }
+    previous = cmd;
+    first = last;
+  }
+}
+
+bool can_morph(const VectorPathData& from, const VectorPathData& to) {
+  return from.verbs == to.verbs && from.sizes == to.sizes;
+}
+
+void register_path_parser(rt::NativeRegistry& r) {
+  const char* pp = "Landroid/util/PathParser;";
+  auto string_arg = [](Runtime& rt, NativeArgs& a, uint32_t index, int32_t length, std::string& out) {
+    if (a.h(index) == kNull) rt.throw_npe("PathParser : chaîne null");
+    out = text::utf16_to_utf8(a.str(index));
+    return std::min<size_t>(size_t(std::max(length, 0)), out.size());
+  };
+  r.bind(pp, "nParseStringForPath", "(JLjava/lang/String;I)V", [string_arg](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto path_obj = path(rt, a.i64(0));
+    std::string s;
+    size_t length = string_arg(rt, a, 2, a.i32(3), s);
+    VectorPathData data;
+    ParseResult result;
+    parse_path_data(data, result, s, length);
+    if (!result.failed && data.verbs.empty()) {
+      result.failed = true;
+      result.message = "No verbs found in the string for pathData: " + s;
+    }
+    if (result.failed) rt.throw_new("Ljava/lang/IllegalArgumentException;", result.message);
+    try {
+      std::lock_guard<std::mutex> guard(path_obj->lock);
+      path_from_data(path_obj->d, data);
+    } catch (const TooBig&) {
+      rt.throw_new("Ljava/lang/OutOfMemoryError;", "Path : trop de points");
+    }
+    return 0;
+  });
+  r.bind(pp, "nCreatePathDataFromString", "(Ljava/lang/String;I)J", [string_arg](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::string s;
+    size_t length = string_arg(rt, a, 0, a.i32(1), s);
+    auto created = std::make_shared<VectorPath>();
+    ParseResult result;
+    parse_path_data(created->d, result, s, length);
+    if (result.failed) rt.throw_new("Ljava/lang/IllegalArgumentException;", result.message);
+    return rt::ret_long(vector_paths().add(std::move(created)));
+  });
+  r.bind(pp, "nCreateEmptyPathData", "()J", [](Runtime&, NativeArgs&) -> uint64_t {
+    return rt::ret_long(vector_paths().add(std::make_shared<VectorPath>()));
+  });
+  r.bind(pp, "nCreatePathData", "(J)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto created = std::make_shared<VectorPath>();
+    created->d = copy_of(*vector_path(rt, a.i64(0)));
+    return rt::ret_long(vector_paths().add(std::move(created)));
+  });
+  r.bind(pp, "nFinalize", "(J)V", [](Runtime&, NativeArgs& a) -> uint64_t {
+    vector_paths().remove(a.i64(0));
+    return 0;
+  });
+  r.bind(pp, "nSetPathData", "(JJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto out = vector_path(rt, a.i64(0));
+    VectorPathData from = copy_of(*vector_path(rt, a.i64(2)));
+    std::lock_guard<std::mutex> guard(out->lock);
+    out->d = std::move(from);
+    return 0;
+  });
+  r.bind(pp, "nCanMorph", "(JJ)Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_bool(can_morph(copy_of(*vector_path(rt, a.i64(0))), copy_of(*vector_path(rt, a.i64(2)))));
+  });
+  r.bind(pp, "nInterpolatePathData", "(JJJF)Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto out = vector_path(rt, a.i64(0));
+    VectorPathData from = copy_of(*vector_path(rt, a.i64(2)));
+    VectorPathData to = copy_of(*vector_path(rt, a.i64(4)));
+    float fraction = a.f32(6);
+    if (!can_morph(from, to)) return rt::ret_bool(false);
+    VectorPathData result = from;
+    for (size_t i = 0; i < from.points.size(); ++i) {
+      result.points[i] = from.points[i] * (1 - fraction) + to.points[i] * fraction;
+    }
+    std::lock_guard<std::mutex> guard(out->lock);
+    out->d = std::move(result);
+    return rt::ret_bool(true);
+  });
+  r.bind(pp, "nCreatePathFromPathData", "(JJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto path_obj = path(rt, a.i64(0));
+    VectorPathData data = copy_of(*vector_path(rt, a.i64(2)));
+    try {
+      std::lock_guard<std::mutex> guard(path_obj->lock);
+      path_from_data(path_obj->d, data);
+    } catch (const TooBig&) {
+      rt.throw_new("Ljava/lang/OutOfMemoryError;", "Path : trop de points");
+    }
+    return 0;
+  });
+}
+
 }  // namespace
 
 void register_framework_path(rt::NativeRegistry& r) {
@@ -708,23 +1253,14 @@ void register_framework_path(rt::NativeRegistry& r) {
 
   // Contours.
   r.bind(p, "nMoveTo", "(JFF)V", edit([](PathData& d, NativeArgs& a) { move_to(d, {a.f32(2), a.f32(3)}); }));
-  r.bind(p, "nRMoveTo", "(JFF)V", edit([](PathData& d, NativeArgs& a) {
-    Pt from;
-    if (!d.points.empty()) from = d.last_move >= 0 ? d.points.back() : d.points[size_t(~d.last_move)];
-    move_to(d, add(from, a.f32(2), a.f32(3)));
-  }));
+  r.bind(p, "nRMoveTo", "(JFF)V", edit([](PathData& d, NativeArgs& a) { r_move_to(d, a.f32(2), a.f32(3)); }));
   r.bind(p, "nLineTo", "(JFF)V", edit([](PathData& d, NativeArgs& a) { line_to(d, {a.f32(2), a.f32(3)}); }));
-  r.bind(p, "nRLineTo", "(JFF)V", edit([](PathData& d, NativeArgs& a) {
-    inject_move(d);
-    line_to(d, add(last_point(d), a.f32(2), a.f32(3)));
-  }));
+  r.bind(p, "nRLineTo", "(JFF)V", edit([](PathData& d, NativeArgs& a) { r_line_to(d, a.f32(2), a.f32(3)); }));
   r.bind(p, "nQuadTo", "(JFFFF)V", edit([](PathData& d, NativeArgs& a) {
     quad_to(d, {a.f32(2), a.f32(3)}, {a.f32(4), a.f32(5)});
   }));
   r.bind(p, "nRQuadTo", "(JFFFF)V", edit([](PathData& d, NativeArgs& a) {
-    inject_move(d);
-    Pt o = last_point(d);
-    quad_to(d, add(o, a.f32(2), a.f32(3)), add(o, a.f32(4), a.f32(5)));
+    r_quad_to(d, a.f32(2), a.f32(3), a.f32(4), a.f32(5));
   }));
   r.bind(p, "nConicTo", "(JFFFFF)V", edit([](PathData& d, NativeArgs& a) {
     conic_to(d, {a.f32(2), a.f32(3)}, {a.f32(4), a.f32(5)}, a.f32(6));
@@ -738,19 +1274,10 @@ void register_framework_path(rt::NativeRegistry& r) {
     cubic_to(d, {a.f32(2), a.f32(3)}, {a.f32(4), a.f32(5)}, {a.f32(6), a.f32(7)});
   }));
   r.bind(p, "nRCubicTo", "(JFFFFFF)V", edit([](PathData& d, NativeArgs& a) {
-    inject_move(d);
-    Pt o = last_point(d);
-    cubic_to(d, add(o, a.f32(2), a.f32(3)), add(o, a.f32(4), a.f32(5)), add(o, a.f32(6), a.f32(7)));
+    r_cubic_to(d, a.f32(2), a.f32(3), a.f32(4), a.f32(5), a.f32(6), a.f32(7));
   }));
   r.bind(p, "nClose", "(J)V", edit([](PathData& d, NativeArgs&) { close(d); }));
-  r.bind(p, "nSetLastPoint", "(JFF)V", edit([](PathData& d, NativeArgs& a) {
-    if (d.points.empty()) {
-      move_to(d, {a.f32(2), a.f32(3)});
-    } else {
-      d.points.back() = {a.f32(2), a.f32(3)};
-      d.generation = 0;
-    }
-  }));
+  r.bind(p, "nSetLastPoint", "(JFF)V", edit([](PathData& d, NativeArgs& a) { set_last_point(d, {a.f32(2), a.f32(3)}); }));
   r.bind(p, "nOffset", "(JFF)V", edit([](PathData& d, NativeArgs& a) {
     for (Pt& pt : d.points) pt = add(pt, a.f32(2), a.f32(3));
     d.generation = 0;
@@ -823,6 +1350,7 @@ void register_framework_path(rt::NativeRegistry& r) {
       return 0;
     });
   }
+  register_path_parser(r);
 }
 
 // For the unit tests: the verbs, points and conic weights of a path.

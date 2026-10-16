@@ -58,7 +58,7 @@ G5 ░░░░░░░░░░   0 %
    ████▎░░░░░ ≈ 43 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 36 suites de tests et 134 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 36 suites de tests et 135 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.
@@ -123,7 +123,9 @@ G5 ░░░░░░░░░░   0 %
   `RenderNode` et `Paint` comme magasins de propriétés avec les valeurs par défaut de HWUI ;
   `Path` sur le modèle de `SkPath` (contours, rectangles, ovales, rectangles arrondis avec la mise
   à l'échelle des rayons de `SkRRect`) et `Path.approximate` à l'identique de HWUI (les
-  interpolateurs d'animation en dépendent) ; `Matrix` avec les formules de `SkMatrix` ; `Font`,
+  interpolateurs d'animation en dépendent) ; `PathParser` (chemins SVG de `VectorDrawable` :
+  analyse et messages d'erreur de HWUI, arcs en coniques comme `SkPath::arcTo`, morphing) ;
+  `Matrix` avec les formules de `SkMatrix` ; `Font`,
   `FontFamily` et `Typeface` avec les règles de style et de repli de minikin. La mesure et le rendu du texte attendent le moteur de texte (J6).
 - **Annotations système des DEX** : `getEnclosingClass`, `getDeclaringClass`, `getSimpleName`,
   `isAnonymousClass` et `getDeclaredClasses` sont lus dans les annotations `InnerClass`,
