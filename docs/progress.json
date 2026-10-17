@@ -2,11 +2,11 @@
   "metadata": {
     "project": "AnyAndroid for Windows",
     "version": "0.1.0",
-    "generated_at": "2026-10-17T21:18:05.955814+00:00",
+    "generated_at": "2026-10-17T21:35:29.304394+00:00",
     "target": "Android natif sur Windows (sans VM ni hyperviseur)"
   },
   "summary": {
-    "overall_percent": 53.0,
+    "overall_percent": 55.0,
     "bridge_percent": 88.0,
     "libcore_percent": 47.2,
     "dalvik_percent": 99.6,
@@ -50,20 +50,20 @@
       {
         "id": "G3",
         "name": "Vrai `framework.jar` et une application AOSP affichée",
-        "description": "**En cours** : plan de l'ADR-006, J0-J2 et J4-J9 terminés (J5 démarrage par les vrais gestionnaires jusqu'à la première image, J6 texte complet FreeType/HarfBuzz, J7 moteur 2D logiciel Skia/AGSL, J8 fenêtre Win32 et entrées, J9 navigation, cycle de vie et compositeur multi-surfaces), J10 en cours",
-        "progress": 94,
+        "description": "Terminé : plan de l'ADR-006, J0 à J10 terminés (J5 démarrage par les vrais gestionnaires, J6 texte complet FreeType/HarfBuzz, J7 moteur 2D logiciel Skia/AGSL, J8 fenêtre Win32 et entrées, J9 navigation, cycle de vie et compositeur multi-surfaces, J10 application AOSP et pipeline d'entrées interactives)",
+        "progress": 100,
         "weight": 35,
-        "status": "**En cours** : plan de l'ADR-006, J0-J2 et J4-J9 terminés (J5 démarrage par les vrais gestionnaires jusqu'à la première image, J6 texte complet FreeType/HarfBuzz, J7 moteur 2D logiciel Skia/AGSL, J8 fenêtre Win32 et entrées, J9 navigation, cycle de vie et compositeur multi-surfaces), J10 en cours",
+        "status": "Terminé : plan de l'ADR-006, J0 à J10 terminés (J5 démarrage par les vrais gestionnaires, J6 texte complet FreeType/HarfBuzz, J7 moteur 2D logiciel Skia/AGSL, J8 fenêtre Win32 et entrées, J9 navigation, cycle de vie et compositeur multi-surfaces, J10 application AOSP et pipeline d'entrées interactives)",
         "adr": "ADR-006",
-        "state": "in_progress"
+        "state": "completed"
       },
       {
         "id": "G4",
         "name": "Couche native ELF (bibliothèques `.so` des applications)",
-        "description": "À faire",
+        "description": "**En cours** / À faire : architecture chargeur ELF x86_64, bionic isolée et JNI",
         "progress": 0,
         "weight": 25,
-        "status": "À faire",
+        "status": "**En cours** / À faire : architecture chargeur ELF x86_64, bionic isolée et JNI",
         "adr": "ADR-002",
         "state": "pending"
       },
@@ -78,7 +78,7 @@
         "state": "pending"
       }
     ],
-    "overall_percent": 53.0
+    "overall_percent": 55.0
   },
   "bridge": {
     "classes": {
@@ -11138,7 +11138,7 @@
     "total_suites": 37,
     "passed_suites": 34,
     "optional_suites": 3,
-    "unit_tests": 188,
+    "unit_tests": 189,
     "e2e_suites": 33,
     "fuzz_suites": 3,
     "percent_core": 100.0,

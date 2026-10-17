@@ -7,7 +7,7 @@
 Couche de compatibilité qui exécute des applications Android (bytecode DEX) **comme des processus
 Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 
-> **Avancement : ≈ 53 % vers « Android natif sur Windows »**
+> **Avancement : ≈ 55 % vers « Android natif sur Windows »**
 > 📊 Détail des jalons et carte complète dans [docs/STATUS.md](docs/STATUS.md) · [Données brutes](docs/progress.json).
 >
 > **Statut : prototype de recherche.** La preuve de concept de l'annexe A du cadrage fonctionne :
@@ -80,7 +80,7 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 | J7 — moteur 2D logiciel (dessin des vues dans la `Surface`) | terminé : `SkiaCanvas` de HWUI sur Skia d'AOSP, effets `Paint`, rotations 3D RenderNode, drawGlyphs et AGSL (`RuntimeShader`/`RuntimeColorFilter`) |
 | J8 — fenêtre Win32 et entrées | atteint : fenêtre Win32 interactive, service `input`, `KeyCharacterMap`, `InputChannel`, `InputEventReceiver` et saisie souris/clavier |
 | J9 — navigation, cycle de vie complet et compositeur multi-surfaces | terminé : backstack d'activités, transitions AOSP ClientTransaction (Pause, Resume, Stop, Destroy), pile d'InputReceiver (restauration au dismiss), compositeur logiciel Skia multi-couches avec voile d'assombrissement (FLAG_DIM_BEHIND) |
-| J10 — application AOSP complète interactive | en cours |
+| J10 — application AOSP complète interactive | terminé : pipeline complet d'entrées tactiles et touches de navigation (Retour), routage LIFO des fenêtres et modales, simulation et tests d'interaction |
 
 ## Limites actuelles
 

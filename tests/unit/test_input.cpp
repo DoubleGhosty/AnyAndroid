@@ -557,3 +557,143 @@ TEST(input_event_receiver_lifo_stack_routes_to_top_and_restores_on_dispose) {
                  {uint32_t(uint64_t(mq_ptr1)), uint32_t(uint64_t(mq_ptr1) >> 32)});
 }
 
+TEST(input_interactive_click_and_back_navigation_pipeline) {
+  InputVm vm;
+  auto& rt = *vm.rt;
+
+  // 1. Setup channel and receiver for main interactive window
+  rt::Handle name = rt.new_string_utf8("main-interactive-window");
+  rt::Handle pair_arr = rt::Handle(rt.call_static("Landroid/view/InputChannel;", "nativeOpenInputChannelPair",
+                                                  "(Ljava/lang/String;)[J", {name}));
+  CHECK(pair_arr != rt::kNull);
+  auto& arr = rt.array(pair_arr, "long[]");
+  int64_t server_h = 0, client_h = 0;
+  std::memcpy(&server_h, arr.data.data(), sizeof(int64_t));
+  std::memcpy(&client_h, arr.data.data() + sizeof(int64_t), sizeof(int64_t));
+
+  rt::Handle client_chan = bridge::construct(rt, "Landroid/view/InputChannel;", "()V", {});
+  set_long_field(rt, client_chan, "mPtr", client_h);
+  rt::Handle server_chan = bridge::construct(rt, "Landroid/view/InputChannel;", "()V", {});
+  set_long_field(rt, server_chan, "mPtr", server_h);
+
+  rt::Handle mq = bridge::construct(rt, "Landroid/os/MessageQueue;", "()V", {});
+  int64_t mq_ptr = int64_t(rt.call_static("Landroid/os/MessageQueue;", "nativeInit", "()J", {}));
+  set_long_field(rt, mq, "mPtr", mq_ptr);
+
+  rt::Handle recv = bridge::construct(rt, "LTestReceiver;", "()V", {});
+  rt::GlobalRef keep_recv(rt, recv);
+  rt::Handle weak_ref = bridge::construct(rt, "Ljava/lang/ref/WeakReference;", "(Ljava/lang/Object;)V", {recv});
+
+  int64_t recv_ptr = int64_t(rt.call_static("Landroid/view/InputEventReceiver;", "nativeInit",
+                                            "(Ljava/lang/ref/WeakReference;Landroid/view/InputChannel;Landroid/os/MessageQueue;)J",
+                                            {weak_ref, client_chan, mq}));
+  CHECK(recv_ptr != 0);
+  set_long_field(rt, recv, "mReceiverPtr", recv_ptr);
+  CHECK_EQ(bridge::active_input_receivers_count(), 1u);
+
+  rt::Class* tr_cls = rt.find_class("LTestReceiver;");
+  CHECK(tr_cls != nullptr);
+  rt::Field* seq_f = tr_cls->declared_field("lastSeq", "I");
+  rt::Field* ev_f = tr_cls->declared_field("lastEvent", "Landroid/view/InputEvent;");
+  CHECK(seq_f != nullptr && ev_f != nullptr);
+
+  uint32_t mq_lo = uint32_t(uint64_t(mq_ptr)), mq_hi = uint32_t(uint64_t(mq_ptr) >> 32);
+  uint32_t recv_lo = uint32_t(uint64_t(recv_ptr)), recv_hi = uint32_t(uint64_t(recv_ptr) >> 32);
+
+  bridge::set_active_runtime(&rt);
+
+  // 2. Interactive Click cycle: ACTION_DOWN followed by ACTION_UP on button
+  int64_t t0 = 1000;
+  CHECK(bridge::post_window_touch(0 /* ACTION_DOWN */, 540.0f, 960.0f, t0, t0));
+  CHECK(rt.call_static("Landroid/view/InputEventReceiver;", "nativeProbablyHasInput", "(J)Z", {recv_lo, recv_hi}));
+  rt.call_virtual(mq, "nativePollOnce", "(JI)V", {mq_lo, mq_hi, 0});
+  int32_t s1 = int32_t(tr_cls->statics.at(seq_f->slot));
+  CHECK(s1 > 0);
+  CHECK(tr_cls->statics.at(ev_f->slot) != rt::kNull);
+  rt.call_static("Landroid/view/InputEventReceiver;", "nativeFinishInputEvent", "(JIZ)V", {recv_lo, recv_hi, uint32_t(s1), 1});
+
+  CHECK(bridge::post_window_touch(1 /* ACTION_UP */, 540.0f, 960.0f, t0, t0 + 50));
+  rt.call_virtual(mq, "nativePollOnce", "(JI)V", {mq_lo, mq_hi, 0});
+  int32_t s2 = int32_t(tr_cls->statics.at(seq_f->slot));
+  CHECK_EQ(s2, s1 + 1);
+  CHECK(tr_cls->statics.at(ev_f->slot) != rt::kNull);
+  rt.call_static("Landroid/view/InputEventReceiver;", "nativeFinishInputEvent", "(JIZ)V", {recv_lo, recv_hi, uint32_t(s2), 1});
+
+  // 3. Interactive Back Navigation key cycle: KEYCODE_BACK down followed by up
+  int64_t t1 = 2000;
+  CHECK(bridge::post_window_key(0 /* device_id */, 4 /* KEYCODE_BACK */, 0 /* meta */, true /* down */, t1));
+  rt.call_virtual(mq, "nativePollOnce", "(JI)V", {mq_lo, mq_hi, 0});
+  int32_t s3 = int32_t(tr_cls->statics.at(seq_f->slot));
+  CHECK_EQ(s3, s2 + 1);
+  CHECK(tr_cls->statics.at(ev_f->slot) != rt::kNull);
+  rt.call_static("Landroid/view/InputEventReceiver;", "nativeFinishInputEvent", "(JIZ)V", {recv_lo, recv_hi, uint32_t(s3), 1});
+
+  CHECK(bridge::post_window_key(0 /* device_id */, 4 /* KEYCODE_BACK */, 0 /* meta */, false /* up */, t1 + 40));
+  rt.call_virtual(mq, "nativePollOnce", "(JI)V", {mq_lo, mq_hi, 0});
+  int32_t s4 = int32_t(tr_cls->statics.at(seq_f->slot));
+  CHECK_EQ(s4, s3 + 1);
+  CHECK(tr_cls->statics.at(ev_f->slot) != rt::kNull);
+  rt.call_static("Landroid/view/InputEventReceiver;", "nativeFinishInputEvent", "(JIZ)V", {recv_lo, recv_hi, uint32_t(s4), 1});
+
+  // 4. Modal dialog opened: push second receiver and verify priority routing
+  rt::Handle name2 = rt.new_string_utf8("modal-dialog-window");
+  rt::Handle pair_arr2 = rt::Handle(rt.call_static("Landroid/view/InputChannel;", "nativeOpenInputChannelPair",
+                                                   "(Ljava/lang/String;)[J", {name2}));
+  auto& arr2 = rt.array(pair_arr2, "long[]");
+  int64_t server_h2 = 0, client_h2 = 0;
+  std::memcpy(&server_h2, arr2.data.data(), sizeof(int64_t));
+  std::memcpy(&client_h2, arr2.data.data() + sizeof(int64_t), sizeof(int64_t));
+
+  rt::Handle client_chan2 = bridge::construct(rt, "Landroid/view/InputChannel;", "()V", {});
+  set_long_field(rt, client_chan2, "mPtr", client_h2);
+  rt::Handle server_chan2 = bridge::construct(rt, "Landroid/view/InputChannel;", "()V", {});
+  set_long_field(rt, server_chan2, "mPtr", server_h2);
+  rt::Handle recv2 = bridge::construct(rt, "LTestReceiver;", "()V", {});
+  rt::GlobalRef keep_recv2(rt, recv2);
+  rt::Handle weak_ref2 = bridge::construct(rt, "Ljava/lang/ref/WeakReference;", "(Ljava/lang/Object;)V", {recv2});
+  int64_t recv_ptr2 = int64_t(rt.call_static("Landroid/view/InputEventReceiver;", "nativeInit",
+                                             "(Ljava/lang/ref/WeakReference;Landroid/view/InputChannel;Landroid/os/MessageQueue;)J",
+                                             {weak_ref2, client_chan2, mq}));
+  CHECK(recv_ptr2 != 0);
+  set_long_field(rt, recv2, "mReceiverPtr", recv_ptr2);
+  CHECK_EQ(bridge::active_input_receivers_count(), 2u);
+
+  // Click routed to dialog receiver
+  uint32_t r2_lo = uint32_t(uint64_t(recv_ptr2)), r2_hi = uint32_t(uint64_t(recv_ptr2) >> 32);
+  CHECK(bridge::post_window_touch(0 /* ACTION_DOWN */, 600.0f, 1000.0f, 3000, 3000));
+  CHECK(rt.call_static("Landroid/view/InputEventReceiver;", "nativeProbablyHasInput", "(J)Z", {r2_lo, r2_hi}));
+  CHECK(!rt.call_static("Landroid/view/InputEventReceiver;", "nativeProbablyHasInput", "(J)Z", {recv_lo, recv_hi}));
+  rt.call_virtual(mq, "nativePollOnce", "(JI)V", {mq_lo, mq_hi, 0});
+  int32_t s5 = int32_t(tr_cls->statics.at(seq_f->slot));
+  CHECK_EQ(s5, s4 + 1);
+  rt.call_static("Landroid/view/InputEventReceiver;", "nativeFinishInputEvent", "(JIZ)V", {r2_lo, r2_hi, uint32_t(s5), 1});
+
+  // Dismiss modal dialog -> focus returns to main window
+  rt.call_static("Landroid/view/InputEventReceiver;", "nativeDispose", "(J)V", {r2_lo, r2_hi});
+  CHECK_EQ(bridge::active_input_receivers_count(), 1u);
+
+  // Next click goes back to main window
+  CHECK(bridge::post_window_touch(0 /* ACTION_DOWN */, 540.0f, 960.0f, 4000, 4000));
+  CHECK(rt.call_static("Landroid/view/InputEventReceiver;", "nativeProbablyHasInput", "(J)Z", {recv_lo, recv_hi}));
+  rt.call_virtual(mq, "nativePollOnce", "(JI)V", {mq_lo, mq_hi, 0});
+  int32_t s6 = int32_t(tr_cls->statics.at(seq_f->slot));
+  CHECK_EQ(s6, s5 + 1);
+  rt.call_static("Landroid/view/InputEventReceiver;", "nativeFinishInputEvent", "(JIZ)V", {recv_lo, recv_hi, uint32_t(s6), 1});
+
+  // 5. Cleanup
+  bridge::set_active_runtime(nullptr);
+  rt.call_static("Landroid/view/InputEventReceiver;", "nativeDispose", "(J)V", {recv_lo, recv_hi});
+  rt.call_virtual(server_chan, "nativeDispose", "(J)V",
+                  {uint32_t(uint64_t(server_h)), uint32_t(uint64_t(server_h) >> 32)});
+  rt.call_virtual(client_chan, "nativeDispose", "(J)V",
+                  {uint32_t(uint64_t(client_h)), uint32_t(uint64_t(client_h) >> 32)});
+  rt.call_virtual(server_chan2, "nativeDispose", "(J)V",
+                  {uint32_t(uint64_t(server_h2)), uint32_t(uint64_t(server_h2) >> 32)});
+  rt.call_virtual(client_chan2, "nativeDispose", "(J)V",
+                  {uint32_t(uint64_t(client_h2)), uint32_t(uint64_t(client_h2) >> 32)});
+  rt.call_static("Landroid/os/MessageQueue;", "nativeDestroy", "(J)V", {mq_lo, mq_hi});
+  CHECK_EQ(bridge::active_input_receivers_count(), 0u);
+  CHECK_EQ(bridge::active_input_receivers_count(), 0u);
+}
+
+

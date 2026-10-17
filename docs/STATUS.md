@@ -42,23 +42,23 @@ le nombre de fichiers.
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
 | G2    | Vraie libcore d'AOSP (Android 17)                           | 92 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 94 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J2 et J4-J9 terminés (J5 démarrage par les vrais gestionnaires jusqu'à la première image, J6 texte complet FreeType/HarfBuzz, J7 moteur 2D logiciel Skia/AGSL, J8 fenêtre Win32 et entrées, J9 navigation, cycle de vie et compositeur multi-surfaces), J10 en cours |
-| G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 100 %      | Terminé : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0 à J10 terminés (J5 démarrage par les vrais gestionnaires, J6 texte complet FreeType/HarfBuzz, J7 moteur 2D logiciel Skia/AGSL, J8 fenêtre Win32 et entrées, J9 navigation, cycle de vie et compositeur multi-surfaces, J10 application AOSP et pipeline d'entrées interactives) |
+| G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | **En cours** / À faire : architecture chargeur ELF x86_64, bionic isolée et JNI |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
-| **Total** | **Android natif sur Windows**                          | **≈ 53 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
+| **Total** | **Android natif sur Windows**                          | **≈ 55 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
 
 ```
 G0 ██████████ 100 %
 G1 ██████████ 100 %
 G2 █████████░  92 %
-G3 █████████░  94 %
+G3 ██████████ 100 %
 G4 ░░░░░░░░░░   0 %
 G5 ░░░░░░░░░░   0 %
    ───────────────
-   █████░░░░░ ≈ 53 % vers « Android natif sur Windows »
+   █████½░░░░ ≈ 55 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 37 suites de tests et 188 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 37 suites de tests et 189 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.
@@ -302,8 +302,8 @@ d'entrées complet est en place :
 - câblage dans `main.cpp` vers `bridge::post_window_touch` et `bridge::post_window_key`.
 
 **Suite prévue, dans l'ordre** :
-1. J9-J10 : navigation, puis une vraie application de la GSI affichée et utilisable (l'ADR-006 vise `Music`), et compositeur minimal pour plusieurs couches (dialogues, menus). Les motifs de césure `.hyb` et le pilotage déterministe des tests sont à concevoir sur l'horloge commune (`common/clock.h`).
-2. G4 : code natif (chargeur ELF + bionic avec processus hôte isolé).
+1. G4 : code natif (chargeur ELF x86_64 + bionic avec processus hôte isolé, résolution JNI et `JNI_OnLoad`).
+2. G5 : services Google (microG, puis GApps).
 
 **À savoir pour la suite** :
 - dans le bac à sable `/data`, `unlink` et `rename` d'un fichier ouvert suivent Linux (nom libéré
@@ -342,18 +342,9 @@ Le plan de G3 est fixé par [ADR-006](adr/ADR-006-demarrage-applications.md) : p
 `system_server`, des services système locaux en Java (javac + D8) appelés sans `Parcel`, et les
 vrais gestionnaires d'`ActivityThread`.
 
-1. **J0-J2** (faits) : outillage Java/D8 et DEX d'hôte, `ServiceManager` local, vrais chargeurs de classes.
-2. **J3-J5** (en cours) : services système v1 et démarrage d'une application jusqu'à `onResume`,
-   en direct (J4, fait) puis par `handleBindApplication` … `handleResumeActivity` et la fenêtre
-   logique (J5, avancé).
-3. **J6-J8** : texte (J6, bien avancé), rendu logiciel du vrai framework (J7 : `drawSoftware` sur
-   le Skia d'AOSP, [ADR-008](adr/ADR-008-moteur-2d.md), la fenêtre est dessinée), fenêtre Win32 et
-   entrées (J8).
-4. **J9-J10, sortie de G3** : navigation, puis une application réelle affichée et utilisable :
-   un exemple Java sur les widgets du framework, puis `Music` de la GSI (la Calculatrice AOSP
-   n'existe pas dans les images d'Android 17).
-5. G4 : chargeur ELF et bionic, pour les applications avec du code natif.
-6. G5 : microG (démarrage de GmsCore avec les mêmes services), puis les GApps.
+1. **J0-J10 (G3 terminé)** : outillage Java/D8 et DEX d'hôte, `ServiceManager` local, vrais chargeurs de classes, services système, démarrage par `handleBindApplication` … `handleResumeActivity`, moteur de texte FreeType/HarfBuzz/minikin, rendu logiciel Skia/AGSL, fenêtre Win32 et entrées, navigation/backstack/compositeur multi-surfaces, et pipeline interactif tactile/clavier.
+2. **G4 (en cours / prochaine étape)** : chargeur ELF et bionic, pour les applications avec du code natif (`.so` x86_64).
+3. **G5** : microG (démarrage de GmsCore avec les mêmes services), puis les GApps.
 
 ## Règles que le projet s'impose
 
