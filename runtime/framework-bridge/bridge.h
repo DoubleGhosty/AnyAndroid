@@ -135,6 +135,14 @@ struct PostedFrame {
 // Called on the posting thread for every frame; none by default (the frames
 // are then not copied).
 void set_frame_listener(std::function<void(const PostedFrame&)> listener);
+// A PNG read by the decoder of ImageDecoder (framework_images.cpp): width x
+// height pixels 0xAARRGGBB, unpremultiplied, rows packed. False when the data
+// is not a PNG it reads. For the host: frames written as PNG read back.
+struct DecodedPng {
+  uint32_t width = 0, height = 0;
+  std::vector<uint32_t> pixels;
+};
+bool decode_png_pixels(const uint8_t* data, size_t size, DecodedPng& out);
 // Opaque sun.misc.Unsafe offset of an instance field slot (Field.getOffset()).
 int64_t unsafe_field_offset(uint32_t slot);
 

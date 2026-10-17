@@ -958,6 +958,15 @@ void register_image_decoder(rt::NativeRegistry& r) {
 
 }  // namespace
 
+bool decode_png_pixels(const uint8_t* data, size_t size, DecodedPng& out) {
+  PngDecoded decoded;
+  if (!decode_png(data, size, decoded)) return false;
+  out.width = decoded.width;
+  out.height = decoded.height;
+  out.pixels = std::move(decoded.pixels);
+  return true;
+}
+
 NinePatchDivs nine_patch_divs(rt::Runtime& rt, int64_t chunk) {
   auto c = img_tables().nine_patch_chunks.get(chunk);
   if (!c) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] NinePatch invalide");

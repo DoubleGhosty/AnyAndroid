@@ -41,14 +41,16 @@ set(E ${CMAKE_CURRENT_SOURCE_DIR}/e2e)
 # Cross builds run the CLI through their emulator (for example Wine).
 set(CLI ${CMAKE_CROSSCOMPILING_EMULATOR} $<TARGET_FILE:anyandroid>)
 
-# aa_e2e(<nom> CODE <n> [GOLDEN <fichier>] [MATCH <regex>] [FRAME <largeur>x<hauteur>] ARGS <arguments...>)
+# aa_e2e(<nom> CODE <n> [GOLDEN <fichier>] [MATCH <regex>]
+#        [FRAME <largeur>x<hauteur> [<x>,<y>,#RRGGBB...]] ARGS <arguments...>)
 # The `exec --bootclasspath` tests get their own data directory (--data-dir:
 # /data and /sdcard of the emulated process), emptied before each run, so that
 # they stay independent under `ctest -j` and a failed run leaves nothing behind.
 # FRAME: the last frame a window posts is written as a PNG (exec --frame-out),
-# which must exist with that size.
+# which must exist with that size; each probe then gives the colour of a pixel
+# of it, read back by `anyandroid image probe`.
 function(aa_e2e name)
-  cmake_parse_arguments(T "" "CODE;GOLDEN;MATCH;FRAME" "ARGS" ${ARGN})
+  cmake_parse_arguments(T "" "CODE;GOLDEN;MATCH" "FRAME;ARGS" ${ARGN})
   set(args ${T_ARGS})
   set(defs "")
   list(GET args 0 command)
@@ -60,7 +62,13 @@ function(aa_e2e name)
   if(T_FRAME)
     set(frame ${CMAKE_CURRENT_BINARY_DIR}/e2e-${name}.png)
     list(INSERT args 1 --frame-out ${frame})
-    list(APPEND defs -DFRAME=${frame} -DFRAME_SIZE=${T_FRAME})
+    list(POP_FRONT T_FRAME frame_size)
+    list(APPEND defs -DFRAME=${frame} -DFRAME_SIZE=${frame_size})
+    if(T_FRAME)
+      string(REPLACE ";" "|" probes "${T_FRAME}")
+      string(REPLACE ";" "|" probe_cli "${CLI}")
+      list(APPEND defs -DFRAME_PROBES=${probes} -DPROBE_CLI=${probe_cli})
+    endif()
   endif()
   string(REPLACE ";" "|" cmd "${CLI};${args}")
   list(APPEND defs -DCMD=${cmd} -DEXPECT_CODE=${T_CODE} -DACTUAL=${CMAKE_CURRENT_BINARY_DIR}/e2e-${name}.txt)
@@ -133,8 +141,12 @@ if(AA_LIBCORE_DIR)
         ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
              ${S}/basic-activity.apk aa.host.Launcher com.anyandroid.samples.basic)
       # J5 and J7: launch by ActivityThread's real handlers, the window's first
-      # frame drawn in software (Skia) and written as a PNG.
-      aa_e2e(process-launch CODE 0 GOLDEN process-launch.txt FRAME 1080x1920
+      # frame drawn in software (Skia) and written as a PNG. Probes: the action
+      # bar and its title, then, below it, the stems of a letter of each
+      # TextView, the button and its text, and the window's background.
+      aa_e2e(process-launch CODE 0 GOLDEN process-launch.txt
+        FRAME 1080x1920 "540,28,#1A1B20" "18,30,#E1E1E2" "2,70,#787A84" "600,70,#EDEDF6" "67,94,#787A84"
+              "300,127,#D6D7D7" "544,125,#30323A" "540,1000,#EDEDF6"
         ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
              ${S}/basic-activity.apk aa.host.ProcessLauncher com.anyandroid.samples.basic --until-resumed)
     endif()

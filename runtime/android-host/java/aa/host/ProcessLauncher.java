@@ -56,6 +56,11 @@ public final class ProcessLauncher implements ActivityService.AttachHandler {
     });
     // Software drawing (ADR-006 §3): ViewRootImpl draws through drawSoftware, without HWUI.
     Reflect.setStatic(Reflect.type("android.view.ThreadedRenderer"), "sRendererEnabled", false);
+    // What zygote preloads for every process (ZygoteInit.preloadCompatConfig): the compat rules
+    // of /system/etc/compatconfig. AppCompatCallbacks checks a change against them with the
+    // application's target SDK. Without them, every change reads as enabled, those gated on a
+    // newer target SDK too: ENFORCE_EDGE_TO_EDGE then drew the content under the action bar.
+    Reflect.callStatic(Reflect.type("com.android.internal.compat.CompatibilityRules"), "loadSystemRules");
     Launcher.log("démarrage : ActivityThread.main");
     try {
       ActivityThread.main(new String[0]);
@@ -100,7 +105,11 @@ public final class ProcessLauncher implements ActivityService.AttachHandler {
         null, null, null, null, null,  // instrumentation, profiler, arguments, watcher, UI automation
         0, false, false, false, false,  // debug mode, binder tracking, allocations, backup, persistent
         configuration(), compat, null, new Bundle(), "unknown",  // services, core settings, serial
-        null, null, new long[0], new long[0], new long[0], false,  // autofill, capture, compat changes
+        // Autofill, content capture, then the compat changes: system_server only sends the ones
+        // that differ from the preloaded rules, that is overrides (none here) and the changes
+        // of the APEX modules' compat configs, which zygote does not preload and this host does
+        // not read (they stay enabled); none to log.
+        null, null, new long[0], new long[0], new long[0], false,
         null, sharedMemoryFd, 0L, 0L);  // font map: the preinstalled one is loaded
   }
 

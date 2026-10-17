@@ -256,10 +256,15 @@ couches logiques), `IWindowSession.relayout` renvoie les cadres de l'écran avec
 `WindowConfiguration` plein écran, puis `BLASTBufferQueue` fournit la `Surface`. La mise en page se
 fait aux vraies tailles et `drawSoftware` verrouille la surface : **la fenêtre est dessinée**
 par le Skia d'AOSP dans le tampon de la `Surface` (fond de `DecorView`, barre d'action avec son
-titre, bouton Material avec son ombre et son texte), l'image est publiée
-(`unlockCanvasAndPost`), la synchronisation de `SurfaceSyncGroup` se termine et l'activité passe
-au premier plan. `exec --frame-out <fichier.png>` écrit chaque image publiée ; le test e2e
-`process-launch` vérifie ce démarrage et l'image de 1080×1920 qu'il produit.
+titre, les deux `TextView` de l'activité, bouton Material avec son ombre et son texte), l'image
+est publiée (`unlockCanvasAndPost`), la synchronisation de `SurfaceSyncGroup` se termine et
+l'activité passe au premier plan. Comme zygote (`preloadCompatConfig`), `ProcessLauncher`
+précharge les règles de compatibilité de `/system/etc/compatconfig` : chaque changement suit la
+version cible de l'application (sans elles, tous étaient actifs, dont `ENFORCE_EDGE_TO_EDGE`
+qui plaçait le contenu sous la barre d'action pour une application ciblant l'API 34).
+`exec --frame-out <fichier.png>` écrit chaque image publiée ; le test e2e `process-launch`
+vérifie ce démarrage et l'image de 1080×1920 qu'il produit, avec des sondes de pixels lues par
+`anyandroid image probe` (barre d'action et titre, lettres des deux `TextView`, bouton, fond).
 
 **J6 bien avancé : moteur de texte.** Android mesure le texte avec minikin, sur HarfBuzz (mise en
 forme) et sur FreeType via Skia (métriques et avances, avec l'indication `FT_LOAD_TARGET_NORMAL`
@@ -289,8 +294,7 @@ natives de `KeyCharacterMap` et `KeyEvent` sont branchées.
    envoi par l'`InputChannel` à `InputEventReceiver`, clavier), puis un compositeur minimal
    pour plusieurs couches (dialogues, menus).
 2. J7, fin : `RuntimeShader` et `RuntimeColorFilter` (AGSL, utilisés par les ondulations de
-   Material), `drawGlyphs`, les rotations 3D de `RenderNode`, et des sondes de pixels dans le
-   test `process-launch`.
+   Material), `drawGlyphs` et les rotations 3D de `RenderNode`.
 3. J6, fin : `TextRunShaper`/`PositionedGlyphs`, motifs de césure. Le pilotage déterministe des
    tests est à concevoir sur l'horloge commune (`common/clock.h`).
 
@@ -306,6 +310,14 @@ natives de `KeyCharacterMap` et `KeyEvent` sont branchées.
   donc par pas de 1 ms sur un minuteur haute résolution (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`),
   verrou relâché. Vérifié par `threads_timed_waits_are_precise`, qui tourne aussi sur le Windows
   réel de la CI ;
+- le lanceur direct `aa.host.Launcher` (J4) n'installe pas `AppCompatCallbacks` comme
+  `handleBindApplication` : tous les changements de compatibilité y restent actifs, quelle que
+  soit la version cible (`ProcessLauncher`, J5, suit les règles préchargées) ;
+- les règles préchargées ne couvrent que `/system/etc/compatconfig` et
+  `/system/system_ext/etc/compatconfig`, comme celles de zygote. Les changements déclarés par les
+  modules APEX (par exemple ceux de la libcore dans `com.android.art`) ne sont pas lus : le
+  `system_server` d'Android les enverrait désactivés à `bindApplication` selon la version cible,
+  ici ils restent actifs ;
 - la trace `--trace-services` ne liste que les appels du framework aux objets `Binder` de
   l'hôte ; une méthode non implémentée y apparaît avec « (non implémentée) » et renvoie une
   valeur neutre ;

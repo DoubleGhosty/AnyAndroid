@@ -66,7 +66,7 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
   `onCreate`, `onStart`, `onResume`, puis fenêtre logique (`addToDisplayAsUser`), vsync à 60 Hz,
   mesure et mise en page des vues, et **première image dessinée** par le vrai framework avec le
   Skia d'Android 17 ([ADR-008](docs/adr/ADR-008-moteur-2d.md)) : barre d'action, bouton Material,
-  texte (`exec --frame-out` l'écrit en PNG).
+  texte (`exec --frame-out` l'écrit en PNG, `image probe` en lit les pixels).
 
 ## Avancement récent
 

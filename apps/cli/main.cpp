@@ -6,6 +6,7 @@
 //   anyandroid compat          prints the API compatibility matrix
 
 #include <algorithm>
+#include <charconv>
 #include <cstring>
 #include <cstdio>
 #include <filesystem>
@@ -100,6 +101,7 @@ void usage() {
       "  image info <image>                       format, partitions et propriétés d'une image système\n"
       "  image ls <image> [chemin]                liste un répertoire de l'image\n"
       "  image cat <image> <chemin> --output <f>  extrait un fichier de l'image\n"
+      "  image probe <fichier.png> <x>,<y>...     couleur de pixels d'une image PNG (de --frame-out)\n"
       "  image bootclasspath <image> --output <dossier> [--partition <nom>]\n"
       "      Extrait la libcore d'AOSP (chemin de classes d'amorçage, données ICU et fuseaux horaires)\n"
       "      d'une image système : system.img brute ou sparse, super.img, ext4 ou EROFS.\n"
@@ -702,12 +704,63 @@ const char* type_label(image::FileType t) {
   }
 }
 
+// `image probe`: the colour of pixels of a PNG (a frame of `exec --frame-out`),
+// read by the bridge's PNG decoder. One line per point, "x,y,#RRGGBB"
+// (#AARRGGBB when not opaque): the form the e2e tests compare.
+int cmd_image_probe(const Args& a) {
+  if (a.positional.size() < 3) {
+    err("usage : anyandroid image probe <fichier.png> <x>,<y>...");
+    return kUsage;
+  }
+  const std::string& file = a.positional[1];
+  bridge::DecodedPng png;
+  try {
+    auto data = read_file(path_from_utf8(file), 1ull << 30);
+    if (!bridge::decode_png_pixels(data.data(), data.size(), png)) {
+      err("PNG illisible : " + file);
+      return kUsage;
+    }
+  } catch (const std::exception& e) {
+    err(e.what());
+    return kUsage;
+  }
+  for (size_t i = 2; i < a.positional.size(); ++i) {
+    const std::string& point = a.positional[i];
+    const char* end = point.data() + point.size();
+    uint32_t x = 0, y = 0;
+    auto [comma, ex] = std::from_chars(point.data(), end, x);
+    bool ok = ex == std::errc() && comma != end && *comma == ',';
+    if (ok) {
+      auto [last, ey] = std::from_chars(comma + 1, end, y);
+      ok = ey == std::errc() && last == end;
+    }
+    if (!ok) {
+      err("point invalide (x,y attendu) : " + point);
+      return kUsage;
+    }
+    if (x >= png.width || y >= png.height) {
+      err("point hors de l'image (" + std::to_string(png.width) + "x" + std::to_string(png.height) + ") : " + point);
+      return kUsage;
+    }
+    uint32_t color = png.pixels[size_t(y) * png.width + x];
+    char hex[16];
+    if ((color >> 24) == 0xFF) {
+      std::snprintf(hex, sizeof(hex), "#%06X", unsigned(color & 0xFFFFFF));
+    } else {
+      std::snprintf(hex, sizeof(hex), "#%08X", unsigned(color));
+    }
+    out(std::to_string(x) + "," + std::to_string(y) + "," + hex + "\n");
+  }
+  return kOk;
+}
+
 int cmd_image(const Args& a) {
   if (a.positional.size() < 2) {
     usage();
     return kUsage;
   }
   const std::string& sub = a.positional[0];
+  if (sub == "probe") return cmd_image_probe(a);
   const std::string& file = a.positional[1];
   if (text::ends_with(file, ".zip")) {
     err("archive ZIP : décompressez d'abord l'image (par exemple `tar -xf " + file + " system.img`)");
