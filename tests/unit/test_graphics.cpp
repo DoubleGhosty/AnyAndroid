@@ -9,9 +9,11 @@
 #include "dex-engine/dex_file.h"
 #include "dex-engine/runtime.h"
 #include "dex_writer.h"
+#include "font_builder.h"
 #include "framework-bridge/bridge.h"
 #include "framework-bridge/internal.h"
 #include "framework-bridge/native_memory.h"
+#include "framework-bridge/skia_bridge.h"
 #include "smali.h"
 #include "test.h"
 #include "third_party/miniz/miniz.h"
@@ -1245,3 +1247,263 @@ TEST(graphics_decode_png_pixels_reads_frames) {
   CHECK(!bridge::decode_png_pixels(bytes.data() + 1, bytes.size() - 1, refused));
   CHECK(!bridge::decode_png_pixels(bytes.data(), bytes.size() / 2, refused));
 }
+
+TEST(graphics_rendernode_3d_transform) {
+  Vm vm;
+  rt::Runtime& rt = *vm.rt;
+  const char* rn = "Landroid/graphics/RenderNode;";
+  const char* mx = "Landroid/graphics/Matrix;";
+  const char* ex = "Landroid/graphics/Matrix$ExtraNatives;";
+
+  int64_t node = int64_t(call(rt, rn, "nCreate", "(Ljava/lang/String;)J", Args().h(rt::kNull)));
+  CHECK(node != 0);
+  int64_t m = int64_t(call(rt, ex, "nCreate", "(J)J", Args().j(0)));
+  int64_t inv = int64_t(call(rt, ex, "nCreate", "(J)J", Args().j(0)));
+
+  call(rt, rn, "nSetLeftTopRightBottom", "(JIIII)Z", Args().j(node).i(0).i(0).i(200).i(200));
+
+  // Without 3D rotation, transform matrix is 2D affine
+  call(rt, rn, "nSetTranslationX", "(JF)Z", Args().j(node).f(10.0f));
+  call(rt, rn, "nSetTranslationY", "(JF)Z", Args().j(node).f(20.0f));
+  call(rt, rn, "nSetRotation", "(JF)Z", Args().j(node).f(90.0f));
+  call(rt, rn, "nGetTransformMatrix", "(JJ)V", Args().j(node).j(m));
+
+  auto values = [&](int64_t mat) {
+    rt::GlobalRef arr(rt, rt.new_array("[F", 9));
+    call(rt, mx, "nGetValues", "(J[F)V", Args().j(mat).h(arr.get()));
+    std::vector<float> v(9);
+    std::memcpy(v.data(), rt.array(arr.get(), "f").data.data(), 36);
+    return v;
+  };
+
+  std::vector<float> v2d = values(m);
+  CHECK(std::fabs(v2d[6]) < 1e-5f);          // persp0 == 0
+  CHECK(std::fabs(v2d[7]) < 1e-5f);          // persp1 == 0
+  CHECK(std::fabs(v2d[8] - 1.0f) < 1e-5f);  // persp2 == 1
+
+  // With 3D rotation (rotationX / rotationY), perspective components become non-zero
+  call(rt, rn, "nSetRotationX", "(JF)Z", Args().j(node).f(30.0f));
+  call(rt, rn, "nSetRotationY", "(JF)Z", Args().j(node).f(45.0f));
+  call(rt, rn, "nGetTransformMatrix", "(JJ)V", Args().j(node).j(m));
+
+  std::vector<float> v3d = values(m);
+  // Persp components are non-zero due to Sk3DView camera projection
+  CHECK(std::fabs(v3d[6]) > 1e-6f || std::fabs(v3d[7]) > 1e-6f);
+
+  // Inverse transform matrix
+  call(rt, rn, "nGetInverseTransformMatrix", "(JJ)V", Args().j(node).j(inv));
+  // Concat transform with inverse should give identity (within floating point precision)
+  call(rt, mx, "nPostConcat", "(JJ)V", Args().j(m).j(inv));
+  std::vector<float> ident = values(m);
+  CHECK(std::fabs(ident[0] - 1.0f) < 1e-4f);
+  CHECK(std::fabs(ident[1]) < 1e-4f);
+  CHECK(std::fabs(ident[2]) < 1e-4f);
+  CHECK(std::fabs(ident[3]) < 1e-4f);
+  CHECK(std::fabs(ident[4] - 1.0f) < 1e-4f);
+  CHECK(std::fabs(ident[5]) < 1e-4f);
+  CHECK(std::fabs(ident[6]) < 1e-4f);
+  CHECK(std::fabs(ident[7]) < 1e-4f);
+  CHECK(std::fabs(ident[8] - 1.0f) < 1e-4f);
+}
+
+TEST(graphics_runtime_shader) {
+  Vm vm;
+  rt::Runtime& rt = *vm.rt;
+  const char* rts = "Landroid/graphics/RuntimeShader;";
+
+  // Invalid AGSL syntax throws IllegalArgumentException
+  rt::GlobalRef bad_src(rt, rt.new_string_utf8("invalid syntax;"));
+  CHECK_EQ(thrown(rt, [&] { call(rt, rts, "nativeCreateBuilder", "(Ljava/lang/String;)J", Args().h(bad_src.get())); }),
+           std::string("java.lang.IllegalArgumentException"));
+
+  // Valid AGSL with uniforms
+  const char* src = R"(
+    uniform float u_scale;
+    uniform float4 u_color;
+    uniform int u_mode;
+    vec4 main(vec2 coords) {
+      return u_color * u_scale;
+    }
+  )";
+  rt::GlobalRef agsl(rt, rt.new_string_utf8(src));
+  int64_t builder = int64_t(call(rt, rts, "nativeCreateBuilder", "(Ljava/lang/String;)J", Args().h(agsl.get())));
+  CHECK(builder != 0);
+
+  // Update float uniform (single float / count 1)
+  rt::GlobalRef u_scale(rt, rt.new_string_utf8("u_scale"));
+  call(rt, rts, "nativeUpdateUniforms", "(JLjava/lang/String;FFFFI)V",
+       Args().j(builder).h(u_scale.get()).f(1.0f).f(0.0f).f(0.0f).f(0.0f).i(1));
+
+  // Update float array (u_color, 4 floats)
+  rt::GlobalRef u_color(rt, rt.new_string_utf8("u_color"));
+  rt::GlobalRef color_arr(rt, rt.new_array("[F", 4));
+  float c_vals[4] = {0.5f, 0.25f, 0.75f, 1.0f};
+  std::memcpy(rt.array(color_arr.get(), "f").data.data(), c_vals, 16);
+  call(rt, rts, "nativeUpdateUniforms", "(JLjava/lang/String;[FZ)V",
+       Args().j(builder).h(u_color.get()).h(color_arr.get()).z(false));
+
+  // Update int uniform
+  rt::GlobalRef u_mode(rt, rt.new_string_utf8("u_mode"));
+  call(rt, rts, "nativeUpdateUniforms", "(JLjava/lang/String;IIIII)V",
+       Args().j(builder).h(u_mode.get()).i(2).i(0).i(0).i(0).i(1));
+
+  // Create SkShader from builder
+  int64_t shader = int64_t(call(rt, rts, "nativeCreateShader", "(JJ)J", Args().j(builder).j(0)));
+  CHECK(shader != 0);
+
+  // Render using this shader onto a Canvas
+  const char* cv = "Landroid/graphics/Canvas;";
+  const char* bc = "Landroid/graphics/BaseCanvas;";
+  const char* pt = "Landroid/graphics/Paint;";
+  const char* bmc = "Landroid/graphics/Bitmap;";
+  rt::Handle bm = rt::Handle(call(rt, bmc, "nativeCreate", "([IIIIIIZJ)Landroid/graphics/Bitmap;",
+                                  Args().h(rt::kNull).i(0).i(10).i(10).i(10).i(5).z(true).j(0)));
+  rt::GlobalRef keep(rt, bm);
+  int64_t bitmap = get_native_ptr(rt, bm);
+  int64_t c = int64_t(call(rt, cv, "nInitRaster", "(J)J", Args().j(bitmap)));
+  int64_t paint = int64_t(call(rt, pt, "nInit", "()J"));
+  call(rt, pt, "nSetShader", "(JJ)J", Args().j(paint).j(shader));
+  call(rt, bc, "nDrawRect", "(JFFFFJ)V", Args().j(c).f(0).f(0).f(10).f(10).j(paint));
+
+  // Pixel check: u_color (0.5, 0.25, 0.75, 1.0) * 1.0 => (128, 64, 191, 255)
+  uint32_t px = uint32_t(call(rt, bmc, "nativeGetPixel", "(JII)I", Args().j(bitmap).i(5).i(5)));
+  CHECK_EQ(px >> 24 & 0xFF, 0xFFu);
+  CHECK(std::abs(int(px >> 16 & 0xFF) - 128) <= 2);
+  CHECK(std::abs(int(px >> 8 & 0xFF) - 64) <= 2);
+  CHECK(std::abs(int(px & 0xFF) - 191) <= 2);
+}
+
+TEST(graphics_runtime_color_filter) {
+  Vm vm;
+  rt::Runtime& rt = *vm.rt;
+  const char* rcf = "Landroid/graphics/RuntimeColorFilter;";
+
+  // Valid AGSL color filter: takes in_color, inverts rgb, keeps alpha
+  const char* src = R"(
+    uniform float u_factor;
+    vec4 main(vec4 in_color) {
+      return vec4((1.0 - in_color.rgb) * u_factor, in_color.a);
+    }
+  )";
+  rt::GlobalRef agsl(rt, rt.new_string_utf8(src));
+  int64_t filter = int64_t(call(rt, rcf, "nativeCreateRuntimeColorFilter", "(Ljava/lang/String;)J",
+                                Args().h(agsl.get())));
+  CHECK(filter != 0);
+
+  // Update uniform float
+  rt::GlobalRef u_factor(rt, rt.new_string_utf8("u_factor"));
+  call(rt, rcf, "nativeUpdateUniforms", "(JLjava/lang/String;FFFFI)V",
+       Args().j(filter).h(u_factor.get()).f(1.0f).f(0.0f).f(0.0f).f(0.0f).i(1));
+
+  // Render on canvas with this color filter
+  const char* cv = "Landroid/graphics/Canvas;";
+  const char* bc = "Landroid/graphics/BaseCanvas;";
+  const char* pt = "Landroid/graphics/Paint;";
+  const char* bmc = "Landroid/graphics/Bitmap;";
+  rt::Handle bm = rt::Handle(call(rt, bmc, "nativeCreate", "([IIIIIIZJ)Landroid/graphics/Bitmap;",
+                                  Args().h(rt::kNull).i(0).i(10).i(10).i(10).i(5).z(true).j(0)));
+  rt::GlobalRef keep(rt, bm);
+  int64_t bitmap = get_native_ptr(rt, bm);
+  int64_t c = int64_t(call(rt, cv, "nInitRaster", "(J)J", Args().j(bitmap)));
+  int64_t paint = int64_t(call(rt, pt, "nInit", "()J"));
+  // Source color: Red 0xFFFF0000
+  call(rt, pt, "nSetColor", "(JI)V", Args().j(paint).i(int32_t(0xFFFF0000)));
+  call(rt, pt, "nSetColorFilter", "(JJ)J", Args().j(paint).j(filter));
+  call(rt, bc, "nDrawRect", "(JFFFFJ)V", Args().j(c).f(0).f(0).f(10).f(10).j(paint));
+
+  // Inverted color: 1.0 - (1.0, 0.0, 0.0) => (0.0, 1.0, 1.0), i.e. Cyan 0xFF00FFFF
+  uint32_t px = uint32_t(call(rt, bmc, "nativeGetPixel", "(JII)I", Args().j(bitmap).i(5).i(5)));
+  CHECK_EQ(px >> 24 & 0xFF, 0xFFu);
+  CHECK(std::abs(int(px >> 16 & 0xFF) - 0) <= 2);
+  CHECK(std::abs(int(px >> 8 & 0xFF) - 255) <= 2);
+  CHECK(std::abs(int(px & 0xFF) - 255) <= 2);
+}
+
+TEST(graphics_canvas_draw_glyphs) {
+  Vm vm;
+  rt::Runtime& rt = *vm.rt;
+  const char* cv = "Landroid/graphics/Canvas;";
+  const char* bc = "Landroid/graphics/BaseCanvas;";
+  const char* pt = "Landroid/graphics/Paint;";
+  const char* bmc = "Landroid/graphics/Bitmap;";
+  const char* fb = "Landroid/graphics/fonts/Font$Builder;";
+
+  // Build a synthetic TrueType font in memory
+  test::TestFont tf;
+  tf.glyphs = {
+      {0, 500, 50, 0, 450, 700},
+      {U'A', 550, 10, 0, 540, 700},
+      {U'x', 500, 20, 0, 480, 480},
+  };
+  std::vector<uint8_t> ttf = tf.build();
+  int32_t ttf_size = int32_t(ttf.size());
+  int64_t data = bridge::native_wrap(rt, std::move(ttf), false);
+
+  rt::GlobalRef buffer(rt, rt.alloc(rt.find_class("Ljava/nio/Buffer;")));
+  rt::Object& b = rt.nonnull(buffer.get(), "b");
+  rt::Field* address = b.klass->declared_field("address", "J");
+  rt::Field* capacity = b.klass->declared_field("capacity", "I");
+  b.fields.at(address->slot) = uint32_t(data);
+  b.fields.at(address->slot + 1) = uint32_t(uint64_t(data) >> 32);
+  b.fields.at(capacity->slot) = ttf_size;
+
+  int64_t font_builder = int64_t(call(rt, fb, "nInitBuilder", "()J"));
+  int64_t font = int64_t(call(rt, fb, "nBuild", "(JLjava/nio/ByteBuffer;Ljava/lang/String;Ljava/lang/String;IZI)J",
+                              Args().j(font_builder).h(buffer.get()).h(rt.new_string_utf8("/system/fonts/Test.ttf"))
+                                  .h(rt.new_string_utf8("en")).i(400).i(0).i(0)));
+  CHECK(font != 0);
+  CHECK(bridge::font_skia_typeface(rt, font) != nullptr);
+
+  rt::Handle bm = rt::Handle(call(rt, bmc, "nativeCreate", "([IIIIIIZJ)Landroid/graphics/Bitmap;",
+                                  Args().h(rt::kNull).i(0).i(32).i(32).i(32).i(5).z(true).j(0)));
+  rt::GlobalRef keep(rt, bm);
+  int64_t bitmap = get_native_ptr(rt, bm);
+  int64_t c = int64_t(call(rt, cv, "nInitRaster", "(J)J", Args().j(bitmap)));
+  int64_t paint = int64_t(call(rt, pt, "nInit", "()J"));
+  call(rt, pt, "nSetColor", "(JI)V", Args().j(paint).i(int32_t(0xFFFF0000)));
+  call(rt, pt, "nSetTextSize", "(JF)V", Args().j(paint).f(20.0f));
+  call(rt, pt, "nSetAntiAlias", "(JZ)V", Args().j(paint).z(true));
+
+  // Clear canvas to white
+  call(rt, bc, "nDrawColor", "(JII)V", Args().j(c).i(int32_t(0xFFFFFFFF)).i(3));
+
+  // Array of glyph IDs (1 glyph: 'A', ID 1)
+  rt::GlobalRef glyphs(rt, rt.new_array("[I", 1));
+  int32_t g_val = 1;
+  std::memcpy(rt.array(glyphs.get(), "i").data.data(), &g_val, 4);
+
+  // Array of positions (x=2.0f, y=24.0f)
+  rt::GlobalRef positions(rt, rt.new_array("[F", 2));
+  float p_vals[2] = {2.0f, 24.0f};
+  std::memcpy(rt.array(positions.get(), "f").data.data(), p_vals, 8);
+
+  call(rt, bc, "nDrawGlyphs", "(J[I[FIIIJJ)V",
+       Args().j(c).h(glyphs.get()).h(positions.get()).i(0).i(0).i(1).j(font).j(paint));
+
+  // Check that at least some pixels in the glyph bounds changed to red
+  bool found_red = false;
+  for (int y = 0; y < 32; ++y) {
+    for (int x = 0; x < 32; ++x) {
+      uint32_t px = uint32_t(call(rt, bmc, "nativeGetPixel", "(JII)I", Args().j(bitmap).i(x).i(y)));
+      if ((px >> 16 & 0xFF) > 0x80 && (px & 0xFF) < 0x80) {
+        found_red = true;
+        break;
+      }
+    }
+    if (found_red) break;
+  }
+  CHECK(found_red);
+
+  // Out of bounds glyph offset throws IndexOutOfBoundsException
+  CHECK_EQ(thrown(rt, [&] {
+             call(rt, bc, "nDrawGlyphs", "(J[I[FIIIJJ)V",
+                  Args().j(c).h(glyphs.get()).h(positions.get()).i(5).i(0).i(1).j(font).j(paint));
+           }),
+           std::string("java.lang.IndexOutOfBoundsException"));
+
+  // Negative count returns without error
+  call(rt, bc, "nDrawGlyphs", "(J[I[FIIIJJ)V",
+       Args().j(c).h(glyphs.get()).h(positions.get()).i(0).i(0).i(0).j(font).j(paint));
+}
+
+

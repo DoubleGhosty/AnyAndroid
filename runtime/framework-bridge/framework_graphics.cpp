@@ -19,6 +19,8 @@
 #include <string>
 
 #include "framework-bridge/handles.h"
+#include "include/core/SkMatrix.h"
+#include "include/utils/SkCamera.h"
 
 namespace aa::bridge {
 
@@ -282,19 +284,37 @@ void register_render_node(rt::NativeRegistry& r) {
            S::kPartial, "matrice notée présente ou absente (valeurs : J7)");
   }
   // RenderProperties::updateMatrix: translation, then rotation and scale
-  // about the pivot (the centre unless set). Static and animation matrices
-  // are not part of it.
-  auto transform = [](const RenderNodeState& n) {
-    skmatrix::Values m = skmatrix::identity();
+  // about the pivot (the centre unless set), or Sk3DView for 3D rotations (rotationX/Y).
+  // Static and animation matrices are not part of it.
+  auto transform = [](const RenderNodeState& n) -> skmatrix::Values {
     float px = n.pivot_x, py = n.pivot_y;
     if (!n.pivot_explicit) {
       px = float(n.right - n.left) / 2.0f;
       py = float(n.bottom - n.top) / 2.0f;
     }
-    skmatrix::pre_translate(m, n.translation_x, n.translation_y);
-    skmatrix::pre_rotate(m, n.rotation, px, py);
-    skmatrix::pre_scale(m, n.scale_x, n.scale_y, px, py);
-    return m;
+    SkMatrix matrix;
+    if (n.rotation_x == 0.0f && n.rotation_y == 0.0f) {
+      matrix.setTranslate(n.translation_x, n.translation_y);
+      matrix.preRotate(n.rotation, px, py);
+      matrix.preScale(n.scale_x, n.scale_y, px, py);
+    } else {
+      SkMatrix transform3D;
+      Sk3DView camera;
+      if (n.camera_distance != 0.0f) {
+        camera.setCameraLocation(0, 0, n.camera_distance);
+      }
+      matrix.preScale(n.scale_x, n.scale_y, px, py);
+      camera.rotateX(n.rotation_x);
+      camera.rotateY(n.rotation_y);
+      camera.rotateZ(-n.rotation);
+      camera.getMatrix(&transform3D);
+      transform3D.preTranslate(-px, -py);
+      transform3D.postTranslate(px + n.translation_x, py + n.translation_y);
+      matrix.postConcat(transform3D);
+    }
+    skmatrix::Values out;
+    matrix.get9(out.data());
+    return out;
   };
   r.bind(rn, "nGetTransformMatrix", "(JJ)V", [transform](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto n = node(rt, a.i64(0));
@@ -305,7 +325,7 @@ void register_render_node(rt::NativeRegistry& r) {
     }
     skmatrix::assign(rt, a.i64(2), m);
     return 0;
-  }, S::kPartial, "rotations 3D (rotationX/Y, caméra Sk3DView) non appliquées");
+  });
   r.bind(rn, "nGetInverseTransformMatrix", "(JJ)V", [transform](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto n = node(rt, a.i64(0));
     skmatrix::Values m, inverse;
@@ -316,7 +336,7 @@ void register_render_node(rt::NativeRegistry& r) {
     if (!skmatrix::invert(m, inverse)) inverse = skmatrix::identity();
     skmatrix::assign(rt, a.i64(2), inverse);
     return 0;
-  }, S::kPartial, "rotations 3D (rotationX/Y, caméra Sk3DView) non appliquées");
+  });
   r.bind(rn, "nGetAnimationMatrix", "(JJ)Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     node(rt, a.i64(0));
     return rt::ret_bool(false);

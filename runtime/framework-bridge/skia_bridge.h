@@ -84,5 +84,7 @@ SkRegion skia_region_of(rt::Runtime& rt, int64_t region);
 // holds one (SkFontMgr_New_Custom_Empty): same bytes, collection index and
 // variation coordinates. Cached; nullptr when Skia rejects the font.
 sk_sp<SkTypeface> skia_typeface(const std::shared_ptr<text::Face>& face);
+// The SkTypeface of a Font handle (framework_fonts.cpp); nullptr if invalid or rejected.
+sk_sp<SkTypeface> font_skia_typeface(rt::Runtime& rt, int64_t handle);
 
 }  // namespace aa::bridge

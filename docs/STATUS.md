@@ -42,23 +42,23 @@ le nombre de fichiers.
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
 | G2    | Vraie libcore d'AOSP (Android 17)                           | 92 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 80 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J2 et J4 faits, J5 atteint (démarrage par les vrais gestionnaires jusqu'à la première image), J6 (texte) bien avancé, J7 : la fenêtre est dessinée par le Skia d'AOSP, J8 atteint (fenêtre Win32 et pipeline d'entrées) |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 82 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J2 et J4 faits, J5 atteint (démarrage par les vrais gestionnaires jusqu'à la première image), J6 (texte) bien avancé, J7 terminé (moteur 2D logiciel Skia, rotations 3D, drawGlyphs, AGSL RuntimeShader/RuntimeColorFilter), J8 atteint (fenêtre Win32 et pipeline d'entrées) |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
-| **Total** | **Android natif sur Windows**                          | **≈ 48 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
+| **Total** | **Android natif sur Windows**                          | **≈ 49 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
 
 ```
 G0 ██████████ 100 %
 G1 ██████████ 100 %
 G2 █████████░  92 %
-G3 ████████░░  80 %
+G3 ████████░░  82 %
 G4 ░░░░░░░░░░   0 %
 G5 ░░░░░░░░░░   0 %
    ───────────────
-   ████▉░░░░░ ≈ 48 % vers « Android natif sur Windows »
+   ████▉░░░░░ ≈ 49 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 37 suites de tests et 181 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 37 suites de tests et 185 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.
@@ -276,10 +276,13 @@ natives de mesure de `Paint` sont branchées, ainsi que `MeasuredText` et `LineB
 gloutonne et optimale de minikin, frontières de lignes de l'ICU4J de la libcore, césure aux traits
 d'union et tirets conditionnels (les motifs `.hyb` attendent `Hyphenator.init`).
 
-**J7 : moteur 2D, le Skia d'Android.** Les natives de dessin reprennent `SkiaCanvas` de HWUI
+**J7 atteint : moteur 2D logiciel complet sur le Skia d'Android.** Les natives de dessin reprennent `SkiaCanvas` de HWUI
 sur un `SkCanvas` posé sur les pixels des bitmaps et des tampons de fenêtre (RGBA prémultiplié,
 l'ordre d'Android) ; les polices du moteur de texte deviennent des `SkTypeface` FreeType comme
-dans `MinikinFontSkia` ([ADR-008](adr/ADR-008-moteur-2d.md)).
+dans `MinikinFontSkia` ([ADR-008](adr/ADR-008-moteur-2d.md)). Sont pleinement branchés :
+- `RenderNode` avec calcul exact de la matrice 2D affine et des rotations 3D par caméra `Sk3DView` (`rotationX`, `rotationY`, `rotationZ`, `camera_distance`) pour `nGetTransformMatrix` et `nGetInverseTransformMatrix` ;
+- tracé direct de glyphes `BaseCanvas.nDrawGlyphs` avec `SkTextBlob` et `SkTypeface` ;
+- AGSL complet : `RuntimeShader` et `RuntimeColorFilter` avec compilation de shaders personnalisés, mise à jour des variables d'uniforme (scalaires, vecteurs, tableaux, couleurs, entiers) et liaison des enfants shaders et filtres de couleur.
 
 **J8 atteint : l'écran dans une fenêtre Win32 et pipeline d'entrées.** `exec --window` montre les
 images publiées par le vrai framework dans une fenêtre Win32 (mise à l'échelle avec les
@@ -300,11 +303,9 @@ d'entrées complet est en place :
 - câblage dans `main.cpp` vers `bridge::post_window_touch` et `bridge::post_window_key`.
 
 **Suite prévue, dans l'ordre** :
-1. J7, fin : `RuntimeShader` et `RuntimeColorFilter` (AGSL, utilisés par les ondulations de
-   Material), `drawGlyphs` et les rotations 3D de `RenderNode`.
-2. J6, fin : `TextRunShaper`/`PositionedGlyphs`, motifs de césure. Le pilotage déterministe des
+1. J6, fin : `TextRunShaper`/`PositionedGlyphs`, motifs de césure. Le pilotage déterministe des
    tests est à concevoir sur l'horloge commune (`common/clock.h`).
-3. J9-J10 : navigation, puis une vraie application de la GSI affichée et utilisable (l'ADR-006 vise `Music`), et compositeur minimal pour plusieurs couches (dialogues, menus).
+2. J9-J10 : navigation, puis une vraie application de la GSI affichée et utilisable (l'ADR-006 vise `Music`), et compositeur minimal pour plusieurs couches (dialogues, menus).
 
 **À savoir pour la suite** :
 - dans le bac à sable `/data`, `unlink` et `rename` d'un fichier ouvert suivent Linux (nom libéré

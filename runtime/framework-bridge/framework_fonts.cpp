@@ -26,6 +26,7 @@
 #include "common/text.h"
 #include "framework-bridge/handles.h"
 #include "framework-bridge/native_memory.h"
+#include "framework-bridge/skia_bridge.h"
 #include "text/font_collection.h"
 #include "text/locale.h"
 
@@ -529,6 +530,12 @@ bool minikin_locale_list_valid(int32_t id) { return id >= 0 && text::locale_list
 TypefaceInfo resolve_typeface(rt::Runtime& rt, int64_t handle) {
   auto t = resolve_default(rt, handle);
   return TypefaceInfo{t->collection->engine, text::FontStyle{uint16_t(t->weight), t->italic}, t->api_style};
+}
+
+sk_sp<SkTypeface> font_skia_typeface(Runtime& rt, int64_t handle) {
+  auto f = get(rt, tables().fonts, handle, "Font");
+  if (!f || !f->engine) return nullptr;
+  return skia_typeface(f->engine->face());
 }
 
 void register_framework_fonts(rt::NativeRegistry& r) {

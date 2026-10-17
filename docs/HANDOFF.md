@@ -208,6 +208,8 @@ Fait et vérifié (voir STATUS.md pour le détail) :
 - **G3/J5 (fait)** : démarrage par les vrais gestionnaires (`ProcessLauncher` et `ActivityThread`),
   `ClientTransaction`, traversée de `ViewRootImpl` et publication de la première image.
 - **G3/J7 (fait)** : moteur 2D logiciel avec `SkiaCanvas` HWUI sur Skia AOSP et dessin dans la surface.
+  Rotations 3D de `RenderNode` avec projection de caméra `Sk3DView` (`rotateX`, `rotateY`, `rotateZ`),
+  tracé direct de glyphes `BaseCanvas.nDrawGlyphs`, et AGSL complet (`RuntimeShader` et `RuntimeColorFilter`).
 - **G3/J8 (fait)** : affichage dans une fenêtre Win32 (`exec --window`), service `input`,
   natives `KeyCharacterMap`, `KeyEvent`, `MotionEvent` (portage libinput 52 natives), `InputChannel`,
   `InputEventReceiver` et boucle d'événements Win32 réveillant le Looper Android.
@@ -228,15 +230,13 @@ Fait et vérifié (voir STATUS.md pour le détail) :
 0x1114 Layer, 0x1115 Transaction, 0x1116 Receiver, 0x1117 Channel, 0x1118 InputReceiver,
 0x1119 Setter, 0x111A Builder, 0x111B Measured, 0x111C LineBreakerConfig, 0x111D LineBreakResult,
 0x111E BufferQueue, 0x111F NativeSurface, 0x1120 Fence, 0x1124 MaskFilter, 0x1125 PathEffect,
-0x1126 KeyCharacterMap, 0x1127 MotionEvent. **Suivante : 0x1128.**
+0x1126 KeyCharacterMap, 0x1127 MotionEvent, 0x1128 RuntimeShader.shader_builders. **Suivante : 0x1129.**
 
 ## 9. Prochaines étapes, dans l'ordre
 
-1. **J7, fin** : `RuntimeShader` et `RuntimeColorFilter` (AGSL, utilisés par les ondulations de
-   Material), `drawGlyphs` et les rotations 3D de `RenderNode`.
-2. **J6, fin** : `TextRunShaper`/`PositionedGlyphs`, motifs de césure. Le pilotage déterministe des
+1. **J6, fin** : `TextRunShaper`/`PositionedGlyphs`, motifs de césure. Le pilotage déterministe des
    tests est à concevoir sur l'horloge commune (`common/clock.h`).
-3. **J9-J10 : navigation et vraie application AOSP affichée** : navigation entre activités, cycle
+2. **J9-J10 : navigation et vraie application AOSP affichée** : navigation entre activités, cycle
    de vie complet, compositeur minimal pour couches multiples (dialogues, menus) et démonstration
    avec une application AOSP (comme `Music`).
 4. **G4 : code natif** : chargeur ELF et bionic. L'[évaluation d'ANDROWIN](evaluations/ANDROWIN.md)

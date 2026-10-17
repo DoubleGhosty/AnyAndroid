@@ -4,7 +4,7 @@
 // MaskFilter (blur, emboss, table) and PathEffect, as HWUI's jni/Shader.cpp,
 // ColorFilter.cpp, MaskFilter.cpp and PathEffect.cpp make them with Skia.
 // Paints take a reference when the effect is set (Paint.nSetShader...).
-// Not yet: RuntimeShader and RuntimeColorFilter (AGSL), gainmaps.
+// Not yet: gainmaps.
 #include <algorithm>
 #include <cstring>
 #include <memory>
@@ -28,6 +28,7 @@
 #include "include/effects/SkDashPathEffect.h"
 #include "include/effects/SkDiscretePathEffect.h"
 #include "include/effects/SkGradient.h"
+#include "include/effects/SkRuntimeEffect.h"
 #include "include/effects/SkTableMaskFilter.h"
 
 namespace aa::bridge {
@@ -42,10 +43,11 @@ using rt::Runtime;
 // uirenderer::ColorFilter: what the Java filter describes, and the Skia
 // instance made from it (in the sRGB working space), remade after a change.
 struct ColorFilterState {
-  enum class Kind { kBlendMode, kLighting, kMatrix } kind = Kind::kBlendMode;
+  enum class Kind { kBlendMode, kLighting, kMatrix, kRuntime } kind = Kind::kBlendMode;
   SkColor color = 0, mul = 0, add = 0;
   SkBlendMode mode = SkBlendMode::kSrcOver;
   std::vector<float> matrix;
+  std::shared_ptr<SkRuntimeColorFilterBuilder> runtime_builder;
   std::mutex lock;
   sk_sp<SkColorFilter> instance;
 
@@ -61,6 +63,9 @@ struct ColorFilterState {
           break;
         case Kind::kMatrix:
           instance = SkColorFilters::Matrix(matrix.data(), SkColorFilters::Clamp::kNo);
+          break;
+        case Kind::kRuntime:
+          if (runtime_builder) instance = runtime_builder->makeColorFilter();
           break;
       }
       if (instance) instance = instance->makeWithWorkingColorSpace(SkColorSpace::MakeSRGB());
@@ -80,6 +85,7 @@ struct Tables {
   HandleTable<ColorFilterState> color_filters{0x1123};
   HandleTable<Ref<SkMaskFilter>> mask_filters{0x1124};
   HandleTable<Ref<SkPathEffect>> path_effects{0x1125};
+  HandleTable<SkRuntimeShaderBuilder> shader_builders{0x1128};
 };
 
 Tables& tables() {
@@ -180,6 +186,54 @@ std::vector<float> color_matrix(Runtime& rt, Handle array) {
   return m;
 }
 
+bool is_int_uniform_type(SkRuntimeEffect::Uniform::Type type) {
+  switch (type) {
+    case SkRuntimeEffect::Uniform::Type::kInt:
+    case SkRuntimeEffect::Uniform::Type::kInt2:
+    case SkRuntimeEffect::Uniform::Type::kInt3:
+    case SkRuntimeEffect::Uniform::Type::kInt4:
+      return true;
+    default:
+      return false;
+  }
+}
+
+void update_float_uniforms(Runtime& rt, SkRuntimeEffectBuilder& builder, const char* name,
+                           const float values[], int count, bool is_color) {
+  auto uniform = builder.uniform(name);
+  if (!uniform.fVar) {
+    rt.throw_new("Ljava/lang/IllegalArgumentException;", std::string("uniform introuvable : ") + name);
+    return;
+  }
+  if (is_color != ((uniform.fVar->flags & SkRuntimeEffect::Uniform::kColor_Flag) != 0)) {
+    rt.throw_new("Ljava/lang/IllegalArgumentException;", std::string("type couleur incorrect pour uniform : ") + name);
+    return;
+  }
+  if (is_int_uniform_type(uniform.fVar->type)) {
+    rt.throw_new("Ljava/lang/IllegalArgumentException;", std::string("tentative d'assigner un float à un int uniform : ") + name);
+    return;
+  }
+  if (!uniform.set<float>(values, count)) {
+    rt.throw_new("Ljava/lang/IllegalArgumentException;", std::string("taille incorrecte pour uniform : ") + name);
+  }
+}
+
+void update_int_uniforms(Runtime& rt, SkRuntimeEffectBuilder& builder, const char* name,
+                         const int32_t values[], int count) {
+  auto uniform = builder.uniform(name);
+  if (!uniform.fVar) {
+    rt.throw_new("Ljava/lang/IllegalArgumentException;", std::string("uniform introuvable : ") + name);
+    return;
+  }
+  if (!is_int_uniform_type(uniform.fVar->type)) {
+    rt.throw_new("Ljava/lang/IllegalArgumentException;", std::string("tentative d'assigner un int à un float uniform : ") + name);
+    return;
+  }
+  if (!uniform.set<int32_t>(values, count)) {
+    rt.throw_new("Ljava/lang/IllegalArgumentException;", std::string("taille incorrecte pour uniform : ") + name);
+  }
+}
+
 void register_shaders(rt::NativeRegistry& r) {
   static const int64_t shader_free = register_free_function([](int64_t h) { tables().shaders.remove(h); });
   r.bind("Landroid/graphics/Shader;", "nativeGetFinalizer", "()J",
@@ -226,6 +280,111 @@ void register_shaders(rt::NativeRegistry& r) {
     sk_sp<SkShader> src = lookup(rt, tables().shaders, a.i64(4), "Shader");
     SkBlendMode mode = SkBlendMode(std::clamp(a.i32(6), 0, int(SkBlendMode::kLastMode)));
     return rt::ret_long(add(tables().shaders, with_matrix(SkShaders::Blend(mode, dst, src), m)));
+  });
+
+  // RuntimeShader (AGSL)
+  const char* rts = "Landroid/graphics/RuntimeShader;";
+  static const int64_t rts_builder_free =
+      register_free_function([](int64_t h) { tables().shader_builders.remove(h); });
+  r.bind(rts, "nativeGetFinalizer", "()J",
+         [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_long(rts_builder_free); });
+  r.bind(rts, "nativeCreateBuilder", "(Ljava/lang/String;)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (a.h(0) == kNull) rt.throw_npe("sksl");
+    std::string sksl = rt.string_utf8(a.h(0));
+    auto result = SkRuntimeEffect::MakeForShader(SkString(sksl.c_str()), SkRuntimeEffect::Options{});
+    if (!result.effect) {
+      rt.throw_new("Ljava/lang/IllegalArgumentException;", result.errorText.c_str());
+    }
+    auto builder = std::make_shared<SkRuntimeShaderBuilder>(std::move(result.effect));
+    return uint64_t(tables().shader_builders.add(std::move(builder)));
+  });
+  r.bind(rts, "nativeCreateShader", "(JJ)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto b = tables().shader_builders.get(a.i64(0));
+    if (!b) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] RuntimeShader builder invalide");
+    std::optional<SkMatrix> m = local_matrix(rt, a.i64(2));
+    sk_sp<SkShader> shader = b->makeShader(m ? &*m : nullptr);
+    if (!shader) {
+      rt.throw_new("Ljava/lang/IllegalArgumentException;", "impossible de construire le shader d'exécution");
+    }
+    return rt::ret_long(add(tables().shaders, std::move(shader)));
+  });
+  r.bind(rts, "nativeUpdateUniforms", "(JLjava/lang/String;FFFFI)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto b = tables().shader_builders.get(a.i64(0));
+    if (!b) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] RuntimeShader builder invalide");
+    if (a.h(2) == kNull) rt.throw_npe("uniformName");
+    std::string name = rt.string_utf8(a.h(2));
+    float values[4] = {a.f32(3), a.f32(4), a.f32(5), a.f32(6)};
+    update_float_uniforms(rt, *b, name.c_str(), values, a.i32(7), false);
+    return 0;
+  });
+  r.bind(rts, "nativeUpdateUniforms", "(JLjava/lang/String;[FZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto b = tables().shader_builders.get(a.i64(0));
+    if (!b) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] RuntimeShader builder invalide");
+    if (a.h(2) == kNull) rt.throw_npe("uniformName");
+    if (a.h(3) == kNull) rt.throw_npe("values");
+    std::string name = rt.string_utf8(a.h(2));
+    rt::ArrayObject& arr = rt.array(a.h(3), "float[]");
+    const float* ptr = reinterpret_cast<const float*>(arr.data.data());
+    update_float_uniforms(rt, *b, name.c_str(), ptr, arr.length, a.z(4));
+    return 0;
+  });
+  r.bind(rts, "nativeUpdateUniforms", "(JLjava/lang/String;IIIII)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto b = tables().shader_builders.get(a.i64(0));
+    if (!b) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] RuntimeShader builder invalide");
+    if (a.h(2) == kNull) rt.throw_npe("uniformName");
+    std::string name = rt.string_utf8(a.h(2));
+    int32_t values[4] = {a.i32(3), a.i32(4), a.i32(5), a.i32(6)};
+    update_int_uniforms(rt, *b, name.c_str(), values, a.i32(7));
+    return 0;
+  });
+  r.bind(rts, "nativeUpdateUniforms", "(JLjava/lang/String;[I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto b = tables().shader_builders.get(a.i64(0));
+    if (!b) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] RuntimeShader builder invalide");
+    if (a.h(2) == kNull) rt.throw_npe("uniformName");
+    if (a.h(3) == kNull) rt.throw_npe("values");
+    std::string name = rt.string_utf8(a.h(2));
+    rt::ArrayObject& arr = rt.array(a.h(3), "int[]");
+    const int32_t* ptr = reinterpret_cast<const int32_t*>(arr.data.data());
+    update_int_uniforms(rt, *b, name.c_str(), ptr, arr.length);
+    return 0;
+  });
+  r.bind(rts, "nativeUpdateShader", "(JLjava/lang/String;J)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto b = tables().shader_builders.get(a.i64(0));
+    if (!b) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] RuntimeShader builder invalide");
+    if (a.h(2) == kNull) rt.throw_npe("uniformName");
+    std::string name = rt.string_utf8(a.h(2));
+    sk_sp<SkShader> child = lookup(rt, tables().shaders, a.i64(3), "Shader");
+    auto c = b->child(name.c_str());
+    if (!c.fChild) rt.throw_new("Ljava/lang/IllegalArgumentException;", "child introuvable : " + name);
+    c = std::move(child);
+    return 0;
+  });
+  r.bind(rts, "nativeUpdateColorFilter", "(JLjava/lang/String;J)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto b = tables().shader_builders.get(a.i64(0));
+    if (!b) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] RuntimeShader builder invalide");
+    if (a.h(2) == kNull) rt.throw_npe("uniformName");
+    std::string name = rt.string_utf8(a.h(2));
+    sk_sp<SkColorFilter> child = skia_color_filter(rt, a.i64(3));
+    auto c = b->child(name.c_str());
+    if (!c.fChild) rt.throw_new("Ljava/lang/IllegalArgumentException;", "child introuvable : " + name);
+    c = std::move(child);
+    return 0;
+  });
+  r.bind(rts, "nativeUpdateChild", "(JLjava/lang/String;J)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto b = tables().shader_builders.get(a.i64(0));
+    if (!b) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] RuntimeShader builder invalide");
+    if (a.h(2) == kNull) rt.throw_npe("childName");
+    std::string name = rt.string_utf8(a.h(2));
+    auto c = b->child(name.c_str());
+    if (!c.fChild) rt.throw_new("Ljava/lang/IllegalArgumentException;", "child introuvable : " + name);
+    sk_sp<SkShader> s = tables().shaders.get(a.i64(3)) ? lookup(rt, tables().shaders, a.i64(3), "Shader") : nullptr;
+    if (s) {
+      c = std::move(s);
+    } else {
+      sk_sp<SkColorFilter> cf = skia_color_filter(rt, a.i64(3));
+      c = std::move(cf);
+    }
+    return 0;
   });
 }
 
@@ -276,6 +435,100 @@ void register_color_filters(rt::NativeRegistry& r) {
     auto f = color_filter(rt, a.i64(0));
     std::lock_guard<std::mutex> guard(f->lock);
     f->matrix = std::move(m);
+    f->instance = nullptr;
+    return 0;
+  });
+
+  // RuntimeColorFilter (AGSL)
+  const char* rcf = "Landroid/graphics/RuntimeColorFilter;";
+  r.bind(rcf, "nativeCreateRuntimeColorFilter", "(Ljava/lang/String;)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (a.h(0) == kNull) rt.throw_npe("agsl");
+    std::string agsl = rt.string_utf8(a.h(0));
+    auto result = SkRuntimeEffect::MakeForColorFilter(SkString(agsl.c_str()), SkRuntimeEffect::Options{});
+    if (!result.effect) {
+      rt.throw_new("Ljava/lang/IllegalArgumentException;", result.errorText.c_str());
+    }
+    auto f = std::make_shared<ColorFilterState>();
+    f->kind = ColorFilterState::Kind::kRuntime;
+    f->runtime_builder = std::make_shared<SkRuntimeColorFilterBuilder>(std::move(result.effect));
+    return rt::ret_long(tables().color_filters.add(std::move(f)));
+  });
+  r.bind(rcf, "nativeUpdateUniforms", "(JLjava/lang/String;FFFFI)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto f = color_filter(rt, a.i64(0));
+    if (!f->runtime_builder) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] RuntimeColorFilter invalide");
+    if (a.h(2) == kNull) rt.throw_npe("uniformName");
+    std::string name = rt.string_utf8(a.h(2));
+    float values[4] = {a.f32(3), a.f32(4), a.f32(5), a.f32(6)};
+    std::lock_guard<std::mutex> guard(f->lock);
+    update_float_uniforms(rt, *f->runtime_builder, name.c_str(), values, a.i32(7), false);
+    f->instance = nullptr;
+    return 0;
+  });
+  r.bind(rcf, "nativeUpdateUniforms", "(JLjava/lang/String;[FZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto f = color_filter(rt, a.i64(0));
+    if (!f->runtime_builder) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] RuntimeColorFilter invalide");
+    if (a.h(2) == kNull) rt.throw_npe("uniformName");
+    if (a.h(3) == kNull) rt.throw_npe("values");
+    std::string name = rt.string_utf8(a.h(2));
+    rt::ArrayObject& arr = rt.array(a.h(3), "float[]");
+    const float* ptr = reinterpret_cast<const float*>(arr.data.data());
+    std::lock_guard<std::mutex> guard(f->lock);
+    update_float_uniforms(rt, *f->runtime_builder, name.c_str(), ptr, arr.length, a.z(4));
+    f->instance = nullptr;
+    return 0;
+  });
+  r.bind(rcf, "nativeUpdateUniforms", "(JLjava/lang/String;IIIII)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto f = color_filter(rt, a.i64(0));
+    if (!f->runtime_builder) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] RuntimeColorFilter invalide");
+    if (a.h(2) == kNull) rt.throw_npe("uniformName");
+    std::string name = rt.string_utf8(a.h(2));
+    int32_t values[4] = {a.i32(3), a.i32(4), a.i32(5), a.i32(6)};
+    std::lock_guard<std::mutex> guard(f->lock);
+    update_int_uniforms(rt, *f->runtime_builder, name.c_str(), values, a.i32(7));
+    f->instance = nullptr;
+    return 0;
+  });
+  r.bind(rcf, "nativeUpdateUniforms", "(JLjava/lang/String;[I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto f = color_filter(rt, a.i64(0));
+    if (!f->runtime_builder) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] RuntimeColorFilter invalide");
+    if (a.h(2) == kNull) rt.throw_npe("uniformName");
+    if (a.h(3) == kNull) rt.throw_npe("values");
+    std::string name = rt.string_utf8(a.h(2));
+    rt::ArrayObject& arr = rt.array(a.h(3), "int[]");
+    const int32_t* ptr = reinterpret_cast<const int32_t*>(arr.data.data());
+    std::lock_guard<std::mutex> guard(f->lock);
+    update_int_uniforms(rt, *f->runtime_builder, name.c_str(), ptr, arr.length);
+    f->instance = nullptr;
+    return 0;
+  });
+  r.bind(rcf, "nativeUpdateChild", "(JLjava/lang/String;J)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto f = color_filter(rt, a.i64(0));
+    if (!f->runtime_builder) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] RuntimeColorFilter invalide");
+    if (a.h(2) == kNull) rt.throw_npe("childName");
+    std::string name = rt.string_utf8(a.h(2));
+    std::lock_guard<std::mutex> guard(f->lock);
+    auto c = f->runtime_builder->child(name.c_str());
+    if (!c.fChild) rt.throw_new("Ljava/lang/IllegalArgumentException;", "child introuvable : " + name);
+    sk_sp<SkShader> s = tables().shaders.get(a.i64(3)) ? lookup(rt, tables().shaders, a.i64(3), "Shader") : nullptr;
+    if (s) {
+      c = std::move(s);
+    } else {
+      sk_sp<SkColorFilter> cf = skia_color_filter(rt, a.i64(3));
+      c = std::move(cf);
+    }
+    f->instance = nullptr;
+    return 0;
+  });
+  r.bind(rcf, "nativeUpdateInputColorFilter", "(JLjava/lang/String;J)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto f = color_filter(rt, a.i64(0));
+    if (!f->runtime_builder) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] RuntimeColorFilter invalide");
+    if (a.h(2) == kNull) rt.throw_npe("childName");
+    std::string name = rt.string_utf8(a.h(2));
+    std::lock_guard<std::mutex> guard(f->lock);
+    auto c = f->runtime_builder->child(name.c_str());
+    if (!c.fChild) rt.throw_new("Ljava/lang/IllegalArgumentException;", "child introuvable : " + name);
+    sk_sp<SkColorFilter> cf = skia_color_filter(rt, a.i64(3));
+    c = std::move(cf);
     f->instance = nullptr;
     return 0;
   });

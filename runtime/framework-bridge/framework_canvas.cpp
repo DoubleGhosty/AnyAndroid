@@ -1169,6 +1169,46 @@ void register_canvas_draw(rt::NativeRegistry& r) {
     draw_text_on_path(rt, a.i64(0), s, a.i64(3), a.f32(5), a.f32(6), bidi_of(a.i32(7)), a.i64(8));
     return 0;
   });
+  // SkiaCanvas::drawGlyphs: raw glyph IDs and positions with an explicit font.
+  r.bind(bc, "nDrawGlyphs", "(J[I[FIIIJJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t glyph_offset = a.i32(4), position_offset = a.i32(5), glyph_count = a.i32(6);
+    if (glyph_count <= 0) return 0;
+    if (a.h(2) == kNull) rt.throw_npe("glyphIds");
+    if (a.h(3) == kNull) rt.throw_npe("positions");
+    rt::ArrayObject& glyphs_arr = rt.array(a.h(2), "int[]");
+    rt::ArrayObject& pos_arr = rt.array(a.h(3), "float[]");
+    if (glyph_offset < 0 || size_t(glyph_offset + glyph_count) > glyphs_arr.length) {
+      rt.throw_new("Ljava/lang/IndexOutOfBoundsException;", "glyphIdOffset hors limites");
+    }
+    if (position_offset < 0 || size_t(position_offset + glyph_count * 2) > pos_arr.length) {
+      rt.throw_new("Ljava/lang/IndexOutOfBoundsException;", "positionOffset hors limites");
+    }
+    sk_sp<SkTypeface> tf = font_skia_typeface(rt, a.i64(7));
+    if (!tf) return 0;
+
+    SkiaPaint paint = skia_paint_of(rt, a.i64(9));
+    paint.font.setTypeface(tf);
+
+    const int32_t* glyph_ids = reinterpret_cast<const int32_t*>(glyphs_arr.data.data()) + glyph_offset;
+    const float* positions = reinterpret_cast<const float*>(pos_arr.data.data()) + position_offset;
+
+    SkTextBlobBuilder builder;
+    const SkTextBlobBuilder::RunBuffer& buffer = builder.allocRunPos(paint.font, glyph_count);
+    for (int32_t i = 0; i < glyph_count; ++i) {
+      buffer.glyphs[i] = SkGlyphID(glyph_ids[i]);
+      buffer.pos[2 * i] = positions[2 * i];
+      buffer.pos[2 * i + 1] = positions[2 * i + 1];
+    }
+    sk_sp<SkTextBlob> blob = builder.make();
+    if (!blob) return 0;
+
+    draw(rt, a.i64(0), [&](CanvasState& c) {
+      c.apply_looper(&paint, [&](const SkiaPaint& p) {
+        c.canvas->drawTextBlob(blob, 0, 0, p.paint);
+      });
+    });
+    return 0;
+  });
   // SkiaCanvas::punchHole: the rounded rectangle cleared to `alpha`.
   r.bind(bc, "nPunchHole", "(JFFFFFFF)V", with_canvas([](CanvasState& c, NativeArgs& a) -> uint64_t {
     SkPaint paint;
