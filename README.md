@@ -7,7 +7,7 @@
 Couche de compatibilité qui exécute des applications Android (bytecode DEX) **comme des processus
 Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 
-> **Avancement : ≈ 47 % vers « Android natif sur Windows »**
+> **Avancement : ≈ 51 % vers « Android natif sur Windows »**
 > 📊 Détail des jalons et carte complète dans [docs/STATUS.md](docs/STATUS.md) · [Données brutes](docs/progress.json).
 >
 > **Statut : prototype de recherche.** La preuve de concept de l'annexe A du cadrage fonctionne :
@@ -76,10 +76,10 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 | J3 — services système v1 | en cours (chaque appel manquant est tracé) |
 | J4 — `Application` et activité jusqu'à `onResume`, en direct | fait |
 | J5 — démarrage par les vrais gestionnaires d'`ActivityThread`, fenêtre logique | atteint : jusqu'à la première image publiée (test e2e `process-launch`) |
-| J6 — texte (FreeType + HarfBuzz, logique de minikin) | bien avancé : mesure (`Paint`), `MeasuredText`, coupure de lignes (`LineBreaker`) |
-| J7 — moteur 2D logiciel (dessin des vues dans la `Surface`) | la fenêtre est dessinée : `SkiaCanvas` de HWUI sur le Skia d'AOSP, effets des `Paint` ; reste AGSL (`RuntimeShader`) |
-| J8 — fenêtre Win32 et entrées | en cours : `exec --window` montre l'écran ; service `input`, `KeyCharacterMap` ; reste souris et clavier (`MotionEvent`) |
-| J9-J10 — navigation, une application AOSP affichée | à faire |
+| J6 — texte (FreeType + HarfBuzz, logique de minikin) | terminé : mesure (`Paint`), `MeasuredText`, coupure (`LineBreaker`), `TextRunShaper` et `PositionedGlyphs` |
+| J7 — moteur 2D logiciel (dessin des vues dans la `Surface`) | terminé : `SkiaCanvas` de HWUI sur Skia d'AOSP, effets `Paint`, rotations 3D RenderNode, drawGlyphs et AGSL (`RuntimeShader`/`RuntimeColorFilter`) |
+| J8 — fenêtre Win32 et entrées | atteint : fenêtre Win32 interactive, service `input`, `KeyCharacterMap`, `InputChannel`, `InputEventReceiver` et saisie souris/clavier |
+| J9-J10 — navigation, dialogue/surface multi-couche, application AOSP affichée | en cours |
 
 ## Limites actuelles
 

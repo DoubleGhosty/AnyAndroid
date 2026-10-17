@@ -1307,6 +1307,10 @@ def main():
             f.write(svg_content)
         with open(args.docs_dir / "badge-overall.svg", "w", encoding="utf-8") as f:
             f.write(badge_overall)
+        with open(args.docs_dir / "badge-bridge.svg", "w", encoding="utf-8") as f:
+            f.write(badge_bridge)
+        with open(args.docs_dir / "badge-libcore.svg", "w", encoding="utf-8") as f:
+            f.write(badge_libcore)
 
     print("\n[✓] Progression générée avec succès !")
     if "html_path" in locals():
