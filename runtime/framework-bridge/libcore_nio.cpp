@@ -392,6 +392,22 @@ void register_file_dispatcher(rt::NativeRegistry& r) {
     io_call(rt, [&] { the_vfs().fsync(fd); });
     return 0;
   });
+  r.bind(fdi, "lock0", "(Ljava/io/FileDescriptor;ZJJZ)I",
+         [](Runtime& rt, NativeArgs& a) -> uint64_t {
+           int32_t fd = fd_of(rt, a.h(0));
+           if (fd > 2) io_call(rt, [&] { return fstat_fd(fd); });
+           return 0; // FileDispatcher.LOCKED
+         }, S::kStub, "verrou de canal exclusif simulé");
+  r.bind(fdi, "release0", "(Ljava/io/FileDescriptor;JJ)V",
+         [](Runtime& rt, NativeArgs& a) -> uint64_t {
+           int32_t fd = fd_of(rt, a.h(0));
+           if (fd > 2) io_call(rt, [&] { return fstat_fd(fd); });
+           return 0;
+         }, S::kStub, "libération de verrou de canal");
+  r.bind(fdi, "duplicateForMapping0", "(Ljava/io/FileDescriptor;)Ljava/io/FileDescriptor;",
+         [](Runtime&, NativeArgs& a) -> uint64_t {
+           return a.raw(0);
+         }, S::kStub);
 
   const char* fci = "Lsun/nio/ch/FileChannelImpl;";
   // initIDs: the allocation granularity of mappings (the page size).

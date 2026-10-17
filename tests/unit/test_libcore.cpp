@@ -844,3 +844,71 @@ TEST(libcore_methodhandle_invoke_and_invoke_exact) {
   CHECK_THROWS(mh_call(rt, mh_mul, "invokeExact", "(LApp;I)I", {rt::kNull, 6}), rt::JavaThrow);
 }
 
+TEST(libcore_timezone_memory_and_residual_posix) {
+  LibcoreVm vm;
+  rt::Runtime& rt = *vm.rt;
+
+  // 1. Test com.android.i18n.timezone.internal.Memory
+  const char* tz_mem = "Lcom/android/i18n/timezone/internal/Memory;";
+
+  // Allocate an emulated native memory block
+  int64_t addr = bridge::native_alloc(rt, 64);
+  CHECK(addr != 0);
+
+  // pokeByte and peekByte
+  native_call(rt, tz_mem, "pokeByte", "(JB)V", {uint32_t(addr), uint32_t(addr >> 32), 0x7A});
+  uint64_t b = native_call(rt, tz_mem, "peekByte", "(J)B", {uint32_t(addr), uint32_t(addr >> 32)});
+  CHECK_EQ(int8_t(b), 0x7A);
+
+  // pokeInt and peekInt (native order)
+  native_call(rt, tz_mem, "pokeInt", "(JI)V", {uint32_t(addr), uint32_t(addr >> 32), 0x12345678});
+  uint64_t i_val = native_call(rt, tz_mem, "peekInt", "(J)I", {uint32_t(addr), uint32_t(addr >> 32)});
+  CHECK_EQ(uint32_t(i_val), 0x12345678u);
+
+  // peekInt with swap (Big-Endian swapped)
+  uint64_t i_swap = native_call(rt, tz_mem, "peekInt", "(JZ)I", {uint32_t(addr), uint32_t(addr >> 32), 1});
+  CHECK_EQ(uint32_t(i_swap), 0x78563412u);
+
+  // pokeLong and peekLong
+  uint64_t long_val = 0x0102030405060708ULL;
+  native_call(rt, tz_mem, "pokeLong", "(JJ)V",
+              {uint32_t(addr), uint32_t(addr >> 32), uint32_t(long_val), uint32_t(long_val >> 32)});
+  uint64_t l_read = native_call(rt, tz_mem, "peekLong", "(J)J", {uint32_t(addr), uint32_t(addr >> 32)});
+  CHECK_EQ(l_read, long_val);
+
+  // peekShort and pokeShort with swap
+  native_call(rt, tz_mem, "pokeShort", "(JSZ)V", {uint32_t(addr), uint32_t(addr >> 32), 0x1234, 1});
+  uint64_t s_read = native_call(rt, tz_mem, "peekShort", "(JZ)S", {uint32_t(addr), uint32_t(addr >> 32), 1});
+  CHECK_EQ(uint16_t(s_read), 0x1234u);
+
+  bridge::native_free(rt, addr);
+
+  // 2. Test FileDispatcherImpl lock0, release0, duplicateForMapping0
+  const char* fdi = "Lsun/nio/ch/FileDispatcherImpl;";
+  rt::Handle dummy_fd = rt.alloc(rt.find_class("Ljava/io/FileDescriptor;"));
+  rt.object(dummy_fd)->fields.at(rt.find_class("Ljava/io/FileDescriptor;")->declared_field("descriptor", "I")->slot) = 1;
+
+  uint64_t lock_res = native_call(rt, fdi, "lock0", "(Ljava/io/FileDescriptor;ZJJZ)I",
+                                  {dummy_fd, 0, 0, 0, 100, 0, 0});
+  CHECK_EQ(lock_res, 0u);
+
+  native_call(rt, fdi, "release0", "(Ljava/io/FileDescriptor;JJ)V",
+              {dummy_fd, 0, 0, 100, 0});
+
+  uint64_t dup_fd = native_call(rt, fdi, "duplicateForMapping0", "(Ljava/io/FileDescriptor;)Ljava/io/FileDescriptor;",
+                                {dummy_fd});
+  CHECK_EQ(dup_fd, dummy_fd);
+
+  // 3. Test libcore.io.Linux residual natives: prctl, getpgid, flock
+  const char* lx = "Llibcore/io/Linux;";
+  rt::Handle lx_inst = rt.alloc(rt.find_class(lx));
+
+  uint64_t prctl_res = native_call(rt, lx, "prctl", "(IJJJJ)I", {lx_inst, 15, 0, 0, 0, 0, 0, 0, 0, 0});
+  CHECK_EQ(prctl_res, 0u);
+
+  uint64_t pgid_res = native_call(rt, lx, "getpgid", "(I)I", {lx_inst, 0});
+  CHECK(pgid_res != 0);
+
+  native_call(rt, lx, "flock", "(Ljava/io/FileDescriptor;I)V", {lx_inst, dummy_fd, 2});
+}
+

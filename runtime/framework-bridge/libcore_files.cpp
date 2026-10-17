@@ -10,6 +10,11 @@
 #include <new>
 #include <vector>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+#include "common/clock.h"
 #include "framework-bridge/internal.h"
 #include "framework-bridge/native_memory.h"
 #include "vfs/vfs.h"
@@ -533,6 +538,122 @@ void register_linux(rt::NativeRegistry& r) {
     if (cmd == 2 || cmd == 4) return 0;  // F_SETFD, F_SETFL: accepted without effect
     throw_errno(rt, "fcntl", vfs::kEINVAL);
   }, S::kPartial, "F_SETFD et F_SETFL sans effet");
+
+  // Verrous de fichiers fcntlFlock et flock
+  r.bind(lx, "fcntlFlock", "(Ljava/io/FileDescriptor;ILandroid/system/StructFlock;)I",
+         [](Runtime& rt, NativeArgs& a) -> uint64_t {
+           int32_t fd = fd_of(rt, a.h(1));
+           int32_t cmd = a.i32(2);
+           Handle flock_h = a.h(3);
+           if (fd > 2) guarded(rt, "fcntlFlock", [&] { return fstat_fd(fd); });
+           if (flock_h != kNull) {
+             rt::Object& fo = rt.nonnull(flock_h, "StructFlock");
+             // F_GETLK: aucun conflit dans notre bac à sable -> F_UNLCK (2)
+             if (cmd == 5 /* F_GETLK */ || cmd == 12 /* F_GETLK64 */) {
+               rt::Field* type_f = find_field(fo.klass, "l_type", "S");
+               if (type_f) fo.fields.at(type_f->slot) = 2; // F_UNLCK
+             }
+           }
+           return 0;
+         }, S::kPartial, "verrous de fichier en mémoire simulés");
+
+  r.bind(lx, "flock", "(Ljava/io/FileDescriptor;I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = fd_of(rt, a.h(1));
+    if (fd > 2) guarded(rt, "flock", [&] { return fstat_fd(fd); });
+    return 0;
+  }, S::kStub, "verrou flock accepté sans effet");
+
+  // ioctlInt (FIONREAD)
+  r.bind(lx, "ioctlInt", "(Ljava/io/FileDescriptor;ILandroid/util/MutableInt;)I",
+         [](Runtime& rt, NativeArgs& a) -> uint64_t {
+           int32_t fd = fd_of(rt, a.h(1));
+           int32_t cmd = a.i32(2);
+           Handle out_h = a.h(3);
+           constexpr int32_t kFionread = 0x541B;
+           int32_t avail = 0;
+           if (cmd == kFionread) {
+             if (fd > 2) {
+               avail = guarded(rt, "ioctl", [&] {
+                 int64_t pos = the_vfs().lseek(fd, 0, 1);
+                 int64_t left = int64_t(the_vfs().fstat(fd).size) - pos;
+                 return int32_t(std::clamp<int64_t>(left, 0, INT32_MAX));
+               });
+             }
+           }
+           if (out_h != kNull) {
+             rt::Object& mo = rt.nonnull(out_h, "MutableInt");
+             rt::Field* vf = find_field(mo.klass, "value", "I");
+             if (vf) mo.fields.at(vf->slot) = uint32_t(avail);
+           }
+           return 0;
+         }, S::kPartial, "FIONREAD sur le VFS");
+
+  // Horloges et temps système
+  r.bind(lx, "clock_gettime", "(I)Landroid/system/StructTimespec;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t clock_id = a.i32(1);
+    int64_t nanos = (clock_id == 0 /* CLOCK_REALTIME */)
+                        ? int64_t(aa::clock::unix_millis()) * 1000000LL
+                        : aa::clock::monotonic_nanos();
+    int64_t sec = nanos / 1000000000LL;
+    int64_t nsec = nanos % 1000000000LL;
+    std::vector<uint32_t> args;
+    push_long(args, sec);
+    push_long(args, nsec);
+    return construct(rt, "Landroid/system/StructTimespec;", "(JJ)V", args);
+  });
+
+  r.bind(lx, "gettimeofday", "()Landroid/system/StructTimeval;", [](Runtime& rt, NativeArgs&) -> uint64_t {
+    int64_t millis = aa::clock::unix_millis();
+    int64_t sec = millis / 1000LL;
+    int64_t usec = (millis % 1000LL) * 1000LL;
+    std::vector<uint32_t> args;
+    push_long(args, sec);
+    push_long(args, usec);
+    return construct(rt, "Landroid/system/StructTimeval;", "(JJ)V", args);
+  });
+
+  // Contrôle de processus
+  r.bind(lx, "prctl", "(IJJJJ)I", [](Runtime&, NativeArgs&) -> uint64_t {
+    return 0;
+  }, S::kStub, "prctl accepté sans effet (PR_SET_NAME...)");
+
+  r.bind(lx, "kill", "(II)V", [](Runtime&, NativeArgs&) -> uint64_t {
+    return 0;
+  }, S::kStub, "kill sans effet");
+
+  r.bind(lx, "getpgid", "(I)I", [](Runtime&, NativeArgs&) -> uint64_t {
+#ifdef _WIN32
+    return rt::ret_int(int32_t(GetCurrentProcessId()));
+#else
+    return rt::ret_int(1000);
+#endif
+  });
+  r.bind(lx, "setpgid", "(II)V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; }, S::kStub);
+
+  // Duplication de descripteurs (dup, dup2)
+  r.bind(lx, "dup", "(Ljava/io/FileDescriptor;)Ljava/io/FileDescriptor;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = fd_of(rt, a.h(1));
+    if (fd >= 0 && fd <= 2) return new_file_descriptor(rt, fd);
+    std::string path = guarded(rt, "dup", [&] { return the_vfs().fd_path(fd); });
+    int32_t flags = guarded(rt, "dup", [&] { return the_vfs().open_flags(fd); });
+    int32_t new_fd = guarded(rt, "dup", [&] { return the_vfs().open(path, flags, 0); });
+    return new_file_descriptor(rt, new_fd);
+  }, S::kPartial, "duplication de descripteur virtuel");
+
+  r.bind(lx, "dup2", "(Ljava/io/FileDescriptor;I)Ljava/io/FileDescriptor;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = fd_of(rt, a.h(1));
+    int32_t target_fd = a.i32(2);
+    if (target_fd < 0) throw_errno(rt, "dup2", vfs::kEBADF);
+    if (fd == target_fd) return a.raw(1);
+    if (fd >= 0 && fd <= 2) return new_file_descriptor(rt, target_fd);
+    std::string path = guarded(rt, "dup2", [&] { return the_vfs().fd_path(fd); });
+    int32_t flags = guarded(rt, "dup2", [&] { return the_vfs().open_flags(fd); });
+    guarded(rt, "dup2", [&] {
+      the_vfs().close(target_fd);
+      return the_vfs().open(path, flags, 0);
+    });
+    return new_file_descriptor(rt, target_fd);
+  }, S::kPartial, "duplication dup2");
 }
 
 // java.io.FileInputStream natives (instance methods on the stream's `fd`).
@@ -754,130 +875,149 @@ void copy_elements(uint8_t* dst, const uint8_t* src, size_t bytes, uint32_t widt
 }
 
 void register_libcore_memory(rt::NativeRegistry& r) {
-  const char* mem = "Llibcore/io/Memory;";
-  r.bind(mem, "peekByte", "(J)B", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    return uint32_t(int32_t(peek<int8_t>(rt, a.i64(0), false)));
-  });
-  r.bind(mem, "pokeByte", "(JB)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    poke<uint8_t>(rt, a.i64(0), uint8_t(a.raw(2)), false);
-    return 0;
-  });
-  r.bind(mem, "peekByteArray", "(J[BII)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    int32_t count = a.i32(4);
-    auto dst = array_bytes(rt, a.h(2), a.i32(3), count);
-    if (count > 0) std::memcpy(dst.data(), native_span(rt, a.i64(0), uint64_t(count)).data(), size_t(count));
-    return 0;
-  });
-  r.bind(mem, "pokeByteArray", "(J[BII)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    int32_t count = a.i32(4);
-    auto src = array_bytes(rt, a.h(2), a.i32(3), count);
-    if (count > 0) std::memcpy(native_span(rt, a.i64(0), uint64_t(count), true).data(), src.data(), size_t(count));
-    return 0;
-  });
-  // peek/poke<Type>Array(long address, <type>[] array, int offset, int count,
-  // boolean swap): offset and count in elements.
-  struct ArrayKind {
-    const char* name;
-    char type;
-    uint32_t width;
-  };
-  for (ArrayKind k : {ArrayKind{"Char", 'C', 2}, ArrayKind{"Short", 'S', 2}, ArrayKind{"Int", 'I', 4},
-                      ArrayKind{"Float", 'F', 4}, ArrayKind{"Long", 'J', 8}, ArrayKind{"Double", 'D', 8}}) {
-    std::string sig = std::string("(J[") + k.type + "IIZ)V";
-    r.bind(mem, std::string("peek") + k.name + "Array", sig, [width = k.width](Runtime& rt, NativeArgs& a) -> uint64_t {
-      auto dst = array_elements(rt, a.h(2), a.i32(3), a.i32(4), width);
-      if (dst.empty()) return 0;
-      copy_elements(dst.data(), native_span(rt, a.i64(0), dst.size()).data(), dst.size(), width, a.z(5));
+  for (const char* mem : {"Llibcore/io/Memory;", "Lcom/android/i18n/timezone/internal/Memory;"}) {
+    r.bind(mem, "peekByte", "(J)B", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      return uint32_t(int32_t(peek<int8_t>(rt, a.i64(0), false)));
+    });
+    r.bind(mem, "pokeByte", "(JB)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      poke<uint8_t>(rt, a.i64(0), uint8_t(a.raw(2)), false);
       return 0;
     });
-    r.bind(mem, std::string("poke") + k.name + "Array", sig, [width = k.width](Runtime& rt, NativeArgs& a) -> uint64_t {
-      auto src = array_elements(rt, a.h(2), a.i32(3), a.i32(4), width);
-      if (src.empty()) return 0;
-      copy_elements(native_span(rt, a.i64(0), src.size(), true).data(), src.data(), src.size(), width, a.z(5));
+    r.bind(mem, "peekByteArray", "(J[BII)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      int32_t count = a.i32(4);
+      auto dst = array_bytes(rt, a.h(2), a.i32(3), count);
+      if (count > 0) std::memcpy(dst.data(), native_span(rt, a.i64(0), uint64_t(count)).data(), size_t(count));
+      return 0;
+    });
+    r.bind(mem, "pokeByteArray", "(J[BII)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      int32_t count = a.i32(4);
+      auto src = array_bytes(rt, a.h(2), a.i32(3), count);
+      if (count > 0) std::memcpy(native_span(rt, a.i64(0), uint64_t(count), true).data(), src.data(), size_t(count));
+      return 0;
+    });
+    // peek/poke<Type>Array(long address, <type>[] array, int offset, int count,
+    // boolean swap): offset and count in elements.
+    struct ArrayKind {
+      const char* name;
+      char type;
+      uint32_t width;
+    };
+    for (ArrayKind k : {ArrayKind{"Char", 'C', 2}, ArrayKind{"Short", 'S', 2}, ArrayKind{"Int", 'I', 4},
+                        ArrayKind{"Float", 'F', 4}, ArrayKind{"Long", 'J', 8}, ArrayKind{"Double", 'D', 8}}) {
+      std::string sig = std::string("(J[") + k.type + "IIZ)V";
+      r.bind(mem, std::string("peek") + k.name + "Array", sig, [width = k.width](Runtime& rt, NativeArgs& a) -> uint64_t {
+        auto dst = array_elements(rt, a.h(2), a.i32(3), a.i32(4), width);
+        if (dst.empty()) return 0;
+        copy_elements(dst.data(), native_span(rt, a.i64(0), dst.size()).data(), dst.size(), width, a.z(5));
+        return 0;
+      });
+      r.bind(mem, std::string("poke") + k.name + "Array", sig, [width = k.width](Runtime& rt, NativeArgs& a) -> uint64_t {
+        auto src = array_elements(rt, a.h(2), a.i32(3), a.i32(4), width);
+        if (src.empty()) return 0;
+        copy_elements(native_span(rt, a.i64(0), src.size(), true).data(), src.data(), src.size(), width, a.z(5));
+        return 0;
+      });
+    }
+    r.bind(mem, "peekShortNative", "(J)S", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      return uint32_t(int32_t(peek<int16_t>(rt, a.i64(0), false)));
+    });
+    r.bind(mem, "pokeShortNative", "(JS)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      poke<uint16_t>(rt, a.i64(0), uint16_t(a.raw(2)), false);
+      return 0;
+    });
+    r.bind(mem, "peekIntNative", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      return peek<uint32_t>(rt, a.i64(0), false);
+    });
+    r.bind(mem, "pokeIntNative", "(JI)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      poke<uint32_t>(rt, a.i64(0), a.raw(2), false);
+      return 0;
+    });
+    r.bind(mem, "peekLongNative", "(J)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      return peek<uint64_t>(rt, a.i64(0), false);
+    });
+    r.bind(mem, "pokeLongNative", "(JJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      poke<uint64_t>(rt, a.i64(0), uint64_t(a.i64(2)), false);
+      return 0;
+    });
+    // Scalar overloads without swap (direct equivalents)
+    r.bind(mem, "peekShort", "(J)S", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      return uint32_t(int32_t(peek<int16_t>(rt, a.i64(0), false)));
+    });
+    r.bind(mem, "pokeShort", "(JS)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      poke<uint16_t>(rt, a.i64(0), uint16_t(a.raw(2)), false);
+      return 0;
+    });
+    r.bind(mem, "peekInt", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      return peek<uint32_t>(rt, a.i64(0), false);
+    });
+    r.bind(mem, "pokeInt", "(JI)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      poke<uint32_t>(rt, a.i64(0), a.raw(2), false);
+      return 0;
+    });
+    r.bind(mem, "peekLong", "(J)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      return peek<uint64_t>(rt, a.i64(0), false);
+    });
+    r.bind(mem, "pokeLong", "(JJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      poke<uint64_t>(rt, a.i64(0), uint64_t(a.i64(2)), false);
+      return 0;
+    });
+    // peek/poke<Type>(long address[, value], boolean swap) intrinsics
+    const char* note = "accès direct à la mémoire native émulée";
+    r.intrinsic(mem, "peekShort", "(JZ)S", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      return uint32_t(int32_t(peek<int16_t>(rt, a.i64(0), a.z(2))));
+    }, note);
+    r.intrinsic(mem, "pokeShort", "(JSZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      poke<uint16_t>(rt, a.i64(0), uint16_t(a.raw(2)), a.z(3));
+      return 0;
+    }, note);
+    r.intrinsic(mem, "peekInt", "(JZ)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      return peek<uint32_t>(rt, a.i64(0), a.z(2));
+    }, note);
+    r.intrinsic(mem, "pokeInt", "(JIZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      poke<uint32_t>(rt, a.i64(0), a.raw(2), a.z(3));
+      return 0;
+    }, note);
+    r.intrinsic(mem, "peekLong", "(JZ)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      return peek<uint64_t>(rt, a.i64(0), a.z(2));
+    }, note);
+    r.intrinsic(mem, "pokeLong", "(JJZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      poke<uint64_t>(rt, a.i64(0), uint64_t(a.i64(2)), a.z(4));
+      return 0;
+    }, note);
+    // memmove
+    r.bind(mem, "memmove", "(Ljava/lang/Object;ILjava/lang/Object;IJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      int64_t count = a.i64(4);
+      auto dst = memmove_bytes(rt, a.h(0), a.i32(1), count, true);
+      auto src = memmove_bytes(rt, a.h(2), a.i32(3), count, false);
+      if (count > 0) std::memmove(dst.data(), src.data(), size_t(count));
+      return 0;
+    });
+    // unsafeBulkGet / unsafeBulkPut
+    auto element_width = [](Runtime& rt, int32_t width) {
+      if (width != 1 && width != 2 && width != 4 && width != 8) {
+        rt.throw_new("Ljava/lang/IllegalArgumentException;", "Memory : taille d'élément " + std::to_string(width));
+      }
+      return uint32_t(width);
+    };
+    r.bind(mem, "unsafeBulkGet", "(Ljava/lang/Object;II[BIIZ)V", [element_width](Runtime& rt, NativeArgs& a) -> uint64_t {
+      uint32_t width = element_width(rt, a.i32(5));
+      int32_t count = a.i32(2);
+      if (a.i32(1) < 0) rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "Memory : plage hors du tableau");
+      auto dst = array_bytes(rt, a.h(0), int64_t(a.i32(1)) * width, count, width);
+      auto src = array_bytes(rt, a.h(3), a.i32(4), count, 1);
+      if (count > 0) copy_elements(dst.data(), src.data(), size_t(count), width, a.z(6));
+      return 0;
+    });
+    r.bind(mem, "unsafeBulkPut", "([BIILjava/lang/Object;IIZ)V", [element_width](Runtime& rt, NativeArgs& a) -> uint64_t {
+      uint32_t width = element_width(rt, a.i32(5));
+      int32_t count = a.i32(2);
+      if (a.i32(4) < 0) rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "Memory : plage hors du tableau");
+      auto dst = array_bytes(rt, a.h(0), a.i32(1), count, 1);
+      auto src = array_bytes(rt, a.h(3), int64_t(a.i32(4)) * width, count, width);
+      if (count > 0) copy_elements(dst.data(), src.data(), size_t(count), width, a.z(6));
       return 0;
     });
   }
-  r.bind(mem, "peekShortNative", "(J)S", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    return uint32_t(int32_t(peek<int16_t>(rt, a.i64(0), false)));
-  });
-  r.bind(mem, "pokeShortNative", "(JS)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    poke<uint16_t>(rt, a.i64(0), uint16_t(a.raw(2)), false);
-    return 0;
-  });
-  r.bind(mem, "peekIntNative", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    return peek<uint32_t>(rt, a.i64(0), false);
-  });
-  r.bind(mem, "pokeIntNative", "(JI)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    poke<uint32_t>(rt, a.i64(0), a.raw(2), false);
-    return 0;
-  });
-  r.bind(mem, "peekLongNative", "(J)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    return peek<uint64_t>(rt, a.i64(0), false);
-  });
-  r.bind(mem, "pokeLongNative", "(JJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    poke<uint64_t>(rt, a.i64(0), uint64_t(a.i64(2)), false);
-    return 0;
-  });
-  // peek/poke<Type>(long address[, value], boolean swap) are bytecode around
-  // the natives above (call, then reverseBytes): intrinsics save both calls.
-  const char* note = "accès direct à la mémoire native émulée";
-  r.intrinsic(mem, "peekShort", "(JZ)S", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    return uint32_t(int32_t(peek<int16_t>(rt, a.i64(0), a.z(2))));
-  }, note);
-  r.intrinsic(mem, "pokeShort", "(JSZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    poke<uint16_t>(rt, a.i64(0), uint16_t(a.raw(2)), a.z(3));
-    return 0;
-  }, note);
-  r.intrinsic(mem, "peekInt", "(JZ)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    return peek<uint32_t>(rt, a.i64(0), a.z(2));
-  }, note);
-  r.intrinsic(mem, "pokeInt", "(JIZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    poke<uint32_t>(rt, a.i64(0), a.raw(2), a.z(3));
-    return 0;
-  }, note);
-  r.intrinsic(mem, "peekLong", "(JZ)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    return peek<uint64_t>(rt, a.i64(0), a.z(2));
-  }, note);
-  r.intrinsic(mem, "pokeLong", "(JJZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    poke<uint64_t>(rt, a.i64(0), uint64_t(a.i64(2)), a.z(4));
-    return 0;
-  }, note);
-  // memmove(Object dst, int dstOffset, Object src, int srcOffset, long byteCount).
-  r.bind(mem, "memmove", "(Ljava/lang/Object;ILjava/lang/Object;IJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    int64_t count = a.i64(4);
-    auto dst = memmove_bytes(rt, a.h(0), a.i32(1), count, true);
-    auto src = memmove_bytes(rt, a.h(2), a.i32(3), count, false);
-    if (count > 0) std::memmove(dst.data(), src.data(), size_t(count));
-    return 0;
-  });
-  // unsafeBulkGet(Object dst, int dstOffset, int byteCount, byte[] src, int srcOffset,
-  // int sizeofElements, boolean swap) and unsafeBulkPut(byte[] dst, int dstOffset,
-  // int byteCount, Object src, int srcOffset, int sizeofElements, boolean swap):
-  // heap ByteBuffers' bulk transfers. The offset in the typed array is in elements.
-  auto element_width = [](Runtime& rt, int32_t width) {
-    if (width != 1 && width != 2 && width != 4 && width != 8) {
-      rt.throw_new("Ljava/lang/IllegalArgumentException;", "Memory : taille d'élément " + std::to_string(width));
-    }
-    return uint32_t(width);
-  };
-  r.bind(mem, "unsafeBulkGet", "(Ljava/lang/Object;II[BIIZ)V", [element_width](Runtime& rt, NativeArgs& a) -> uint64_t {
-    uint32_t width = element_width(rt, a.i32(5));
-    int32_t count = a.i32(2);
-    if (a.i32(1) < 0) rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "Memory : plage hors du tableau");
-    auto dst = array_bytes(rt, a.h(0), int64_t(a.i32(1)) * width, count, width);
-    auto src = array_bytes(rt, a.h(3), a.i32(4), count, 1);
-    if (count > 0) copy_elements(dst.data(), src.data(), size_t(count), width, a.z(6));
-    return 0;
-  });
-  r.bind(mem, "unsafeBulkPut", "([BIILjava/lang/Object;IIZ)V", [element_width](Runtime& rt, NativeArgs& a) -> uint64_t {
-    uint32_t width = element_width(rt, a.i32(5));
-    int32_t count = a.i32(2);
-    if (a.i32(4) < 0) rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "Memory : plage hors du tableau");
-    auto dst = array_bytes(rt, a.h(0), a.i32(1), count, 1);
-    auto src = array_bytes(rt, a.h(3), int64_t(a.i32(4)) * width, count, width);
-    if (count > 0) copy_elements(dst.data(), src.data(), size_t(count), width, a.z(6));
-    return 0;
-  });
 }
 
 }  // namespace
