@@ -1,20 +1,71 @@
 package aa.host.services;
 
+import aa.host.Reflect;
 import android.app.ActivityManager;
 import android.app.IActivityClientController;
 import android.app.IActivityTaskManager;
+import android.app.IApplicationThread;
+import android.app.IRequestFinishCallback;
+import android.app.ProfilerInfo;
+import android.content.ComponentName;
+import android.content.Intent;
+import android.content.pm.ActivityInfo;
+import android.os.Binder;
+import android.os.Bundle;
 import android.os.IBinder;
+import android.os.PersistableBundle;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
- * The "activity_task" service (ADR-006 J4): the activity task manager. There are no tasks or
- * recents screen: the activities of the single application are started by the launcher, and
- * what they report to the system about themselves goes to {@link ActivityClient}.
+ * The "activity_task" service (ADR-006 J4, J9): the activity task manager.
+ * Manages the activity backstack, lifecycle transitions (pause, stop, resume, destroy),
+ * and client callbacks through {@link ActivityClient}.
  */
 public final class ActivityTaskService extends IActivityTaskManager.Stub {
-  private final ActivityClient client = new ActivityClient();
+  private static final int PROCESS_STATE_TOP = 2;
+
+  public static final int STATE_INITIALIZING = 0;
+  public static final int STATE_STARTED = 1;
+  public static final int STATE_RESUMED = 2;
+  public static final int STATE_PAUSED = 3;
+  public static final int STATE_STOPPED = 4;
+  public static final int STATE_DESTROYED = 5;
+
+  public static final class ActivityRecord {
+    public final IBinder token;
+    public final Intent intent;
+    public final ActivityInfo info;
+    public int state = STATE_INITIALIZING;
+    public boolean finishing = false;
+
+    ActivityRecord(IBinder token, Intent intent, ActivityInfo info) {
+      this.token = token;
+      this.intent = intent;
+      this.info = info;
+    }
+  }
+
+  private static volatile ActivityTaskService sInstance;
+  public static volatile Object sApplicationThread;
+  public static volatile PackageService sPackageService;
+  public static volatile String sPackageName;
+  public static volatile Runnable onResumed;
+  public static volatile Runnable onStackEmpty;
+
+  private final Deque<ActivityRecord> stack = new ArrayDeque<>();
+  private final Map<IBinder, ActivityRecord> activities = new HashMap<>();
+  private final ActivityClient client = new ActivityClient(this);
 
   public ActivityTaskService() {
     super(LocalPermissionEnforcer.INSTANCE);
+    sInstance = this;
+  }
+
+  public static ActivityTaskService getInstance() {
+    return sInstance;
   }
 
   @Override
@@ -22,20 +73,261 @@ public final class ActivityTaskService extends IActivityTaskManager.Stub {
     return client;
   }
 
-  /** The per-activity calls of android.app.ActivityClient. */
-  static final class ActivityClient extends IActivityClientController.Stub {
-    /** Shown in recents, which do not exist. */
-    @Override
-    public void setTaskDescription(IBinder token, ActivityManager.TaskDescription description) {}
+  /** Pushes the initial activity token created by the launcher onto the stack. */
+  public synchronized void recordInitialActivity(IBinder token, Intent intent, ActivityInfo info) {
+    ActivityRecord rec = new ActivityRecord(token, intent, info);
+    rec.state = STATE_INITIALIZING;
+    stack.push(rec);
+    activities.put(token, rec);
+  }
 
-    /** ResumeActivityItem.postExecute: the activity is in the foreground. */
-    @Override
-    public void activityResumed(IBinder token, boolean handleSplashScreenExit) {
-      Runnable r = onResumed;
-      if (r != null) r.run();
+  public synchronized ActivityRecord getTopActivity() {
+    return stack.peek();
+  }
+
+  @Override
+  public synchronized int startActivity(
+      IApplicationThread caller,
+      String callingPackage,
+      String callingFeatureId,
+      Intent intent,
+      String resolvedType,
+      IBinder resultTo,
+      String resultWho,
+      int requestCode,
+      int flags,
+      ProfilerInfo profilerInfo,
+      Bundle options) {
+    if (intent == null) return -1;
+    ActivityInfo info = resolveActivity(intent);
+    if (info == null) {
+      System.err.println("[AnyAndroid] Activité introuvable pour l'intent : " + intent);
+      return -1;
+    }
+    IBinder token = new Binder();
+    ActivityRecord next = new ActivityRecord(token, intent, info);
+    ActivityRecord top = stack.peek();
+    activities.put(token, next);
+    stack.push(next);
+
+    if (top != null && top.state == STATE_RESUMED) {
+      pauseActivity(top, false);
+    } else {
+      launchAndResume(next);
+    }
+    return 0; // START_SUCCESS
+  }
+
+  private ActivityInfo resolveActivity(Intent intent) {
+    ComponentName cn = intent.getComponent();
+    if (cn != null && sPackageService != null) {
+      return sPackageService.getActivityInfo(cn, 0, 0);
+    }
+    if (sPackageService != null) {
+      android.content.pm.ResolveInfo ri = sPackageService.resolveIntent(intent, null, 0, 0);
+      if (ri != null) return ri.activityInfo;
+    }
+    return null;
+  }
+
+  void onActivityPaused(IBinder token) {
+    synchronized (this) {
+      ActivityRecord rec = activities.get(token);
+      if (rec != null) rec.state = STATE_PAUSED;
+      if (rec != null && rec.finishing) {
+        stack.remove(rec);
+        ActivityRecord top = stack.peek();
+        if (top != null) {
+          resumeActivity(top);
+        }
+        stopActivity(rec);
+        destroyActivity(rec);
+        if (stack.isEmpty()) {
+          Runnable empty = onStackEmpty;
+          if (empty != null) empty.run();
+        }
+      } else {
+        ActivityRecord top = stack.peek();
+        if (top != null && top != rec && top.state == STATE_INITIALIZING) {
+          launchAndResume(top);
+        }
+      }
     }
   }
 
-  /** Called when an activity reports itself resumed (the host's launcher watches it). */
-  public static volatile Runnable onResumed;
+  void onActivityResumed(IBinder token) {
+    synchronized (this) {
+      ActivityRecord rec = activities.get(token);
+      if (rec != null) rec.state = STATE_RESUMED;
+      for (ActivityRecord r : stack) {
+        if (r != rec && r.state == STATE_PAUSED && !r.finishing) {
+          stopActivity(r);
+        }
+      }
+    }
+    Runnable r = onResumed;
+    if (r != null) r.run();
+  }
+
+  void onActivityStopped(IBinder token) {
+    synchronized (this) {
+      ActivityRecord rec = activities.get(token);
+      if (rec != null) rec.state = STATE_STOPPED;
+    }
+  }
+
+  void onActivityDestroyed(IBinder token) {
+    synchronized (this) {
+      activities.remove(token);
+    }
+  }
+
+  boolean doFinishActivity(IBinder token) {
+    synchronized (this) {
+      ActivityRecord rec = activities.get(token);
+      if (rec == null) return false;
+      rec.finishing = true;
+      if (rec.state == STATE_RESUMED) {
+        pauseActivity(rec, true);
+      } else {
+        stack.remove(rec);
+        ActivityRecord top = stack.peek();
+        if (top != null && top.state != STATE_RESUMED) {
+          resumeActivity(top);
+        }
+        stopActivity(rec);
+        destroyActivity(rec);
+        if (stack.isEmpty()) {
+          Runnable empty = onStackEmpty;
+          if (empty != null) empty.run();
+        }
+      }
+      return true;
+    }
+  }
+
+  private void launchAndResume(ActivityRecord rec) {
+    Object thread = sApplicationThread;
+    if (thread == null) return;
+    try {
+      Object clientController = client;
+      Object launch = Reflect.newInstance(Reflect.type("android.app.servertransaction.LaunchActivityItem"),
+          rec.token, rec.intent, 0, rec.info, DisplayService.displayConfiguration(),
+          Reflect.newInstance(Reflect.type("android.content.res.Configuration")),
+          0, null, null, PROCESS_STATE_TOP, null, null, null, null, null, true, null,
+          new Binder(), clientController, new Binder(), false, null, new Binder(),
+          Reflect.newInstance(Reflect.type("android.window.ActivityWindowInfo")), 0);
+      Object resume = Reflect.newInstance(Reflect.type("android.app.servertransaction.ResumeActivityItem"),
+          rec.token, PROCESS_STATE_TOP, true, false);
+      Object transaction = Reflect.newInstance(Reflect.type("android.app.servertransaction.ClientTransaction"), thread);
+      Reflect.call(transaction, "addTransactionItem", launch);
+      Reflect.call(transaction, "addTransactionItem", resume);
+      Reflect.call(thread, "scheduleTransaction", transaction);
+    } catch (Exception e) {
+      throw new RuntimeException("[AnyAndroid] Échec du lancement de l'activité " + rec.info.name, e);
+    }
+  }
+
+  private void pauseActivity(ActivityRecord rec, boolean finished) {
+    Object thread = sApplicationThread;
+    if (thread == null) return;
+    try {
+      Object pause = Reflect.newInstance(Reflect.type("android.app.servertransaction.PauseActivityItem"),
+          rec.token, finished, false, false, false);
+      Object transaction = Reflect.newInstance(Reflect.type("android.app.servertransaction.ClientTransaction"), thread);
+      Reflect.call(transaction, "addTransactionItem", pause);
+      Reflect.call(thread, "scheduleTransaction", transaction);
+    } catch (Exception e) {
+      throw new RuntimeException("[AnyAndroid] Échec de la mise en pause", e);
+    }
+  }
+
+  private void resumeActivity(ActivityRecord rec) {
+    Object thread = sApplicationThread;
+    if (thread == null) return;
+    try {
+      Object resume = Reflect.newInstance(Reflect.type("android.app.servertransaction.ResumeActivityItem"),
+          rec.token, PROCESS_STATE_TOP, false, false);
+      Object transaction = Reflect.newInstance(Reflect.type("android.app.servertransaction.ClientTransaction"), thread);
+      Reflect.call(transaction, "addTransactionItem", resume);
+      Reflect.call(thread, "scheduleTransaction", transaction);
+    } catch (Exception e) {
+      throw new RuntimeException("[AnyAndroid] Échec de la reprise", e);
+    }
+  }
+
+  private void stopActivity(ActivityRecord rec) {
+    Object thread = sApplicationThread;
+    if (thread == null) return;
+    try {
+      Object stop = Reflect.newInstance(Reflect.type("android.app.servertransaction.StopActivityItem"), rec.token);
+      Object transaction = Reflect.newInstance(Reflect.type("android.app.servertransaction.ClientTransaction"), thread);
+      Reflect.call(transaction, "addTransactionItem", stop);
+      Reflect.call(thread, "scheduleTransaction", transaction);
+    } catch (Exception e) {
+      throw new RuntimeException("[AnyAndroid] Échec de l'arrêt", e);
+    }
+  }
+
+  private void destroyActivity(ActivityRecord rec) {
+    Object thread = sApplicationThread;
+    if (thread == null) return;
+    try {
+      Object destroy = Reflect.newInstance(Reflect.type("android.app.servertransaction.DestroyActivityItem"),
+          rec.token, true);
+      Object transaction = Reflect.newInstance(Reflect.type("android.app.servertransaction.ClientTransaction"), thread);
+      Reflect.call(transaction, "addTransactionItem", destroy);
+      Reflect.call(thread, "scheduleTransaction", transaction);
+    } catch (Exception e) {
+      throw new RuntimeException("[AnyAndroid] Échec de la destruction", e);
+    }
+  }
+
+  /** The per-activity calls of android.app.ActivityClient. */
+  static final class ActivityClient extends IActivityClientController.Stub {
+    private final ActivityTaskService service;
+
+    ActivityClient(ActivityTaskService service) {
+      this.service = service;
+    }
+
+    @Override
+    public void setTaskDescription(IBinder token, ActivityManager.TaskDescription description) {}
+
+    @Override
+    public void activityResumed(IBinder token, boolean handleSplashScreenExit) {
+      service.onActivityResumed(token);
+    }
+
+    @Override
+    public boolean finishActivity(IBinder token, int resultCode, Intent resultData, int finishTask) {
+      return service.doFinishActivity(token);
+    }
+
+    @Override
+    public void activityPaused(IBinder token) {
+      service.onActivityPaused(token);
+    }
+
+    @Override
+    public void activityStopped(IBinder token, Bundle state, PersistableBundle persistentState, CharSequence description) {
+      service.onActivityStopped(token);
+    }
+
+    @Override
+    public void activityDestroyed(IBinder token) {
+      service.onActivityDestroyed(token);
+    }
+
+    @Override
+    public void onBackPressed(IBinder token, IRequestFinishCallback callback) {
+      if (callback != null) {
+        try {
+          callback.requestFinish();
+          return;
+        } catch (Throwable ignored) {}
+      }
+      service.doFinishActivity(token);
+    }
+  }
 }

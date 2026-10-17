@@ -477,3 +477,83 @@ TEST(input_channel_and_event_receiver_pipeline) {
   rt.call_static("Landroid/os/Parcel;", "nativeDestroy", "(J)V", {p_lo, p_hi});
 }
 
+TEST(input_event_receiver_lifo_stack_routes_to_top_and_restores_on_dispose) {
+  InputVm vm;
+  auto& rt = *vm.rt;
+
+  // Channel 1 & Receiver 1 (Main Window)
+  rt::Handle name1 = rt.new_string_utf8("chan1");
+  rt::Handle pair1 = rt::Handle(rt.call_static("Landroid/view/InputChannel;", "nativeOpenInputChannelPair",
+                                              "(Ljava/lang/String;)[J", {name1}));
+  auto& arr1 = rt.array(pair1, "long[]");
+  int64_t server_h1 = 0, client_h1 = 0;
+  std::memcpy(&server_h1, arr1.data.data(), sizeof(int64_t));
+  std::memcpy(&client_h1, arr1.data.data() + sizeof(int64_t), sizeof(int64_t));
+
+  rt::Handle client_chan1 = bridge::construct(rt, "Landroid/view/InputChannel;", "()V", {});
+  set_long_field(rt, client_chan1, "mPtr", client_h1);
+
+  rt::Handle mq1 = bridge::construct(rt, "Landroid/os/MessageQueue;", "()V", {});
+  int64_t mq_ptr1 = int64_t(rt.call_static("Landroid/os/MessageQueue;", "nativeInit", "()J", {}));
+  set_long_field(rt, mq1, "mPtr", mq_ptr1);
+
+  rt::Handle recv1 = bridge::construct(rt, "LTestReceiver;", "()V", {});
+  rt::GlobalRef keep_recv1(rt, recv1);
+  rt::Handle weak_ref1 = bridge::construct(rt, "Ljava/lang/ref/WeakReference;", "(Ljava/lang/Object;)V", {recv1});
+
+  int64_t recv_ptr1 = int64_t(rt.call_static("Landroid/view/InputEventReceiver;", "nativeInit",
+                                             "(Ljava/lang/ref/WeakReference;Landroid/view/InputChannel;Landroid/os/MessageQueue;)J",
+                                             {weak_ref1, client_chan1, mq1}));
+  CHECK(recv_ptr1 != 0);
+  set_long_field(rt, recv1, "mReceiverPtr", recv_ptr1);
+  CHECK_EQ(bridge::active_input_receivers_count(), 1u);
+
+  // Channel 2 & Receiver 2 (Dialog / Popup Window)
+  rt::Handle name2 = rt.new_string_utf8("chan2");
+  rt::Handle pair2 = rt::Handle(rt.call_static("Landroid/view/InputChannel;", "nativeOpenInputChannelPair",
+                                              "(Ljava/lang/String;)[J", {name2}));
+  auto& arr2 = rt.array(pair2, "long[]");
+  int64_t server_h2 = 0, client_h2 = 0;
+  std::memcpy(&server_h2, arr2.data.data(), sizeof(int64_t));
+  std::memcpy(&client_h2, arr2.data.data() + sizeof(int64_t), sizeof(int64_t));
+
+  rt::Handle client_chan2 = bridge::construct(rt, "Landroid/view/InputChannel;", "()V", {});
+  set_long_field(rt, client_chan2, "mPtr", client_h2);
+
+  rt::Handle recv2 = bridge::construct(rt, "LTestReceiver;", "()V", {});
+  rt::GlobalRef keep_recv2(rt, recv2);
+  rt::Handle weak_ref2 = bridge::construct(rt, "Ljava/lang/ref/WeakReference;", "(Ljava/lang/Object;)V", {recv2});
+
+  int64_t recv_ptr2 = int64_t(rt.call_static("Landroid/view/InputEventReceiver;", "nativeInit",
+                                             "(Ljava/lang/ref/WeakReference;Landroid/view/InputChannel;Landroid/os/MessageQueue;)J",
+                                             {weak_ref2, client_chan2, mq1}));
+  CHECK(recv_ptr2 != 0);
+  set_long_field(rt, recv2, "mReceiverPtr", recv_ptr2);
+  CHECK_EQ(bridge::active_input_receivers_count(), 2u);
+
+  // Event routing: when dialog is open, post_window_touch routes to recv2
+  bridge::set_active_runtime(&rt);
+  uint32_t r2_lo = uint32_t(uint64_t(recv_ptr2)), r2_hi = uint32_t(uint64_t(recv_ptr2) >> 32);
+  uint32_t r1_lo = uint32_t(uint64_t(recv_ptr1)), r1_hi = uint32_t(uint64_t(recv_ptr1) >> 32);
+  CHECK(!rt.call_static("Landroid/view/InputEventReceiver;", "nativeProbablyHasInput", "(J)Z", {r2_lo, r2_hi}));
+  CHECK(!rt.call_static("Landroid/view/InputEventReceiver;", "nativeProbablyHasInput", "(J)Z", {r1_lo, r1_hi}));
+
+  CHECK(bridge::post_window_touch(0 /* DOWN */, 50.0f, 50.0f, 100, 100));
+  CHECK(rt.call_static("Landroid/view/InputEventReceiver;", "nativeProbablyHasInput", "(J)Z", {r2_lo, r2_hi}));
+  CHECK(!rt.call_static("Landroid/view/InputEventReceiver;", "nativeProbablyHasInput", "(J)Z", {r1_lo, r1_hi}));
+
+  // Dismiss dialog (dispose receiver 2) -> receiver 1 automatically becomes top
+  rt.call_static("Landroid/view/InputEventReceiver;", "nativeDispose", "(J)V", {r2_lo, r2_hi});
+  CHECK_EQ(bridge::active_input_receivers_count(), 1u);
+
+  CHECK(bridge::post_window_touch(1 /* UP */, 60.0f, 60.0f, 200, 200));
+  CHECK(rt.call_static("Landroid/view/InputEventReceiver;", "nativeProbablyHasInput", "(J)Z", {r1_lo, r1_hi}));
+
+  // Cleanup
+  bridge::set_active_runtime(nullptr);
+  rt.call_static("Landroid/view/InputEventReceiver;", "nativeDispose", "(J)V", {r1_lo, r1_hi});
+  CHECK_EQ(bridge::active_input_receivers_count(), 0u);
+  rt.call_static("Landroid/os/MessageQueue;", "nativeDestroy", "(J)V",
+                 {uint32_t(uint64_t(mq_ptr1)), uint32_t(uint64_t(mq_ptr1) >> 32)});
+}
+

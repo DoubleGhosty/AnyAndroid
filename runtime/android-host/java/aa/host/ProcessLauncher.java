@@ -54,6 +54,10 @@ public final class ProcessLauncher implements ActivityService.AttachHandler {
       Launcher.log("activité au premier plan");
       if (untilResumed) throw new Stop();
     });
+    ActivityTaskService.onStackEmpty = () -> new Handler(Looper.getMainLooper()).post(() -> {
+      Launcher.log("pile d'activités vide");
+      throw new Stop();
+    });
     // Software drawing (ADR-006 §3): ViewRootImpl draws through drawSoftware, without HWUI.
     Reflect.setStatic(Reflect.type("android.view.ThreadedRenderer"), "sRendererEnabled", false);
     // What zygote preloads for every process (ZygoteInit.preloadCompatConfig): the compat rules
@@ -78,6 +82,9 @@ public final class ProcessLauncher implements ActivityService.AttachHandler {
       IPackageManager pm = ActivityThread.getPackageManager();
       ApplicationInfo ai = pm.getApplicationInfo(pkg, 0, 0);
       Launcher.log("processus attaché : " + ai.processName);
+      ActivityTaskService.sApplicationThread = thread;
+      ActivityTaskService.sPackageName = pkg;
+      ActivityTaskService.sPackageService = (aa.host.services.PackageService) android.os.ServiceManager.getService("package");
       bind(thread, ai);
       // After BIND_APPLICATION, before the launch: the Application exists.
       new Handler(Looper.getMainLooper()).post(() -> {
@@ -132,6 +139,10 @@ public final class ProcessLauncher implements ActivityService.AttachHandler {
         Reflect.newInstance(Reflect.type("android.window.ActivityWindowInfo")), 0);
     Object resume = Reflect.newInstance(Reflect.type("android.app.servertransaction.ResumeActivityItem"),
         token, PROCESS_STATE_TOP, true, false);
+    ActivityTaskService ats = ActivityTaskService.getInstance();
+    if (ats != null) {
+      ats.recordInitialActivity(token, intent, info);
+    }
     Object transaction = Reflect.newInstance(Reflect.type("android.app.servertransaction.ClientTransaction"), thread);
     Reflect.call(transaction, "addTransactionItem", launch);
     Reflect.call(transaction, "addTransactionItem", resume);

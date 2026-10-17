@@ -42,23 +42,23 @@ le nombre de fichiers.
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
 | G2    | Vraie libcore d'AOSP (Android 17)                           | 92 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 88 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J2 et J4-J8 terminés (J5 démarrage par les vrais gestionnaires jusqu'à la première image, J6 texte complet FreeType/HarfBuzz, J7 moteur 2D logiciel Skia/AGSL, J8 fenêtre Win32 et entrées), J9-J10 en cours |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 94 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0-J2 et J4-J9 terminés (J5 démarrage par les vrais gestionnaires jusqu'à la première image, J6 texte complet FreeType/HarfBuzz, J7 moteur 2D logiciel Skia/AGSL, J8 fenêtre Win32 et entrées, J9 navigation, cycle de vie et compositeur multi-surfaces), J10 en cours |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
-| **Total** | **Android natif sur Windows**                          | **≈ 51 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
+| **Total** | **Android natif sur Windows**                          | **≈ 53 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
 
 ```
 G0 ██████████ 100 %
 G1 ██████████ 100 %
 G2 █████████░  92 %
-G3 █████████░  88 %
+G3 █████████░  94 %
 G4 ░░░░░░░░░░   0 %
 G5 ░░░░░░░░░░   0 %
    ───────────────
-   █████░░░░░ ≈ 51 % vers « Android natif sur Windows »
+   █████░░░░░ ≈ 53 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 37 suites de tests et 186 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 37 suites de tests et 188 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.

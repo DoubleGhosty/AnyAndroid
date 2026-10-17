@@ -21,6 +21,15 @@
 #include "common/clock.h"
 #include "framework-bridge/handles.h"
 #include "framework-bridge/motion_event.h"
+#include "include/core/SkBitmap.h"
+#include "include/core/SkCanvas.h"
+#include "include/core/SkColor.h"
+#include "include/core/SkColorSpace.h"
+#include "include/core/SkImage.h"
+#include "include/core/SkPaint.h"
+#include "include/core/SkPixmap.h"
+#include "include/core/SkRect.h"
+#include "include/core/SkSamplingOptions.h"
 
 namespace aa::bridge {
 
@@ -262,19 +271,41 @@ void deliver_vsync(Runtime& rt, int64_t handle, int64_t timestamp) {
 }
 
 static std::mutex active_receiver_lock;
-static std::weak_ptr<InputReceiver> s_active_receiver;
+static std::vector<std::weak_ptr<InputReceiver>> s_active_receivers;
 static rt::Runtime* s_active_runtime = nullptr;
 
 void register_active_input_receiver(const std::shared_ptr<InputReceiver>& recv) {
   std::lock_guard<std::mutex> guard(active_receiver_lock);
-  s_active_receiver = recv;
+  s_active_receivers.erase(
+      std::remove_if(s_active_receivers.begin(), s_active_receivers.end(),
+                     [&](const std::weak_ptr<InputReceiver>& wp) {
+                       auto sp = wp.lock();
+                       return !sp || sp == recv;
+                     }),
+      s_active_receivers.end());
+  s_active_receivers.push_back(recv);
 }
 
 void unregister_active_input_receiver(const std::shared_ptr<InputReceiver>& recv) {
   std::lock_guard<std::mutex> guard(active_receiver_lock);
-  if (auto cur = s_active_receiver.lock()) {
-    if (cur == recv) s_active_receiver.reset();
+  s_active_receivers.erase(
+      std::remove_if(s_active_receivers.begin(), s_active_receivers.end(),
+                     [&](const std::weak_ptr<InputReceiver>& wp) {
+                       auto sp = wp.lock();
+                       return !sp || sp == recv;
+                     }),
+      s_active_receivers.end());
+}
+
+std::shared_ptr<InputReceiver> get_active_input_receiver() {
+  std::lock_guard<std::mutex> guard(active_receiver_lock);
+  while (!s_active_receivers.empty()) {
+    if (auto sp = s_active_receivers.back().lock()) {
+      return sp;
+    }
+    s_active_receivers.pop_back();
   }
+  return nullptr;
 }
 
 void deliver_input_events(Runtime& rt, std::shared_ptr<InputReceiver> recv) {
@@ -396,14 +427,32 @@ std::shared_ptr<std::function<void(const PostedFrame&)>> frame_listener() {
   return frame_listener_slot();
 }
 
+static std::mutex active_buffer_queues_lock;
+static std::vector<std::weak_ptr<BufferQueue>> active_buffer_queues;
+
 void register_buffer_queue(rt::NativeRegistry& r) {
   const char* bq = "Landroid/graphics/BLASTBufferQueue;";
   r.bind(bq, "nativeCreate", "(Ljava/lang/String;Z)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto q = std::make_shared<BufferQueue>();
     if (a.h(0) != kNull) q->name = rt.string_utf8(a.h(0));
+    {
+      std::lock_guard<std::mutex> guard(active_buffer_queues_lock);
+      active_buffer_queues.push_back(q);
+    }
     return rt::ret_long(queues().add(std::move(q)));
   }, S::kPartial, "tampon logiciel unique ; présentation à l'écran en J8");
   r.bind(bq, "nativeDestroy", "(J)V", [](Runtime&, NativeArgs& a) -> uint64_t {
+    auto q = queues().get(a.i64(0));
+    if (q) {
+      std::lock_guard<std::mutex> guard(active_buffer_queues_lock);
+      active_buffer_queues.erase(
+          std::remove_if(active_buffer_queues.begin(), active_buffer_queues.end(),
+                         [&](const std::weak_ptr<BufferQueue>& wp) {
+                           auto sp = wp.lock();
+                           return !sp || sp == q;
+                         }),
+          active_buffer_queues.end());
+    }
     queues().remove(a.i64(0));
     return 0;
   });
@@ -589,15 +638,127 @@ void register_buffer_queue(rt::NativeRegistry& r) {
     for (auto& change : changes) change();
     run_callbacks(rt, callbacks);
     if (listener) {
-      if (layer) {
-        std::lock_guard<std::mutex> guard(layer->lock);
-        frame.layer_id = layer->id;
-        frame.layer_name = layer->name;
+      struct LayerItem {
+        std::shared_ptr<const std::vector<uint32_t>> pixels;
+        int32_t width = 0, height = 0, format = 0;
+        int32_t id = 0, z = 0, flags = 0;
+        float x = 0.0f, y = 0.0f, alpha = 1.0f;
+        std::string name;
+      };
+      std::vector<LayerItem> visible_layers;
+      {
+        std::lock_guard<std::mutex> guard(active_buffer_queues_lock);
+        active_buffer_queues.erase(
+            std::remove_if(active_buffer_queues.begin(), active_buffer_queues.end(),
+                           [](const std::weak_ptr<BufferQueue>& wp) { return wp.expired(); }),
+            active_buffer_queues.end());
+
+        for (auto& wp : active_buffer_queues) {
+          if (auto cur_q = wp.lock()) {
+            std::lock_guard<std::mutex> qguard(cur_q->lock);
+            if (!cur_q->has_frame || cur_q->width <= 0 || cur_q->height <= 0 || !cur_q->pixels ||
+                !cur_q->layer) {
+              continue;
+            }
+            std::lock_guard<std::mutex> lguard(cur_q->layer->lock);
+            if (cur_q->layer->hidden || cur_q->layer->alpha <= 0.0f) {
+              continue;
+            }
+            LayerItem item;
+            item.pixels = std::make_shared<const std::vector<uint32_t>>(cur_q->pixels->data);
+            item.width = cur_q->width;
+            item.height = cur_q->height;
+            item.format = cur_q->format;
+            item.id = cur_q->layer->id;
+            item.z = cur_q->layer->z;
+            item.flags = cur_q->layer->flags;
+            item.x = cur_q->layer->x;
+            item.y = cur_q->layer->y;
+            item.alpha = cur_q->layer->alpha;
+            item.name = cur_q->layer->name;
+            visible_layers.push_back(std::move(item));
+          }
+        }
       }
-      (*listener)(frame);
+
+      if (visible_layers.size() <= 1) {
+        if (!visible_layers.empty()) {
+          const auto& top = visible_layers.front();
+          frame.frame_number = s->queue->frame_number;
+          frame.width = top.width;
+          frame.height = top.height;
+          frame.opaque = opaque_format(top.format);
+          frame.pixels = top.pixels;
+          frame.layer_id = top.id;
+          frame.layer_name = top.name;
+        } else if (layer) {
+          std::lock_guard<std::mutex> guard(layer->lock);
+          frame.layer_id = layer->id;
+          frame.layer_name = layer->name;
+        }
+        (*listener)(frame);
+      } else {
+        std::stable_sort(visible_layers.begin(), visible_layers.end(),
+                         [](const LayerItem& item_a, const LayerItem& item_b) {
+                           if (item_a.z != item_b.z) return item_a.z < item_b.z;
+                           return item_a.id < item_b.id;
+                         });
+
+        int32_t canvas_w = 1080;
+        int32_t canvas_h = 1920;
+        for (const auto& item : visible_layers) {
+          canvas_w = std::max(canvas_w, item.width);
+          canvas_h = std::max(canvas_h, item.height);
+        }
+
+        std::vector<uint32_t> composite_pixels(size_t(canvas_w) * size_t(canvas_h), 0);
+        SkBitmap comp_bitmap;
+        comp_bitmap.installPixels(
+            SkImageInfo::Make(canvas_w, canvas_h, kN32_SkColorType, kPremul_SkAlphaType, SkColorSpace::MakeSRGB()),
+            composite_pixels.data(), size_t(canvas_w) * 4);
+        SkCanvas canvas(comp_bitmap);
+        canvas.clear(SK_ColorBLACK);
+
+        for (size_t i = 0; i < visible_layers.size(); ++i) {
+          const auto& item = visible_layers[i];
+          if (i > 0 && ((item.flags & 0x02) != 0 || item.z > 0)) {
+            SkPaint dim_paint;
+            dim_paint.setColor(SkColorSetARGB(153, 0, 0, 0));
+            dim_paint.setBlendMode(SkBlendMode::kSrcOver);
+            canvas.drawRect(SkRect::MakeWH(SkScalar(canvas_w), SkScalar(canvas_h)), dim_paint);
+          }
+
+          if (item.pixels && item.width > 0 && item.height > 0 &&
+              item.pixels->size() >= size_t(item.width) * size_t(item.height)) {
+            SkAlphaType at = opaque_format(item.format) ? kOpaque_SkAlphaType : kPremul_SkAlphaType;
+            SkPixmap pixmap(SkImageInfo::Make(item.width, item.height, kN32_SkColorType, at, SkColorSpace::MakeSRGB()),
+                            item.pixels->data(), size_t(item.width) * 4);
+            auto* keep = new std::shared_ptr<const std::vector<uint32_t>>(item.pixels);
+            sk_sp<SkImage> img = SkImages::RasterFromPixmap(
+                pixmap, [](const void*, void* ctx) { delete static_cast<std::shared_ptr<const std::vector<uint32_t>>*>(ctx); },
+                keep);
+            if (img) {
+              SkPaint layer_paint;
+              if (item.alpha < 1.0f) {
+                layer_paint.setAlphaf(std::clamp(item.alpha, 0.0f, 1.0f));
+              }
+              canvas.drawImage(img, item.x, item.y, SkSamplingOptions(), &layer_paint);
+            }
+          }
+        }
+
+        frame.frame_number = s->queue->frame_number;
+        frame.width = canvas_w;
+        frame.height = canvas_h;
+        frame.opaque = true;
+        frame.pixels = std::make_shared<const std::vector<uint32_t>>(std::move(composite_pixels));
+        frame.layer_id = s->queue->layer ? s->queue->layer->id : 0;
+        frame.layer_name = "composited";
+        (*listener)(frame);
+      }
     }
     return 0;
-  }, S::kPartial, "image publiée sans compositeur (présentation : J8)");
+  }, S::kPartial, "compositeur multi-couches logiciel (J9)");
 }
 
 int32_t next_layer_id() {
@@ -1018,6 +1179,15 @@ void set_active_runtime(rt::Runtime* rt) {
   s_active_runtime = rt;
 }
 
+size_t active_input_receivers_count() {
+  std::lock_guard<std::mutex> guard(active_receiver_lock);
+  size_t count = 0;
+  for (const auto& wp : s_active_receivers) {
+    if (!wp.expired()) ++count;
+  }
+  return count;
+}
+
 int32_t next_input_seq() {
   static std::atomic<int32_t> counter{1};
   int32_t seq = counter.fetch_add(1);
@@ -1086,11 +1256,10 @@ bool post_channel_key_event(Runtime& rt, int64_t channel_handle, int32_t device_
 }
 
 bool post_window_motion_event(const MotionEvent& event) {
-  std::shared_ptr<InputReceiver> recv;
+  std::shared_ptr<InputReceiver> recv = get_active_input_receiver();
   rt::Runtime* rt = nullptr;
   {
     std::lock_guard<std::mutex> guard(active_receiver_lock);
-    recv = s_active_receiver.lock();
     rt = s_active_runtime;
   }
   if (!recv || !rt) return false;
@@ -1107,11 +1276,10 @@ bool post_window_motion_event(const MotionEvent& event) {
 }
 
 bool post_window_key_event(int32_t device_id, int32_t key_code, int32_t meta_state, bool down, int64_t time) {
-  std::shared_ptr<InputReceiver> recv;
+  std::shared_ptr<InputReceiver> recv = get_active_input_receiver();
   rt::Runtime* rt = nullptr;
   {
     std::lock_guard<std::mutex> guard(active_receiver_lock);
-    recv = s_active_receiver.lock();
     rt = s_active_runtime;
   }
   if (!recv || !rt) return false;

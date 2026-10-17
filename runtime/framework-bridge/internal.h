@@ -215,6 +215,7 @@ bool post_window_key_event(int32_t device_id, int32_t key_code, int32_t meta_sta
 bool post_channel_motion_event(rt::Runtime& rt, int64_t channel_handle, const MotionEvent& event);
 bool post_channel_key_event(rt::Runtime& rt, int64_t channel_handle, int32_t device_id, int32_t key_code,
                             int32_t meta_state, bool down, int64_t time);
+size_t active_input_receivers_count();
 void register_appmem_natives(rt::NativeRegistry& r);
 void register_resource_natives(rt::NativeRegistry& r);
 // Android system properties of the emulated device (build.prop and
