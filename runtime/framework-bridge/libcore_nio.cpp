@@ -308,11 +308,56 @@ void register_file_dispatcher(rt::NativeRegistry& r) {
     size_t n = io_call(rt, [&] { return the_vfs().pread(fd, buf, uint64_t(off)); });
     return rt::ret_int(n == 0 ? kIosEof : int32_t(n));
   });
+  r.bind(fdi, "readv0", "(Ljava/io/FileDescriptor;JI)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = fd_of(rt, a.h(0));
+    int64_t address = a.i64(1);
+    int32_t len = a.i32(3);
+    if (len < 0) throw_io(rt, vfs::kEINVAL);
+    if (len == 0) return rt::ret_long(0);
+    auto iov_span = native_span(rt, address, uint64_t(len) * 16, false);
+    int64_t total = 0;
+    bool any_attempted = false;
+    for (int32_t i = 0; i < len; ++i) {
+      uint64_t iov_base = 0, iov_len = 0;
+      std::memcpy(&iov_base, iov_span.data() + size_t(i) * 16, 8);
+      std::memcpy(&iov_len, iov_span.data() + size_t(i) * 16 + 8, 8);
+      if (iov_len == 0) continue;
+      auto buf = buffer_from_address(rt, int64_t(iov_base), int32_t(iov_len), true);
+      if (buf.empty()) continue;
+      any_attempted = true;
+      size_t n = io_call(rt, [&] { return read_fd(fd, buf); });
+      total += int64_t(n);
+      if (n < buf.size()) break;
+    }
+    if (total == 0 && any_attempted) return rt::ret_long(kIosEof);
+    return rt::ret_long(total);
+  });
   r.bind(fdi, "write0", "(Ljava/io/FileDescriptor;JI)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(0));
     auto buf = buffer_from_address(rt, a.i64(1), a.i32(3), false);
     return rt::ret_int(int32_t(io_call(rt, [&] { return write_fd(fd, buf); })));
   }, S::kPartial, "sorties standard et système de fichiers virtuel");
+  r.bind(fdi, "writev0", "(Ljava/io/FileDescriptor;JI)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = fd_of(rt, a.h(0));
+    int64_t address = a.i64(1);
+    int32_t len = a.i32(3);
+    if (len < 0) throw_io(rt, vfs::kEINVAL);
+    if (len == 0) return rt::ret_long(0);
+    auto iov_span = native_span(rt, address, uint64_t(len) * 16, false);
+    int64_t total = 0;
+    for (int32_t i = 0; i < len; ++i) {
+      uint64_t iov_base = 0, iov_len = 0;
+      std::memcpy(&iov_base, iov_span.data() + size_t(i) * 16, 8);
+      std::memcpy(&iov_len, iov_span.data() + size_t(i) * 16 + 8, 8);
+      if (iov_len == 0) continue;
+      auto buf = buffer_from_address(rt, int64_t(iov_base), int32_t(iov_len), false);
+      if (buf.empty()) continue;
+      size_t n = io_call(rt, [&] { return write_fd(fd, buf); });
+      total += int64_t(n);
+      if (n < buf.size()) break;
+    }
+    return rt::ret_long(total);
+  });
   r.bind(fdi, "pwrite0", "(Ljava/io/FileDescriptor;JIJ)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(0));
     auto buf = buffer_from_address(rt, a.i64(1), a.i32(3), false);

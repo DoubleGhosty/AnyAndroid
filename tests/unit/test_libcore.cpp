@@ -3,6 +3,7 @@
 // native methods are bound by signature. The "mini libcore" below mimics the
 // shape of AOSP classes with a handful of methods.
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <string>
 
@@ -11,8 +12,10 @@
 #include "dex_writer.h"
 #include "framework-bridge/bridge.h"
 #include "framework-bridge/internal.h"
+#include "framework-bridge/native_memory.h"
 #include "smali.h"
 #include "test.h"
+#include "vfs/vfs.h"
 
 using namespace aa;
 
@@ -176,6 +179,12 @@ const char* kBootClasses[] = {
 .end method
 .method public native getObject(Ljava/lang/Object;J)Ljava/lang/Object;
 .end method
+)",
+    R"(
+.class public Ljava/nio/ByteBuffer;
+.super Ljava/lang/Object;
+.field public address:J
+.field public hb:[B
 )",
 };
 
@@ -630,3 +639,138 @@ TEST(libcore_charset_converters) {
                rt::JavaThrow);
   CHECK_THROWS(native_call(rt, nc, "getMaxBytesPerChar", "(J)I", {12345, 0}), rt::JavaThrow);
 }
+
+TEST(libcore_scatter_gather_readv_writev) {
+  LibcoreVm vm;
+  rt::Runtime& rt = *vm.rt;
+  auto& cfg = bridge::libcore_config();
+  auto saved_vfs = cfg.vfs;
+
+  auto temp_dir = std::filesystem::temp_directory_path() / "aa-test-scatter-gather";
+  std::filesystem::remove_all(temp_dir);
+  std::filesystem::create_directories(temp_dir);
+
+  cfg.vfs = std::make_shared<vfs::Vfs>();
+  cfg.vfs->mount("/tmp", vfs::host_mount(temp_dir, false));
+
+  int32_t raw_fd = cfg.vfs->open("/tmp/sg.bin", vfs::kO_RDWR | vfs::kO_CREAT | vfs::kO_TRUNC, 0666);
+  CHECK(raw_fd >= 0);
+
+  rt::Class* fdc = rt.find_class("Ljava/io/FileDescriptor;");
+  rt::Handle fd = rt.alloc(fdc);
+  rt.object(fd)->fields.at(fdc->declared_field("descriptor", "I")->slot) = uint32_t(raw_fd);
+
+  // 1. Linux.writev with byte[] and ByteBuffer
+  rt::Handle b1 = rt.new_array("[B", 5);
+  std::memcpy(rt.array(b1, "b1").data.data(), "Hello", 5);
+
+  rt::Class* bbc = rt.find_class("Ljava/nio/ByteBuffer;");
+  rt::Handle b2 = rt.alloc(bbc);
+  int64_t n_mem = bridge::native_alloc(rt, 6);
+  std::memcpy(bridge::native_span(rt, n_mem, 6, true).data(), " World", 6);
+  rt.object(b2)->fields.at(bbc->declared_field("address", "J")->slot) = uint32_t(n_mem);
+  rt.object(b2)->fields.at(bbc->declared_field("address", "J")->slot + 1) = uint32_t(uint64_t(n_mem) >> 32);
+
+  rt::Handle bufs = rt.new_array("[Ljava/lang/Object;", 2);
+  uint32_t b1_h = b1, b2_h = b2;
+  std::memcpy(&rt.array(bufs, "bufs").data[0], &b1_h, 4);
+  std::memcpy(&rt.array(bufs, "bufs").data[4], &b2_h, 4);
+
+  rt::Handle offsets = rt.new_array("[I", 2);
+  int32_t offs[2] = {0, 0};
+  std::memcpy(rt.array(offsets, "offs").data.data(), offs, sizeof(offs));
+
+  rt::Handle counts = rt.new_array("[I", 2);
+  int32_t cnts[2] = {5, 6};
+  std::memcpy(rt.array(counts, "cnts").data.data(), cnts, sizeof(cnts));
+
+  rt::Class* lx = rt.find_class("Llibcore/io/Linux;");
+  rt::Handle os = rt.alloc(lx);
+  uint64_t written = native_call(rt, "Llibcore/io/Linux;", "writev",
+                                 "(Ljava/io/FileDescriptor;[Ljava/lang/Object;[I[I)I",
+                                 {os, fd, bufs, offsets, counts});
+  CHECK_EQ(written, 11u);
+
+  // 2. Linux.readv
+  cfg.vfs->lseek(raw_fd, 0, 0);
+  rt::Handle r1 = rt.new_array("[B", 5);
+  rt::Handle r2 = rt.new_array("[B", 6);
+  rt::Handle rbufs = rt.new_array("[Ljava/lang/Object;", 2);
+  uint32_t r1_h = r1, r2_h = r2;
+  std::memcpy(&rt.array(rbufs, "rbufs").data[0], &r1_h, 4);
+  std::memcpy(&rt.array(rbufs, "rbufs").data[4], &r2_h, 4);
+
+  uint64_t read_bytes = native_call(rt, "Llibcore/io/Linux;", "readv",
+                                    "(Ljava/io/FileDescriptor;[Ljava/lang/Object;[I[I)I",
+                                    {os, fd, rbufs, offsets, counts});
+  CHECK_EQ(read_bytes, 11u);
+  CHECK(std::memcmp(rt.array(r1, "r1").data.data(), "Hello", 5) == 0);
+  CHECK(std::memcmp(rt.array(r2, "r2").data.data(), " World", 6) == 0);
+
+  // 3. FileDispatcherImpl.writev0 / readv0
+  cfg.vfs->lseek(raw_fd, 0, 0);
+  int64_t iov_write = bridge::native_alloc(rt, 32);
+  int64_t w1 = bridge::native_alloc(rt, 4);
+  int64_t w2 = bridge::native_alloc(rt, 4);
+  std::memcpy(bridge::native_span(rt, w1, 4, true).data(), "ABC-", 4);
+  std::memcpy(bridge::native_span(rt, w2, 4, true).data(), "1234", 4);
+
+  uint64_t iov0_base = uint64_t(w1);
+  uint64_t iov0_len = 4;
+  std::memcpy(bridge::native_span(rt, iov_write, 8, true).data(), &iov0_base, 8);
+  std::memcpy(bridge::native_span(rt, iov_write + 8, 8, true).data(), &iov0_len, 8);
+
+  uint64_t iov1_base = uint64_t(w2);
+  uint64_t iov1_len = 4;
+  std::memcpy(bridge::native_span(rt, iov_write + 16, 8, true).data(), &iov1_base, 8);
+  std::memcpy(bridge::native_span(rt, iov_write + 24, 8, true).data(), &iov1_len, 8);
+
+  uint64_t written_v0 = native_call(rt, "Lsun/nio/ch/FileDispatcherImpl;", "writev0",
+                                    "(Ljava/io/FileDescriptor;JI)J",
+                                    {fd, uint32_t(iov_write), uint32_t(uint64_t(iov_write) >> 32), 2});
+  CHECK_EQ(written_v0, 8u);
+
+  // Read back with readv0
+  cfg.vfs->lseek(raw_fd, 0, 0);
+  int64_t iov_read = bridge::native_alloc(rt, 32);
+  int64_t rd1 = bridge::native_alloc(rt, 4);
+  int64_t rd2 = bridge::native_alloc(rt, 4);
+
+  uint64_t r_iov0_base = uint64_t(rd1);
+  uint64_t r_iov0_len = 4;
+  std::memcpy(bridge::native_span(rt, iov_read, 8, true).data(), &r_iov0_base, 8);
+  std::memcpy(bridge::native_span(rt, iov_read + 8, 8, true).data(), &r_iov0_len, 8);
+
+  uint64_t r_iov1_base = uint64_t(rd2);
+  uint64_t r_iov1_len = 4;
+  std::memcpy(bridge::native_span(rt, iov_read + 16, 8, true).data(), &r_iov1_base, 8);
+  std::memcpy(bridge::native_span(rt, iov_read + 24, 8, true).data(), &r_iov1_len, 8);
+
+  uint64_t read_v0 = native_call(rt, "Lsun/nio/ch/FileDispatcherImpl;", "readv0",
+                                 "(Ljava/io/FileDescriptor;JI)J",
+                                 {fd, uint32_t(iov_read), uint32_t(uint64_t(iov_read) >> 32), 2});
+  CHECK_EQ(read_v0, 8u);
+  CHECK(std::memcmp(bridge::native_span(rt, rd1, 4).data(), "ABC-", 4) == 0);
+  CHECK(std::memcmp(bridge::native_span(rt, rd2, 4).data(), "1234", 4) == 0);
+
+  // EOF test on readv0
+  cfg.vfs->lseek(raw_fd, 11, 0);
+  uint64_t eof_v0 = native_call(rt, "Lsun/nio/ch/FileDispatcherImpl;", "readv0",
+                                "(Ljava/io/FileDescriptor;JI)J",
+                                {fd, uint32_t(iov_read), uint32_t(uint64_t(iov_read) >> 32), 2});
+  CHECK_EQ(int64_t(eof_v0), -1);
+
+  // Clean up
+  bridge::native_free(rt, n_mem);
+  bridge::native_free(rt, w1);
+  bridge::native_free(rt, w2);
+  bridge::native_free(rt, iov_write);
+  bridge::native_free(rt, rd1);
+  bridge::native_free(rt, rd2);
+  bridge::native_free(rt, iov_read);
+
+  cfg.vfs->close(raw_fd);
+  cfg.vfs = saved_vfs;
+  std::filesystem::remove_all(temp_dir);
+}
+

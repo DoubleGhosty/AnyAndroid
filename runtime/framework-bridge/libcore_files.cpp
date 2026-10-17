@@ -161,6 +161,29 @@ std::span<uint8_t> byte_range(Runtime& rt, Handle buffer, int32_t offset, int32_
   return std::span<uint8_t>(arr->data.data() + offset, size_t(count));
 }
 
+// Buffer range from a byte[] or a Direct/Heap ByteBuffer.
+std::span<uint8_t> extract_io_buffer(Runtime& rt, Handle buffer, int32_t offset, int32_t count, bool write) {
+  rt::Object& o = rt.nonnull(buffer, "buffer");
+  if (dynamic_cast<rt::ArrayObject*>(&o)) {
+    return byte_range(rt, buffer, offset, count);
+  }
+  rt::Field* addr_f = find_field(o.klass, "address", "J");
+  if (addr_f) {
+    int64_t addr = int64_t(uint64_t(o.fields.at(addr_f->slot)) | (uint64_t(o.fields.at(addr_f->slot + 1)) << 32));
+    if (addr != 0) {
+      if (offset < 0 || count < 0) rt.throw_new("Ljava/lang/IndexOutOfBoundsException;", "offset or count negative");
+      if (count == 0) return {};
+      return native_span(rt, addr + offset, uint64_t(count), write);
+    }
+  }
+  rt::Field* hb_f = find_field(o.klass, "hb", "[B");
+  if (hb_f && o.fields.at(hb_f->slot) != kNull) {
+    Handle hb = Handle(o.fields.at(hb_f->slot));
+    return byte_range(rt, hb, offset, count);
+  }
+  rt.throw_unsupported(o.klass->descriptor + " comme tampon d'E/S", "seuls les byte[] et ByteBuffer sont pris en charge");
+}
+
 // Wide arguments for Java constructors.
 void push_long(std::vector<uint32_t>& v, int64_t x) {
   v.push_back(uint32_t(uint64_t(x)));
@@ -218,11 +241,11 @@ void register_linux(rt::NativeRegistry& r) {
   });
   r.bind(lx, "readBytes", "(Ljava/io/FileDescriptor;Ljava/lang/Object;II)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(1));
-    auto buf = byte_range(rt, a.h(2), a.i32(3), a.i32(4));
+    auto buf = extract_io_buffer(rt, a.h(2), a.i32(3), a.i32(4), true);
     if (buf.empty()) return 0;
     // 0 at the end, as read(2); IoBridge maps it to -1.
     return rt::ret_int(int32_t(guarded(rt, "read", [&] { return read_fd(fd, buf); })));
-  }, S::kPartial, "système de fichiers virtuel ; tampons byte[] uniquement");
+  }, S::kPartial, "système de fichiers virtuel");
   r.bind(lx, "readNoThrow", "(Ljava/io/FileDescriptor;[BII)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(1));
     auto buf = byte_range(rt, a.h(2), a.i32(3), a.i32(4));
@@ -234,23 +257,83 @@ void register_linux(rt::NativeRegistry& r) {
   });
   r.bind(lx, "writeBytes", "(Ljava/io/FileDescriptor;Ljava/lang/Object;II)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(1));
-    auto buf = byte_range(rt, a.h(2), a.i32(3), a.i32(4));
+    auto buf = extract_io_buffer(rt, a.h(2), a.i32(3), a.i32(4), false);
     return rt::ret_int(int32_t(guarded(rt, "write", [&] { return write_fd(fd, buf); })));
-  },S::kPartial, "sorties standard et système de fichiers virtuel ; tampons byte[] uniquement");
+  }, S::kPartial, "sorties standard et système de fichiers virtuel");
   r.bind(lx, "preadBytes", "(Ljava/io/FileDescriptor;Ljava/lang/Object;IIJ)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(1));
-    auto buf = byte_range(rt, a.h(2), a.i32(3), a.i32(4));
+    auto buf = extract_io_buffer(rt, a.h(2), a.i32(3), a.i32(4), true);
     int64_t off = a.i64(5);
     if (off < 0) throw_errno(rt, "pread", vfs::kEINVAL);
     return rt::ret_int(int32_t(guarded(rt, "pread", [&] { return the_vfs().pread(fd, buf, uint64_t(off)); })));
   });
   r.bind(lx, "pwriteBytes", "(Ljava/io/FileDescriptor;Ljava/lang/Object;IIJ)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(1));
-    auto buf = byte_range(rt, a.h(2), a.i32(3), a.i32(4));
+    auto buf = extract_io_buffer(rt, a.h(2), a.i32(3), a.i32(4), false);
     int64_t off = a.i64(5);
     if (off < 0) throw_errno(rt, "pwrite", vfs::kEINVAL);
     return rt::ret_int(int32_t(guarded(rt, "pwrite", [&] { return the_vfs().pwrite(fd, buf, uint64_t(off)); })));
   });
+  r.bind(lx, "readv", "(Ljava/io/FileDescriptor;[Ljava/lang/Object;[I[I)I",
+         [](Runtime& rt, NativeArgs& a) -> uint64_t {
+           int32_t fd = fd_of(rt, a.h(1));
+           Handle bufs_h = a.h(2);
+           Handle offs_h = a.h(3);
+           Handle lens_h = a.h(4);
+           if (bufs_h == kNull || offs_h == kNull || lens_h == kNull) rt.throw_npe("readv : argument null");
+           rt::ArrayObject& bufs = rt.array(bufs_h, "buffers");
+           rt::ArrayObject& offs = rt.array(offs_h, "offsets");
+           rt::ArrayObject& lens = rt.array(lens_h, "byteCounts");
+           if (bufs.length != offs.length || bufs.length != lens.length) {
+             rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "readv : longueurs de tableaux incompatibles");
+           }
+           int32_t count = int32_t(bufs.length);
+           int64_t total = 0;
+           for (int32_t i = 0; i < count; ++i) {
+             Handle buf_item = kNull;
+             std::memcpy(&buf_item, bufs.data.data() + size_t(i) * 4, 4);
+             int32_t off = 0, len = 0;
+             std::memcpy(&off, offs.data.data() + size_t(i) * 4, 4);
+             std::memcpy(&len, lens.data.data() + size_t(i) * 4, 4);
+             if (len == 0) continue;
+             auto span = extract_io_buffer(rt, buf_item, off, len, true);
+             if (span.empty()) continue;
+             size_t n = guarded(rt, "readv", [&] { return read_fd(fd, span); });
+             total += int64_t(n);
+             if (n < span.size()) break;
+           }
+           return rt::ret_int(int32_t(total));
+         });
+  r.bind(lx, "writev", "(Ljava/io/FileDescriptor;[Ljava/lang/Object;[I[I)I",
+         [](Runtime& rt, NativeArgs& a) -> uint64_t {
+           int32_t fd = fd_of(rt, a.h(1));
+           Handle bufs_h = a.h(2);
+           Handle offs_h = a.h(3);
+           Handle lens_h = a.h(4);
+           if (bufs_h == kNull || offs_h == kNull || lens_h == kNull) rt.throw_npe("writev : argument null");
+           rt::ArrayObject& bufs = rt.array(bufs_h, "buffers");
+           rt::ArrayObject& offs = rt.array(offs_h, "offsets");
+           rt::ArrayObject& lens = rt.array(lens_h, "byteCounts");
+           if (bufs.length != offs.length || bufs.length != lens.length) {
+             rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "writev : longueurs de tableaux incompatibles");
+           }
+           int32_t count = int32_t(bufs.length);
+           int64_t total = 0;
+           for (int32_t i = 0; i < count; ++i) {
+             Handle buf_item = kNull;
+             std::memcpy(&buf_item, bufs.data.data() + size_t(i) * 4, 4);
+             int32_t off = 0, len = 0;
+             std::memcpy(&off, offs.data.data() + size_t(i) * 4, 4);
+             std::memcpy(&len, lens.data.data() + size_t(i) * 4, 4);
+             if (len == 0) continue;
+             auto span = extract_io_buffer(rt, buf_item, off, len, false);
+             if (span.empty()) continue;
+             size_t n = guarded(rt, "writev", [&] { return write_fd(fd, span); });
+             total += int64_t(n);
+             if (n < span.size()) break;
+           }
+           return rt::ret_int(int32_t(total));
+         });
   r.bind(lx, "lseek", "(Ljava/io/FileDescriptor;JI)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(1));
     if (fd >= 0 && fd <= 2) throw_errno(rt, "lseek", vfs::kESPIPE);
