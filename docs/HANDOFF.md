@@ -112,7 +112,7 @@ Architecture (ADR-001, ADR-003) :
 G4 code natif (chargeur ELF + bionic), G5 microG puis GApps. Le plan de G3 (ADR-006) : J0-J2
 outillage et chargeurs (faits), J3 services système v1 (en cours), J4 démarrage direct jusqu'à
 `onResume` (fait), J5 démarrage par les vrais gestionnaires d'`ActivityThread` (fait),
-J6 texte (bien avancé), J7 rendu logiciel (fait), **J8 fenêtre Win32 et entrées (fait le 2026-10-17)**,
+J6 texte (fait), J7 rendu logiciel (fait), **J8 fenêtre Win32 et entrées (fait)**,
 J9-J10 navigation et une vraie application affichée.
 
 ## 5. Mettre en place l'environnement
@@ -207,6 +207,8 @@ Fait et vérifié (voir STATUS.md pour le détail) :
   adaptative), `onStart`, `onResume`, « activité au premier plan ». Test `e2e-launch`.
 - **G3/J5 (fait)** : démarrage par les vrais gestionnaires (`ProcessLauncher` et `ActivityThread`),
   `ClientTransaction`, traversée de `ViewRootImpl` et publication de la première image.
+- **G3/J6 (fait)** : moteur de texte et shaping complets : FreeType 2.13.2 + HarfBuzz 10.2.0 + minikin d'AOSP,
+  `Paint` de mesure, `MeasuredText`, `LineBreaker` et shaping direct avec `TextRunShaper` et `PositionedGlyphs` (table 0x1129).
 - **G3/J7 (fait)** : moteur 2D logiciel avec `SkiaCanvas` HWUI sur Skia AOSP et dessin dans la surface.
   Rotations 3D de `RenderNode` avec projection de caméra `Sk3DView` (`rotateX`, `rotateY`, `rotateZ`),
   tracé direct de glyphes `BaseCanvas.nDrawGlyphs`, et AGSL complet (`RuntimeShader` et `RuntimeColorFilter`).
@@ -230,15 +232,14 @@ Fait et vérifié (voir STATUS.md pour le détail) :
 0x1114 Layer, 0x1115 Transaction, 0x1116 Receiver, 0x1117 Channel, 0x1118 InputReceiver,
 0x1119 Setter, 0x111A Builder, 0x111B Measured, 0x111C LineBreakerConfig, 0x111D LineBreakResult,
 0x111E BufferQueue, 0x111F NativeSurface, 0x1120 Fence, 0x1124 MaskFilter, 0x1125 PathEffect,
-0x1126 KeyCharacterMap, 0x1127 MotionEvent, 0x1128 RuntimeShader.shader_builders. **Suivante : 0x1129.**
+0x1126 KeyCharacterMap, 0x1127 MotionEvent, 0x1128 RuntimeShader.shader_builders, 0x1129 PositionedGlyphs. **Suivante : 0x112A.**
 
 ## 9. Prochaines étapes, dans l'ordre
 
-1. **J6, fin** : `TextRunShaper`/`PositionedGlyphs`, motifs de césure. Le pilotage déterministe des
-   tests est à concevoir sur l'horloge commune (`common/clock.h`).
-2. **J9-J10 : navigation et vraie application AOSP affichée** : navigation entre activités, cycle
+1. **J9-J10 : navigation et vraie application AOSP affichée** : navigation entre activités, cycle
    de vie complet, compositeur minimal pour couches multiples (dialogues, menus) et démonstration
-   avec une application AOSP (comme `Music`).
+   avec une application AOSP (comme `Music`). Les motifs de césure `.hyb` et le pilotage déterministe
+   des tests sont à concevoir sur l'horloge commune (`common/clock.h`).
 4. **G4 : code natif** : chargeur ELF et bionic. L'[évaluation d'ANDROWIN](evaluations/ANDROWIN.md)
    décrit ntdroid (ART réel dans un processus Windows par interception d'appels système) : c'est
    la référence pour un **processus hôte isolé** dédié au code natif ; l'option « ART réel à la

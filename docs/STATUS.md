@@ -266,15 +266,14 @@ qui plaçait le contenu sous la barre d'action pour une application ciblant l'AP
 vérifie ce démarrage et l'image de 1080×1920 qu'il produit, avec des sondes de pixels lues par
 `anyandroid image probe` (barre d'action et titre, lettres des deux `TextView`, bouton, fond).
 
-**J6 bien avancé : moteur de texte.** Android mesure le texte avec minikin, sur HarfBuzz (mise en
+**J6 atteint : moteur de texte et shaping complets.** Android mesure et met en forme le texte avec minikin, sur HarfBuzz (mise en
 forme) et sur FreeType via Skia (métriques et avances, avec l'indication `FT_LOAD_TARGET_NORMAL`
 sans auto-hinter). AnyAndroid reprend les mêmes composants, aux versions d'AOSP : FreeType 2.13.2
 (miroir AOSP, configuration d'Android) et HarfBuzz 10.2.0, réduits aux fichiers utiles dans
 `runtime/third_party` ([ADR-007](adr/ADR-007-moteur-de-texte.md)). La logique de minikin (choix de la police par couverture, mise en forme par
-mots, espacements) et celle du scaler FreeType de Skia sont réécrites d'après le code d'AOSP. Les
-natives de mesure de `Paint` sont branchées, ainsi que `MeasuredText` et `LineBreaker` : coupure
-gloutonne et optimale de minikin, frontières de lignes de l'ICU4J de la libcore, césure aux traits
-d'union et tirets conditionnels (les motifs `.hyb` attendent `Hyphenator.init`).
+mots, espacements) et celle du scaler FreeType de Skia sont réécrites d'après le code d'AOSP. Sont pleinement branchés :
+- les natives de mesure de `Paint`, ainsi que `MeasuredText` et `LineBreaker` : coupure gloutonne et optimale de minikin, frontières de lignes de l'ICU4J de la libcore, césure aux traits d'union et tirets conditionnels ;
+- `TextRunShaper` et `PositionedGlyphs` (`nativeShapeTextRun` pour `char[]` et `String`, tranche de contexte, direction LTR et RTL, et l'ensemble des 14 getters et libération de `PositionedGlyphs` avec les poignées `Font` de minikin/HWUI dans la table `0x1129`). Les motifs de césure `.hyb` attendent `Hyphenator.init`.
 
 **J7 atteint : moteur 2D logiciel complet sur le Skia d'Android.** Les natives de dessin reprennent `SkiaCanvas` de HWUI
 sur un `SkCanvas` posé sur les pixels des bitmaps et des tampons de fenêtre (RGBA prémultiplié,
@@ -303,9 +302,8 @@ d'entrées complet est en place :
 - câblage dans `main.cpp` vers `bridge::post_window_touch` et `bridge::post_window_key`.
 
 **Suite prévue, dans l'ordre** :
-1. J6, fin : `TextRunShaper`/`PositionedGlyphs`, motifs de césure. Le pilotage déterministe des
-   tests est à concevoir sur l'horloge commune (`common/clock.h`).
-2. J9-J10 : navigation, puis une vraie application de la GSI affichée et utilisable (l'ADR-006 vise `Music`), et compositeur minimal pour plusieurs couches (dialogues, menus).
+1. J9-J10 : navigation, puis une vraie application de la GSI affichée et utilisable (l'ADR-006 vise `Music`), et compositeur minimal pour plusieurs couches (dialogues, menus). Les motifs de césure `.hyb` et le pilotage déterministe des tests sont à concevoir sur l'horloge commune (`common/clock.h`).
+2. G4 : code natif (chargeur ELF + bionic avec processus hôte isolé).
 
 **À savoir pour la suite** :
 - dans le bac à sable `/data`, `unlink` et `rename` d'un fichier ouvert suivent Linux (nom libéré

@@ -20,6 +20,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -141,6 +142,7 @@ struct Tables {
   std::shared_ptr<const Typeface> default_typeface;
   std::vector<std::pair<std::u16string, std::shared_ptr<const Collection>>> generic_families;
   std::vector<std::shared_ptr<const Collection>> font_map;
+  std::unordered_map<const text::Font*, std::shared_ptr<const Font>> engine_to_font;
 };
 
 Tables& tables() {
@@ -261,7 +263,11 @@ void register_fonts(rt::NativeRegistry& r) {
              f->axes = b->axes;
            }
            f->engine = engine_font(rt, *f);
-           return uint64_t(tables().fonts.add(std::move(f)));
+           {
+             std::lock_guard<std::mutex> guard(tables().lock);
+             tables().engine_to_font[f->engine.get()] = f;
+           }
+           return uint64_t(tables().fonts.add(f));
          });
   // A font over the same data with other parameters (Font.Builder(Font)).
   r.bind(fb, "nClone", "(JJIZI)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
@@ -276,7 +282,11 @@ void register_fonts(rt::NativeRegistry& r) {
       f->axes = b->axes;
     }
     f->engine = engine_font(rt, *f);
-    return uint64_t(tables().fonts.add(std::move(f)));
+    {
+      std::lock_guard<std::mutex> guard(tables().lock);
+      tables().engine_to_font[f->engine.get()] = f;
+    }
+    return uint64_t(tables().fonts.add(f));
   });
 
   const char* fo = "Landroid/graphics/fonts/Font;";
@@ -530,6 +540,29 @@ bool minikin_locale_list_valid(int32_t id) { return id >= 0 && text::locale_list
 TypefaceInfo resolve_typeface(rt::Runtime& rt, int64_t handle) {
   auto t = resolve_default(rt, handle);
   return TypefaceInfo{t->collection->engine, text::FontStyle{uint16_t(t->weight), t->italic}, t->api_style};
+}
+
+int64_t font_handle_from_engine(rt::Runtime&, const std::shared_ptr<const text::Font>& engine_font) {
+  if (!engine_font) return 0;
+  std::lock_guard<std::mutex> guard(tables().lock);
+  auto it = tables().engine_to_font.find(engine_font.get());
+  if (it != tables().engine_to_font.end()) {
+    return tables().fonts.add(it->second);
+  }
+  auto f = std::make_shared<Font>();
+  f->engine = engine_font;
+  f->weight = engine_font->style().weight;
+  f->italic = engine_font->style().italic;
+  auto d = std::make_shared<FontData>();
+  d->source_id = tables().next_source_id++;
+  f->data = std::move(d);
+  tables().engine_to_font[engine_font.get()] = f;
+  return tables().fonts.add(f);
+}
+
+int64_t font_clone_handle(rt::Runtime& rt, int64_t font_handle) {
+  auto f = get(rt, tables().fonts, font_handle, "Font");
+  return tables().fonts.add(f);
 }
 
 sk_sp<SkTypeface> font_skia_typeface(Runtime& rt, int64_t handle) {

@@ -1506,4 +1506,158 @@ TEST(graphics_canvas_draw_glyphs) {
        Args().j(c).h(glyphs.get()).h(positions.get()).i(0).i(0).i(0).j(font).j(paint));
 }
 
+TEST(graphics_text_run_shaper_and_positioned_glyphs) {
+  Vm vm;
+  rt::Runtime& rt = *vm.rt;
+
+  const char* fb = "Landroid/graphics/fonts/Font$Builder;";
+  const char* ffb = "Landroid/graphics/fonts/FontFamily$Builder;";
+  const char* tf = "Landroid/graphics/Typeface;";
+  const char* pt = "Landroid/graphics/Paint;";
+  const char* trs = "Landroid/graphics/text/TextRunShaper;";
+  const char* pg = "Landroid/graphics/text/PositionedGlyphs;";
+
+  auto f32 = [](uint64_t v) {
+    float f;
+    uint32_t bits = uint32_t(v);
+    std::memcpy(&f, &bits, 4);
+    return f;
+  };
+
+  // Build a synthetic TrueType font with known glyph metrics
+  test::TestFont font_spec;
+  font_spec.glyphs = {
+      {0, 500, 50, 0, 450, 700},
+      {U'A', 550, 10, 0, 540, 700},
+      {U'x', 500, 20, 0, 480, 480},
+  };
+  std::vector<uint8_t> ttf = font_spec.build();
+  int32_t ttf_size = int32_t(ttf.size());
+  int64_t data = bridge::native_wrap(rt, std::move(ttf), false);
+
+  rt::GlobalRef buffer(rt, rt.alloc(rt.find_class("Ljava/nio/Buffer;")));
+  rt::Object& b = rt.nonnull(buffer.get(), "b");
+  rt::Field* address = b.klass->declared_field("address", "J");
+  rt::Field* capacity = b.klass->declared_field("capacity", "I");
+  b.fields.at(address->slot) = uint32_t(data);
+  b.fields.at(address->slot + 1) = uint32_t(uint64_t(data) >> 32);
+  b.fields.at(capacity->slot) = ttf_size;
+
+  int64_t font_builder = int64_t(call(rt, fb, "nInitBuilder", "()J"));
+  int64_t font = int64_t(call(rt, fb, "nBuild", "(JLjava/nio/ByteBuffer;Ljava/lang/String;Ljava/lang/String;IZI)J",
+                              Args().j(font_builder).h(buffer.get()).h(rt.new_string_utf8("/system/fonts/Test.ttf"))
+                                  .h(rt.new_string_utf8("en")).i(400).i(0).i(0)));
+
+  int64_t family_builder = int64_t(call(rt, ffb, "nInitBuilder", "()J"));
+  call(rt, ffb, "nAddFont", "(JJ)V", Args().j(family_builder).j(font));
+  int64_t family = int64_t(call(rt, ffb, "nBuild", "(JLjava/lang/String;IZZI)J",
+                                Args().j(family_builder).h(rt::kNull).i(0).i(0).i(0).i(0)));
+
+  rt::GlobalRef families(rt, rt.new_array("[J", 1));
+  std::memcpy(rt.array(families.get(), "j").data.data(), &family, 8);
+  int64_t typeface = int64_t(call(rt, tf, "nativeCreateFromArray", "([JJII)J",
+                                  Args().h(families.get()).j(0).i(400).i(0)));
+
+  int64_t paint = int64_t(call(rt, pt, "nInit", "()J"));
+  call(rt, pt, "nSetTypeface", "(JJ)V", Args().j(paint).j(typeface));
+  call(rt, pt, "nSetTextSize", "(JF)V", Args().j(paint).f(10.0f));
+
+  // Shape a String: "AxA"
+  rt::Handle str = rt.new_string_utf8("AxA");
+  int64_t layout_ptr = int64_t(call(rt, trs, "nativeShapeTextRun", "(Ljava/lang/String;IIIIZJ)J",
+                                    Args().h(str).i(0).i(3).i(0).i(3).z(false).j(paint)));
+  CHECK(layout_ptr != 0);
+
+  // Check glyph count
+  int32_t count = int32_t(call(rt, pg, "nGetGlyphCount", "(J)I", Args().j(layout_ptr)));
+  CHECK_EQ(count, 3);
+
+  // Check advance: 'A' advance 6.0 (hinted), 'x' advance 5.0 (hinted), total 17.0
+  float total_advance = f32(call(rt, pg, "nGetTotalAdvance", "(J)F", Args().j(layout_ptr)));
+  CHECK(std::fabs(total_advance - 17.0f) < 0.1f);
+
+  // Check ascent/descent
+  float ascent = f32(call(rt, pg, "nGetAscent", "(J)F", Args().j(layout_ptr)));
+  float descent = f32(call(rt, pg, "nGetDescent", "(J)F", Args().j(layout_ptr)));
+  CHECK(ascent < 0.0f);
+  CHECK(descent >= 0.0f);
+
+  // Check glyph IDs
+  int32_t g0 = int32_t(call(rt, pg, "nGetGlyphId", "(JI)I", Args().j(layout_ptr).i(0)));
+  int32_t g1 = int32_t(call(rt, pg, "nGetGlyphId", "(JI)I", Args().j(layout_ptr).i(1)));
+  int32_t g2 = int32_t(call(rt, pg, "nGetGlyphId", "(JI)I", Args().j(layout_ptr).i(2)));
+  CHECK_EQ(g0, 1);
+  CHECK_EQ(g1, 2);
+  CHECK_EQ(g2, 1);
+
+  // Check positions
+  float x0 = f32(call(rt, pg, "nGetX", "(JI)F", Args().j(layout_ptr).i(0)));
+  float x1 = f32(call(rt, pg, "nGetX", "(JI)F", Args().j(layout_ptr).i(1)));
+  float x2 = f32(call(rt, pg, "nGetX", "(JI)F", Args().j(layout_ptr).i(2)));
+  float y0 = f32(call(rt, pg, "nGetY", "(JI)F", Args().j(layout_ptr).i(0)));
+  CHECK(std::fabs(x0 - 0.0f) < 0.01f);
+  CHECK(std::fabs(x1 - 6.0f) < 0.1f);
+  CHECK(std::fabs(x2 - 11.0f) < 0.1f);
+  CHECK(std::fabs(y0 - 0.0f) < 0.01f);
+
+  // Check fakery and overrides
+  CHECK(!bool(call(rt, pg, "nGetFakeBold", "(JI)Z", Args().j(layout_ptr).i(0))));
+  CHECK(!bool(call(rt, pg, "nGetFakeItalic", "(JI)Z", Args().j(layout_ptr).i(0))));
+  CHECK_EQ(f32(call(rt, pg, "nGetWeightOverride", "(JI)F", Args().j(layout_ptr).i(0))), -1.0f);
+  CHECK_EQ(f32(call(rt, pg, "nGetItalicOverride", "(JI)F", Args().j(layout_ptr).i(0))), -1.0f);
+
+  // Check font queries
+  int32_t font_count = int32_t(call(rt, pg, "nGetFontCount", "(J)I", Args().j(layout_ptr)));
+  CHECK_EQ(font_count, 1);
+  int64_t font_ref = int64_t(call(rt, pg, "nGetFontRef", "(JI)J", Args().j(layout_ptr).i(0)));
+  CHECK(font_ref != 0);
+  CHECK_EQ(int32_t(call(rt, pg, "nGetFontId", "(JI)I", Args().j(layout_ptr).i(0))), 0);
+  CHECK_EQ(int32_t(call(rt, pg, "nGetFontId", "(JI)I", Args().j(layout_ptr).i(1))), 0);
+  CHECK_EQ(int32_t(call(rt, pg, "nGetFontId", "(JI)I", Args().j(layout_ptr).i(2))), 0);
+
+  // Check nGetFont
+  int64_t font_legacy = int64_t(call(rt, pg, "nGetFont", "(JI)J", Args().j(layout_ptr).i(0)));
+  CHECK(font_legacy != 0);
+
+  // Check release func
+  int64_t release_func = int64_t(call(rt, pg, "nReleaseFunc", "()J"));
+  CHECK(release_func != 0);
+
+  // Test shaping with char[] and context slicing
+  // full text: "xxAxAxx", context [1, 6) = "xAxAx", target [2, 5) = "AxA"
+  std::u16string full_text = u"xxAxAxx";
+  rt::GlobalRef char_arr(rt, rt.new_array("[C", uint32_t(full_text.size())));
+  std::memcpy(rt.array(char_arr.get(), "c").data.data(), full_text.data(), full_text.size() * 2);
+
+  int64_t sliced_ptr = int64_t(call(rt, trs, "nativeShapeTextRun", "([CIIIIZJ)J",
+                                    Args().h(char_arr.get()).i(2).i(3).i(1).i(5).z(false).j(paint)));
+  CHECK(sliced_ptr != 0);
+  CHECK_EQ(int32_t(call(rt, pg, "nGetGlyphCount", "(J)I", Args().j(sliced_ptr))), 3);
+  float sliced_adv = f32(call(rt, pg, "nGetTotalAdvance", "(J)F", Args().j(sliced_ptr)));
+  CHECK(std::fabs(sliced_adv - 17.0f) < 0.1f);
+
+  // Out-of-bounds error handling
+  CHECK_EQ(thrown(rt, [&] {
+             call(rt, trs, "nativeShapeTextRun", "(Ljava/lang/String;IIIIZJ)J",
+                  Args().h(str).i(2).i(5).i(0).i(3).z(false).j(paint));
+           }),
+           std::string("java.lang.ArrayIndexOutOfBoundsException"));
+
+  CHECK_EQ(thrown(rt, [&] {
+             call(rt, trs, "nativeShapeTextRun", "(Ljava/lang/String;IIIIZJ)J",
+                  Args().h(rt::kNull).i(0).i(1).i(0).i(1).z(false).j(paint));
+           }),
+           std::string("java.lang.NullPointerException"));
+
+  CHECK_EQ(thrown(rt, [&] {
+             call(rt, pg, "nGetGlyphId", "(JI)I", Args().j(layout_ptr).i(10));
+           }),
+           std::string("java.lang.ArrayIndexOutOfBoundsException"));
+
+  CHECK_EQ(thrown(rt, [&] {
+             call(rt, pg, "nGetFontRef", "(JI)J", Args().j(layout_ptr).i(5));
+           }),
+           std::string("java.lang.ArrayIndexOutOfBoundsException"));
+}
+
 

@@ -166,6 +166,9 @@ struct TypefaceInfo {
   int32_t api_style = 0;
 };
 TypefaceInfo resolve_typeface(rt::Runtime& rt, int64_t handle);
+// Returns or registers a bridge Font handle for an engine Font (framework_fonts.cpp).
+int64_t font_handle_from_engine(rt::Runtime& rt, const std::shared_ptr<const text::Font>& engine_font);
+int64_t font_clone_handle(rt::Runtime& rt, int64_t font_handle);
 // Installs the text engine's Unicode services over the ICU4J of the libcore
 // (text_services.cpp), answering through `rt`. Called before using the engine.
 void ensure_text_services(rt::Runtime& rt);

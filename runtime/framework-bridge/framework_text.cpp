@@ -2,6 +2,7 @@
 // natives (G3, ADR-006 J5, ADR-007), each signature checked against the
 // framework.jar of Android 17: HWUI's jni/text/MeasuredText.cpp and
 // LineBreaker.cpp over the text engine's port of minikin.
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -11,6 +12,7 @@
 
 #include "framework-bridge/handles.h"
 #include "framework-bridge/internal.h"
+#include "text/layout.h"
 #include "text/line_breaker.h"
 #include "text/measured_text.h"
 
@@ -41,12 +43,21 @@ struct LineBreakerConfig {
   bool use_bounds_for_width;
 };
 
+struct PositionedGlyphsLayout {
+  text::TextLayout layout;
+  float ascent = 0;
+  float descent = 0;
+  std::vector<int64_t> fonts;      // distinct font handles in tables().fonts
+  std::vector<uint32_t> font_ids;  // per-glyph font index into fonts
+};
+
 // Kind tags: unique across the runtime (tests/check_handle_kinds.cmake).
 struct Tables {
   HandleTable<Builder> builders{0x111A};
   HandleTable<Measured> measured{0x111B};
   HandleTable<LineBreakerConfig> breakers{0x111C};
   HandleTable<text::LineBreakResult> results{0x111D};
+  HandleTable<PositionedGlyphsLayout> positioned_glyphs{0x1129};
 };
 
 Tables& tables() {
@@ -276,12 +287,192 @@ void register_line_breaker(rt::NativeRegistry& r) {
          line([](const text::LineBreakResult& res, size_t i) { return rt::ret_int(res.flags[i]); }));
 }
 
+constexpr float kNoOverride = -1.0f;
+
+float find_variation(const std::vector<text::Variation>& vars, uint32_t tag) {
+  for (const auto& v : vars) {
+    if (v.tag == tag) return v.value;
+  }
+  return kNoOverride;
+}
+
+int64_t shape_text_run(Runtime& rt, std::u16string_view text, int32_t start, int32_t count, int32_t context_start,
+                       int32_t context_count, bool is_rtl, int64_t paint_handle) {
+  int32_t text_length = int32_t(text.size());
+  if ((start | count | context_start | context_count | (start - context_start) |
+       ((context_start + context_count) - (start + count)) | (text_length - (context_start + context_count))) < 0) {
+    throw_aioobe(rt);
+  }
+  ensure_text_services(rt);
+  text::Paint mp = minikin_paint_of(rt, paint_handle);
+  text::Bidi bidi = is_rtl ? text::Bidi::kForceRtl : text::Bidi::kForceLtr;
+
+  std::u16string context(text.substr(size_t(context_start), size_t(context_count)));
+  size_t rel_start = size_t(start - context_start);
+  size_t rel_count = size_t(count);
+
+  text::TextLayout layout = text::do_layout(context, rel_start, rel_count, bidi, mp, text::StartHyphenEdit::kNoEdit,
+                                           text::EndHyphenEdit::kNoEdit, text::kRunNone);
+
+  float overall_ascent = 0.0f;
+  float overall_descent = 0.0f;
+  std::vector<const text::Font*> seen_fonts;
+  for (const auto& glyph : layout.glyphs) {
+    const text::Font* f = glyph.font.font.get();
+    if (std::find(seen_fonts.begin(), seen_fonts.end(), f) == seen_fonts.end()) {
+      seen_fonts.push_back(f);
+      text::Extent ext = text::font_extent(glyph.font, mp);
+      overall_ascent = std::min(overall_ascent, ext.ascent);
+      overall_descent = std::max(overall_descent, ext.descent);
+    }
+  }
+
+  std::vector<int64_t> fonts;
+  std::vector<uint32_t> font_ids(layout.glyphs.size(), 0);
+  std::vector<text::FakedFont> seen_faked;
+  for (size_t i = 0; i < layout.glyphs.size(); ++i) {
+    const text::FakedFont& ff = layout.glyphs[i].font;
+    auto it = std::find(seen_faked.begin(), seen_faked.end(), ff);
+    if (it != seen_faked.end()) {
+      font_ids[i] = uint32_t(std::distance(seen_faked.begin(), it));
+    } else {
+      uint32_t font_id = uint32_t(fonts.size());
+      int64_t font_h = font_handle_from_engine(rt, ff.font);
+      fonts.push_back(font_h);
+      seen_faked.push_back(ff);
+      font_ids[i] = font_id;
+    }
+  }
+
+  auto result = std::make_shared<PositionedGlyphsLayout>();
+  result->layout = std::move(layout);
+  result->ascent = overall_ascent;
+  result->descent = overall_descent;
+  result->fonts = std::move(fonts);
+  result->font_ids = std::move(font_ids);
+  return tables().positioned_glyphs.add(std::move(result));
+}
+
+void register_text_run_shaper(rt::NativeRegistry& r) {
+  const char* trs = "Landroid/graphics/text/TextRunShaper;";
+  r.bind(trs, "nativeShapeTextRun", "([CIIIIZJ)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (a.h(0) == kNull) rt.throw_npe("text");
+    std::u16string s = chars_of(rt, a.h(0));
+    return rt::ret_long(shape_text_run(rt, s, a.i32(1), a.i32(2), a.i32(3), a.i32(4), a.z(5), a.i64(6)));
+  });
+  r.bind(trs, "nativeShapeTextRun", "(Ljava/lang/String;IIIIZJ)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (a.h(0) == kNull) rt.throw_npe("text");
+    std::u16string s = rt.string_value(a.h(0));
+    return rt::ret_long(shape_text_run(rt, s, a.i32(1), a.i32(2), a.i32(3), a.i32(4), a.z(5), a.i64(6)));
+  });
+}
+
+void register_positioned_glyphs(rt::NativeRegistry& r) {
+  const char* pg = "Landroid/graphics/text/PositionedGlyphs;";
+  static const int64_t positioned_glyphs_free =
+      register_free_function([](int64_t h) { tables().positioned_glyphs.remove(h); });
+  r.bind(pg, "nReleaseFunc", "()J", [](Runtime&, NativeArgs&) -> uint64_t {
+    return rt::ret_long(positioned_glyphs_free);
+  });
+  r.bind(pg, "nGetGlyphCount", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto res = lookup(rt, tables().positioned_glyphs, a.i64(0), "PositionedGlyphs");
+    return rt::ret_int(int32_t(res->layout.glyphs.size()));
+  });
+  r.bind(pg, "nGetTotalAdvance", "(J)F", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto res = lookup(rt, tables().positioned_glyphs, a.i64(0), "PositionedGlyphs");
+    return rt::ret_float(res->layout.advance);
+  });
+  r.bind(pg, "nGetAscent", "(J)F", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto res = lookup(rt, tables().positioned_glyphs, a.i64(0), "PositionedGlyphs");
+    return rt::ret_float(res->ascent);
+  });
+  r.bind(pg, "nGetDescent", "(J)F", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto res = lookup(rt, tables().positioned_glyphs, a.i64(0), "PositionedGlyphs");
+    return rt::ret_float(res->descent);
+  });
+  r.bind(pg, "nGetGlyphId", "(JI)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto res = lookup(rt, tables().positioned_glyphs, a.i64(0), "PositionedGlyphs");
+    int32_t i = a.i32(2);
+    if (i < 0 || size_t(i) >= res->layout.glyphs.size()) throw_aioobe(rt);
+    return rt::ret_int(int32_t(res->layout.glyphs[size_t(i)].glyph));
+  });
+  r.bind(pg, "nGetX", "(JI)F", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto res = lookup(rt, tables().positioned_glyphs, a.i64(0), "PositionedGlyphs");
+    int32_t i = a.i32(2);
+    if (i < 0 || size_t(i) >= res->layout.glyphs.size()) throw_aioobe(rt);
+    return rt::ret_float(res->layout.glyphs[size_t(i)].x);
+  });
+  r.bind(pg, "nGetY", "(JI)F", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto res = lookup(rt, tables().positioned_glyphs, a.i64(0), "PositionedGlyphs");
+    int32_t i = a.i32(2);
+    if (i < 0 || size_t(i) >= res->layout.glyphs.size()) throw_aioobe(rt);
+    return rt::ret_float(res->layout.glyphs[size_t(i)].y);
+  });
+  r.bind(pg, "nGetFakeBold", "(JI)Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto res = lookup(rt, tables().positioned_glyphs, a.i64(0), "PositionedGlyphs");
+    int32_t i = a.i32(2);
+    if (i < 0 || size_t(i) >= res->layout.glyphs.size()) throw_aioobe(rt);
+    return rt::ret_bool(res->layout.glyphs[size_t(i)].font.fakery.fake_bold);
+  });
+  r.bind(pg, "nGetFakeItalic", "(JI)Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto res = lookup(rt, tables().positioned_glyphs, a.i64(0), "PositionedGlyphs");
+    int32_t i = a.i32(2);
+    if (i < 0 || size_t(i) >= res->layout.glyphs.size()) throw_aioobe(rt);
+    return rt::ret_bool(res->layout.glyphs[size_t(i)].font.fakery.fake_italic);
+  });
+  r.bind(pg, "nGetWeightOverride", "(JI)F", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto res = lookup(rt, tables().positioned_glyphs, a.i64(0), "PositionedGlyphs");
+    int32_t i = a.i32(2);
+    if (i < 0 || size_t(i) >= res->layout.glyphs.size()) throw_aioobe(rt);
+    const auto& ff = res->layout.glyphs[size_t(i)].font;
+    float w = find_variation(ff.fakery.variations, text::tag('w', 'g', 'h', 't'));
+    if (w != -1.0f) return rt::ret_float(w);
+    if (ff.font) w = find_variation(ff.font->variations(), text::tag('w', 'g', 'h', 't'));
+    return rt::ret_float(w);
+  });
+  r.bind(pg, "nGetItalicOverride", "(JI)F", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto res = lookup(rt, tables().positioned_glyphs, a.i64(0), "PositionedGlyphs");
+    int32_t i = a.i32(2);
+    if (i < 0 || size_t(i) >= res->layout.glyphs.size()) throw_aioobe(rt);
+    const auto& ff = res->layout.glyphs[size_t(i)].font;
+    float it = find_variation(ff.fakery.variations, text::tag('i', 't', 'a', 'l'));
+    if (it != -1.0f) return rt::ret_float(it);
+    if (ff.font) it = find_variation(ff.font->variations(), text::tag('i', 't', 'a', 'l'));
+    return rt::ret_float(it);
+  });
+  r.bind(pg, "nGetFont", "(JI)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto res = lookup(rt, tables().positioned_glyphs, a.i64(0), "PositionedGlyphs");
+    int32_t i = a.i32(2);
+    if (i < 0 || size_t(i) >= res->layout.glyphs.size()) throw_aioobe(rt);
+    uint32_t font_id = res->font_ids[size_t(i)];
+    return rt::ret_long(font_clone_handle(rt, res->fonts[font_id]));
+  });
+  r.bind(pg, "nGetFontCount", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto res = lookup(rt, tables().positioned_glyphs, a.i64(0), "PositionedGlyphs");
+    return rt::ret_int(int32_t(res->fonts.size()));
+  });
+  r.bind(pg, "nGetFontRef", "(JI)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto res = lookup(rt, tables().positioned_glyphs, a.i64(0), "PositionedGlyphs");
+    int32_t font_id = a.i32(2);
+    if (font_id < 0 || size_t(font_id) >= res->fonts.size()) throw_aioobe(rt);
+    return rt::ret_long(res->fonts[size_t(font_id)]);
+  });
+  r.bind(pg, "nGetFontId", "(JI)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto res = lookup(rt, tables().positioned_glyphs, a.i64(0), "PositionedGlyphs");
+    int32_t glyph_idx = a.i32(2);
+    if (glyph_idx < 0 || size_t(glyph_idx) >= res->font_ids.size()) throw_aioobe(rt);
+    return rt::ret_int(int32_t(res->font_ids[size_t(glyph_idx)]));
+  });
+}
+
 }  // namespace
 
 void register_framework_text(rt::NativeRegistry& r) {
   register_measured_text_builder(r);
   register_measured_text(r);
   register_line_breaker(r);
+  register_text_run_shaper(r);
+  register_positioned_glyphs(r);
 }
 
 }  // namespace aa::bridge
