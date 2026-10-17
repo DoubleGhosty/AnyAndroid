@@ -381,3 +381,152 @@ TEST(invocation_target_exception_from_bytecode) {
     CHECK(trace.find("Caused by: java.lang.IllegalStateException: cible\n") != std::string::npos);
   }
 }
+
+namespace {
+
+const char* kAnnoTarget = R"SMALI(
+.class public LAnnoTarget;
+.super Ljava/lang/Object;
+.field public static taggedField:I
+
+.method public constructor <init>()V
+    .registers 1
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+    return-void
+.end method
+
+.method public annotatedMethod(I)Ljava/lang/String;
+    .registers 3
+    const-string v0, "ok"
+    return-object v0
+.end method
+)SMALI";
+
+const char* kMyAnnotation = R"SMALI(
+.class public interface abstract LMyAnnotation;
+.super Ljava/lang/Object;
+.implements Ljava/lang/annotation/Annotation;
+
+.method public abstract value()Ljava/lang/String;
+.end method
+
+.method public abstract id()I
+.end method
+)SMALI";
+
+const char* kAnnoRunner = R"SMALI(
+.class public LAnnoRunner;
+.super Ljava/lang/Object;
+
+.method public static run()Ljava/lang/String;
+    .registers 6
+    const-string v0, "AnnoTarget"
+    invoke-static {v0}, Ljava/lang/Class;->forName(Ljava/lang/String;)Ljava/lang/Class;
+    move-result-object v0
+
+    const-string v1, "MyAnnotation"
+    invoke-static {v1}, Ljava/lang/Class;->forName(Ljava/lang/String;)Ljava/lang/Class;
+    move-result-object v1
+
+    invoke-virtual {v0, v1}, Ljava/lang/Class;->isAnnotationPresent(Ljava/lang/Class;)Z
+    move-result v2
+
+    invoke-virtual {v0, v1}, Ljava/lang/Class;->getAnnotation(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;
+    move-result-object v3
+    check-cast v3, LMyAnnotation;
+
+    invoke-interface {v3}, LMyAnnotation;->value()Ljava/lang/String;
+    move-result-object v4
+
+    invoke-interface {v3}, LMyAnnotation;->id()I
+    move-result v5
+
+    new-instance v1, Ljava/lang/StringBuilder;
+    invoke-direct {v1}, Ljava/lang/StringBuilder;-><init>()V
+    invoke-virtual {v1, v2}, Ljava/lang/StringBuilder;->append(Z)Ljava/lang/StringBuilder;
+    const-string v2, "|"
+    invoke-virtual {v1, v2}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+    invoke-virtual {v1, v4}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+    invoke-virtual {v1, v2}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+    invoke-virtual {v1, v5}, Ljava/lang/StringBuilder;->append(I)Ljava/lang/StringBuilder;
+    invoke-virtual {v1}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+    move-result-object v1
+    return-object v1
+.end method
+)SMALI";
+
+}  // namespace
+
+TEST(annotations_and_generic_signatures) {
+  std::vector<tool::ClassDef> classes;
+  for (const char* s : {kAnnoTarget, kMyAnnotation, kAnnoRunner}) {
+    classes.push_back(tool::assemble_smali(s, "anno.smali"));
+  }
+  auto dex = dex::DexFile::open(tool::write_dex(classes), "anno.dex");
+  bridge::NullHost host;
+  auto runtime = std::make_unique<rt::Runtime>();
+  bridge::install(runtime->registry(), host);
+  runtime->add_dex(dex.get());
+
+  {
+    rt::Runtime::Scope scope(*runtime, "test");
+    rt::Class* target_cls = runtime->lookup_class("LAnnoTarget;");
+    CHECK(target_cls != nullptr);
+    rt::EncodedAnnotation ea;
+    ea.visibility = 1;  // RUNTIME
+    ea.type_descriptor = "LMyAnnotation;";
+    ea.dex = dex.get();
+
+    dex::EncodedValue val_str;
+    val_str.type = dex::EncodedValue::kString;
+    val_str.bits = 0;  // First string in dex
+    ea.elements["value"] = val_str;
+
+    dex::EncodedValue val_id;
+    val_id.type = dex::EncodedValue::kInt;
+    val_id.bits = 42;
+    ea.elements["id"] = val_id;
+
+    target_cls->mutable_annotations().annotations["LMyAnnotation;"] = ea;
+    target_cls->mutable_annotations().signature = {"<T:Ljava/lang/Object;>Ljava/lang/Object;"};
+
+    // Method annotations
+    rt::Method* m = target_cls->declared_method("annotatedMethod", "(I)Ljava/lang/String;");
+    CHECK(m != nullptr);
+    m->annotations();
+    m->annotations_->signature = {"(I)Ljava/lang/String;"};
+    m->annotations_->throws_classes = {"Ljava/io/IOException;"};
+
+    // Field annotations
+    rt::Field* f = target_cls->declared_field("taggedField", "I");
+    CHECK(f != nullptr);
+    f->annotations();
+    f->annotations_->signature = {"I"};
+
+    // Run bytecode test
+    std::string result = runtime->string_utf8(rt::Handle(runtime->call_static("LAnnoRunner;", "run", "()Ljava/lang/String;")));
+    std::string expected_first_str = dex->string(0);
+    CHECK_EQ(result, "true|" + expected_first_str + "|42");
+
+    // Direct reflection tests on Class
+    rt::Handle mirror = runtime->class_mirror(target_cls);
+    auto sig = runtime->call_virtual(mirror, "getSignatureAnnotation", "()[Ljava/lang/String;");
+    CHECK(sig != rt::kNull);
+    auto& sig_arr = runtime->array(rt::Handle(sig), "[Ljava/lang/String;");
+    CHECK_EQ(sig_arr.length, 1u);
+
+    // Method getExceptionTypes
+    rt::MethodPeer mp;
+    mp.method = m;
+    rt::Handle m_handle = runtime->alloc(runtime->find_class("Ljava/lang/reflect/Method;"));
+    runtime->object(m_handle)->peer = std::make_unique<rt::MethodPeer>(mp);
+    auto exc_types = runtime->call_virtual(m_handle, "getExceptionTypes", "()[Ljava/lang/Class;");
+    CHECK(exc_types != rt::kNull);
+    auto& exc_arr = runtime->array(rt::Handle(exc_types), "[Ljava/lang/Class;");
+    CHECK_EQ(exc_arr.length, 1u);
+
+    auto m_sig = runtime->call_virtual(m_handle, "getSignatureAnnotation", "()[Ljava/lang/String;");
+    CHECK(m_sig != rt::kNull);
+  }
+}
+

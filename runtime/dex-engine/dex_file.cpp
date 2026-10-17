@@ -466,27 +466,29 @@ std::vector<EncodedValue> DexFile::encoded_array(uint32_t offset) const {
   return out;
 }
 
-std::vector<Annotation> DexFile::class_annotations(const ClassDef& def) const {
+namespace {
+
+std::vector<Annotation> parse_annotation_set(std::span<const uint8_t> data, uint32_t set_off,
+                                             uint32_t type_ids_size, uint32_t string_ids_size) {
   std::vector<Annotation> out;
-  if (def.annotations_off == 0) return out;
-  auto data = std::span<const uint8_t>(data_);
-  ByteReader dir(data, def.annotations_off);
-  uint32_t set_off = dir.u32();
   if (set_off == 0) return out;
   ByteReader set(data, set_off);
   uint32_t size = set.u32();
   if (size > set.remaining() / 4) throw_format("annotation_set_item hors limites");
+  out.reserve(size);
   for (uint32_t i = 0; i < size; ++i) {
-    ByteReader item(data, set.u32());
+    uint32_t item_off = set.u32();
+    if (item_off == 0) continue;
+    ByteReader item(data, item_off);
     Annotation a;
     a.visibility = item.u8();
     a.type_idx = item.uleb128();
-    if (a.type_idx >= header_.type_ids_size) throw_format("annotation : type invalide");
+    if (a.type_idx >= type_ids_size) throw_format("annotation : type invalide");
     uint32_t count = item.uleb128();
     if (count > item.remaining()) throw_format("annotation : taille invalide");
     for (uint32_t k = 0; k < count; ++k) {
       uint32_t name = item.uleb128();
-      if (name >= header_.string_ids_size) throw_format("annotation : nom invalide");
+      if (name >= string_ids_size) throw_format("annotation : nom invalide");
       EncodedValue v;
       read_encoded_value(item, v, 0);
       a.elements.emplace_back(name, std::move(v));
@@ -494,6 +496,74 @@ std::vector<Annotation> DexFile::class_annotations(const ClassDef& def) const {
     out.push_back(std::move(a));
   }
   return out;
+}
+
+}  // namespace
+
+AnnotationsDirectory DexFile::annotations_directory(const ClassDef& def) const {
+  AnnotationsDirectory dir;
+  if (def.annotations_off == 0) return dir;
+  auto data = std::span<const uint8_t>(data_);
+  ByteReader r(data, def.annotations_off);
+  uint32_t class_annotations_off = r.u32();
+  uint32_t fields_size = r.u32();
+  uint32_t annotated_methods_size = r.u32();
+  uint32_t annotated_parameters_size = r.u32();
+
+  if (class_annotations_off != 0) {
+    dir.class_annotations = parse_annotation_set(data, class_annotations_off, header_.type_ids_size, header_.string_ids_size);
+  }
+
+  if (fields_size > r.remaining() / 8) throw_format("field_annotations hors limites");
+  dir.field_annotations.reserve(fields_size);
+  for (uint32_t i = 0; i < fields_size; ++i) {
+    uint32_t field_idx = r.u32();
+    uint32_t off = r.u32();
+    if (field_idx >= header_.field_ids_size) throw_format("field_annotation : index invalide");
+    dir.field_annotations.push_back({field_idx, parse_annotation_set(data, off, header_.type_ids_size, header_.string_ids_size)});
+  }
+
+  if (annotated_methods_size > r.remaining() / 8) throw_format("method_annotations hors limites");
+  dir.method_annotations.reserve(annotated_methods_size);
+  for (uint32_t i = 0; i < annotated_methods_size; ++i) {
+    uint32_t method_idx = r.u32();
+    uint32_t off = r.u32();
+    if (method_idx >= header_.method_ids_size) throw_format("method_annotation : index invalide");
+    dir.method_annotations.push_back({method_idx, parse_annotation_set(data, off, header_.type_ids_size, header_.string_ids_size)});
+  }
+
+  if (annotated_parameters_size > r.remaining() / 8) throw_format("parameter_annotations hors limites");
+  dir.parameter_annotations.reserve(annotated_parameters_size);
+  for (uint32_t i = 0; i < annotated_parameters_size; ++i) {
+    uint32_t method_idx = r.u32();
+    uint32_t off = r.u32();
+    if (method_idx >= header_.method_ids_size) throw_format("parameter_annotation : index invalide");
+    ParameterAnnotation pa;
+    pa.method_idx = method_idx;
+    if (off != 0) {
+      ByteReader ref_list(data, off);
+      uint32_t count = ref_list.u32();
+      if (count > ref_list.remaining() / 4) throw_format("annotation_set_ref_list hors limites");
+      pa.annotations.resize(count);
+      for (uint32_t p = 0; p < count; ++p) {
+        uint32_t param_set_off = ref_list.u32();
+        if (param_set_off != 0) {
+          pa.annotations[p] = parse_annotation_set(data, param_set_off, header_.type_ids_size, header_.string_ids_size);
+        }
+      }
+    }
+    dir.parameter_annotations.push_back(std::move(pa));
+  }
+
+  return dir;
+}
+
+std::vector<Annotation> DexFile::class_annotations(const ClassDef& def) const {
+  if (def.annotations_off == 0) return {};
+  auto data = std::span<const uint8_t>(data_);
+  ByteReader dir(data, def.annotations_off);
+  uint32_t set_off = dir.u32();
+  return parse_annotation_set(data, set_off, header_.type_ids_size, header_.string_ids_size);
 }
 
 std::string DexFile::pretty_field(uint32_t idx) const {

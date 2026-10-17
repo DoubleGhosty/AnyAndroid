@@ -161,6 +161,28 @@ struct Annotation {
   std::vector<std::pair<uint32_t, EncodedValue>> elements;
 };
 
+struct FieldAnnotation {
+  uint32_t field_idx = 0;
+  std::vector<Annotation> annotations;
+};
+
+struct MethodAnnotation {
+  uint32_t method_idx = 0;
+  std::vector<Annotation> annotations;
+};
+
+struct ParameterAnnotation {
+  uint32_t method_idx = 0;
+  std::vector<std::vector<Annotation>> annotations;
+};
+
+struct AnnotationsDirectory {
+  std::vector<Annotation> class_annotations;
+  std::vector<FieldAnnotation> field_annotations;
+  std::vector<MethodAnnotation> method_annotations;
+  std::vector<ParameterAnnotation> parameter_annotations;
+};
+
 class DexFile {
  public:
   // Opens a single DEX file (035 to 040, or a DEX 041 container holding one
@@ -201,6 +223,8 @@ class DexFile {
   CodeItem code_item(uint32_t offset) const;
   std::vector<uint32_t> type_list(uint32_t offset) const;
   std::vector<EncodedValue> encoded_array(uint32_t offset) const;
+  // Complete annotations directory (class, fields, methods, parameters).
+  AnnotationsDirectory annotations_directory(const ClassDef& def) const;
   // Annotations of the class itself (annotations_directory_item), such as the
   // system annotations dalvik.annotation.InnerClass, EnclosingClass,
   // EnclosingMethod and MemberClasses.

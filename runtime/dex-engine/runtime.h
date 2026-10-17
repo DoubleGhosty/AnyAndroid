@@ -111,6 +111,16 @@ struct FieldPeer final : NativePeer {
   Field* field = nullptr;
 };
 
+struct AnnotationPeer final : NativePeer {
+  Class* anno_class = nullptr;
+  const dex::DexFile* dex = nullptr;
+  std::unordered_map<std::string, dex::EncodedValue> elements;
+  std::vector<Handle> allocated;
+  void trace(std::vector<Handle>& out) const override {
+    out.insert(out.end(), allocated.begin(), allocated.end());
+  }
+};
+
 // java.lang.ref.Reference state. Soft references are kept strong.
 struct ReferencePeer final : NativePeer {
   Handle self = kNull;
@@ -148,16 +158,51 @@ struct ThrowablePeer final : NativePeer {
   }
 };
 
+// Encoded annotation (visibility 1 = RUNTIME, 2 = SYSTEM) read from DEX.
+struct EncodedAnnotation {
+  uint8_t visibility = 0;
+  std::string type_descriptor;
+  std::unordered_map<std::string, dex::EncodedValue> elements;
+  const dex::DexFile* dex = nullptr;
+};
+
+struct FieldAnnotations {
+  std::vector<std::string> signature;  // dalvik.annotation.Signature
+  std::unordered_map<std::string, EncodedAnnotation> annotations;
+};
+
+struct MethodAnnotations {
+  std::vector<std::string> signature;       // dalvik.annotation.Signature
+  std::vector<std::string> throws_classes;  // dalvik.annotation.Throws (class descriptors)
+  std::unordered_map<std::string, EncodedAnnotation> annotations;
+  std::vector<std::unordered_map<std::string, EncodedAnnotation>> parameter_annotations;
+};
+
+struct ClassAnnotations {
+  bool inner = false;      // InnerClass: a member, local or anonymous class
+  bool anonymous = false;  // InnerClass with a null name
+  std::string inner_name;  // simple name of a member or local class
+  int32_t inner_flags = 0;
+  std::string enclosing_class;               // EnclosingClass (descriptor), or empty
+  std::optional<uint32_t> enclosing_method;  // EnclosingMethod: method index in the class's DEX
+  std::vector<std::string> member_classes;   // MemberClasses (descriptors)
+  std::vector<std::string> signature;        // dalvik.annotation.Signature
+  std::unordered_map<std::string, EncodedAnnotation> annotations;
+};
+
 struct Field {
   Class* owner = nullptr;
   std::string name;
   std::string type;
   uint32_t access = 0;
   uint32_t slot = 0;
+  uint32_t field_idx = dex::kNoIndex;
   std::function<uint64_t(Runtime&)> native_init;
+  std::unique_ptr<FieldAnnotations> annotations_;
   bool is_static() const { return access & dex::kAccStatic; }
   bool wide() const { return type == "J" || type == "D"; }
   bool is_reference() const { return !type.empty() && (type[0] == 'L' || type[0] == '['); }
+  const FieldAnnotations& annotations();
 };
 
 struct Method {
@@ -183,11 +228,13 @@ struct Method {
   uint64_t profile_instructions = 0;
   // JNI implementation registered with RegisterNatives (System V ABI).
   void* jni_fn = nullptr;
+  std::unique_ptr<MethodAnnotations> annotations_;
 
   bool is_static() const { return access & dex::kAccStatic; }
   bool is_abstract() const { return !native && !jni_fn && code_off == 0; }
   char return_type() const { return signature.empty() ? 'V' : signature[signature.find(')') + 1]; }
   std::string pretty() const;
+  const MethodAnnotations& annotations();
 };
 
 struct DexCache {
@@ -201,17 +248,6 @@ struct DexCache {
   std::vector<Field*> fields;
   std::vector<Method*> methods;  // static/direct resolution
   std::vector<Handle> strings;
-};
-
-// System annotations of a class (dalvik.annotation.*), read from its DEX file.
-struct ClassAnnotations {
-  bool inner = false;      // InnerClass: a member, local or anonymous class
-  bool anonymous = false;  // InnerClass with a null name
-  std::string inner_name;  // simple name of a member or local class
-  int32_t inner_flags = 0;
-  std::string enclosing_class;               // EnclosingClass (descriptor), or empty
-  std::optional<uint32_t> enclosing_method;  // EnclosingMethod: method index in the class's DEX
-  std::vector<std::string> member_classes;   // MemberClasses (descriptors)
 };
 
 struct Class {
@@ -246,13 +282,15 @@ struct Class {
   Method* declared_method(std::string_view name, std::string_view sig) const;
   Field* declared_field(std::string_view name, std::string_view type) const;
   std::string java_name() const;
-  // System annotations (read once; none for array, primitive and VM classes).
+  // System and runtime annotations.
   const ClassAnnotations& annotations();
+  ClassAnnotations& mutable_annotations();
   // Class.getSimpleName(): "" for an anonymous class, the InnerClass name for
   // a member or local class, "T[]" for arrays.
   std::string simple_name();
 
  private:
+  void load_annotations();
   std::unique_ptr<ClassAnnotations> annotations_;
 };
 
@@ -450,6 +488,8 @@ class Runtime {
   // Defines (without initialising) a class from an application DEX file, as
   // DexFile.defineClassNative does. There is one class namespace (ADR-006 J2):
   // the boot space wins and a class already defined is returned as is.
+  Class* define_synthetic_class(std::string descriptor, Class* super, std::vector<Class*> interfaces,
+                                uint32_t access = dex::kAccPublic | dex::kAccFinal);
   Class* define_class(const dex::DexFile* dex, std::string_view descriptor);
   // Classes defined by the boot space rather than by application DEX files
   // (arrays: by their element type).

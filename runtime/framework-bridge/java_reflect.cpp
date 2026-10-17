@@ -282,6 +282,286 @@ Handle mirror_or_null(Runtime& rt, const std::string& descriptor) {
   return c ? rt.class_mirror(c) : kNull;
 }
 
+Handle create_annotation_instance(Runtime& rt, rt::Class* anno_cls, const rt::EncodedAnnotation& ea);
+
+uint64_t convert_encoded_value(Runtime& rt, const dex::EncodedValue& v, const dex::DexFile* dex, std::string_view sig) {
+  std::string ret = sig.find(')') != std::string::npos ? std::string(sig.substr(sig.find(')') + 1)) : std::string(sig);
+  if (ret == "Z") return rt::ret_bool((v.bits & 1) != 0);
+  if (ret == "B") return rt::ret_int(int8_t(v.bits));
+  if (ret == "C") return rt::ret_int(uint16_t(v.bits));
+  if (ret == "S") return rt::ret_int(int16_t(v.bits));
+  if (ret == "I") return rt::ret_int(int32_t(v.bits));
+  if (ret == "J") return v.bits;
+  if (ret == "F") return uint32_t(v.bits);
+  if (ret == "D") return v.bits;
+  if (ret == "Ljava/lang/String;") {
+    if (v.type == dex::EncodedValue::kNull) return kNull;
+    if (dex && v.bits < dex->num_strings()) {
+      return rt.new_string_utf8(dex->string(uint32_t(v.bits)));
+    }
+    return kNull;
+  }
+  if (ret == "Ljava/lang/Class;") {
+    if (v.type == dex::EncodedValue::kNull) return kNull;
+    if (dex && v.bits < dex->num_types()) {
+      rt::Class* c = rt.lookup_class(dex->type_descriptor(uint32_t(v.bits)));
+      return c ? rt.class_mirror(c) : kNull;
+    }
+    return kNull;
+  }
+  if (!ret.empty() && ret[0] == '[') {
+    if (v.type == dex::EncodedValue::kNull) return kNull;
+    std::string elem_type = ret.substr(1);
+    uint32_t count = uint32_t(v.array.size());
+    Handle arr = rt.new_array(ret, int32_t(count));
+    auto& arr_obj = rt.array(arr, ret);
+    if (elem_type == "Ljava/lang/String;") {
+      for (uint32_t i = 0; i < count; ++i) {
+        Handle s = kNull;
+        if (dex && v.array[i].bits < dex->num_strings()) {
+          s = rt.new_string_utf8(dex->string(uint32_t(v.array[i].bits)));
+        }
+        std::memcpy(&arr_obj.data[size_t(i) * 4], &s, 4);
+      }
+    } else if (elem_type == "Ljava/lang/Class;") {
+      for (uint32_t i = 0; i < count; ++i) {
+        Handle m = kNull;
+        if (dex && v.array[i].bits < dex->num_types()) {
+          if (rt::Class* c = rt.lookup_class(dex->type_descriptor(uint32_t(v.array[i].bits)))) {
+            m = rt.class_mirror(c);
+          }
+        }
+        std::memcpy(&arr_obj.data[size_t(i) * 4], &m, 4);
+      }
+    } else if (elem_type == "I" || elem_type == "Z" || elem_type == "B" || elem_type == "S" || elem_type == "C") {
+      for (uint32_t i = 0; i < count; ++i) {
+        uint32_t b = uint32_t(v.array[i].bits);
+        std::memcpy(&arr_obj.data[size_t(i) * arr_obj.width], &b, arr_obj.width);
+      }
+    } else if (elem_type == "J" || elem_type == "D") {
+      for (uint32_t i = 0; i < count; ++i) {
+        uint64_t b = v.array[i].bits;
+        std::memcpy(&arr_obj.data[size_t(i) * 8], &b, 8);
+      }
+    }
+    return arr;
+  }
+  // Enum
+  if (v.type == dex::EncodedValue::kEnum && dex && v.bits < dex->num_fields()) {
+    const dex::FieldId& fid = dex->field(uint32_t(v.bits));
+    rt::Class* enum_cls = rt.lookup_class(dex->type_descriptor(fid.class_idx));
+    if (enum_cls) {
+      rt.ensure_initialized(enum_cls);
+      rt::Field* fld = enum_cls->declared_field(dex->string(fid.name_idx), dex->type_descriptor(fid.type_idx));
+      if (fld && fld->is_static()) {
+        return enum_cls->statics.at(fld->slot);
+      }
+    }
+  }
+  return kNull;
+}
+
+void setup_annotation_proxy_methods(Runtime&, rt::Class* proxy_cls, rt::Class* anno_cls) {
+  {
+    auto m = std::make_unique<rt::Method>();
+    m->owner = proxy_cls;
+    m->name = "<init>";
+    m->signature = "()V";
+    m->access = dex::kAccPublic | dex::kAccConstructor;
+    m->arg_words = 1;
+    m->native = [](Runtime&, NativeArgs&) -> uint64_t { return 0; };
+    proxy_cls->methods.push_back(std::move(m));
+  }
+  // annotationType()
+  {
+    auto m = std::make_unique<rt::Method>();
+    m->owner = proxy_cls;
+    m->name = "annotationType";
+    m->signature = "()Ljava/lang/Class;";
+    m->access = dex::kAccPublic;
+    m->arg_words = 1;
+    m->native = [anno_cls](Runtime& rt, NativeArgs&) -> uint64_t {
+      return rt.class_mirror(anno_cls);
+    };
+    proxy_cls->methods.push_back(std::move(m));
+  }
+  // Elements of annotation
+  for (const auto& method : anno_cls->methods) {
+    if (method->name == "<clinit>" || method->name == "<init>") continue;
+    std::string m_name = method->name;
+    std::string m_sig = method->signature;
+    auto m = std::make_unique<rt::Method>();
+    m->owner = proxy_cls;
+    m->name = m_name;
+    m->signature = m_sig;
+    m->access = dex::kAccPublic;
+    m->arg_words = 1;
+    m->native = [m_name, m_sig](Runtime& rt, NativeArgs& a) -> uint64_t {
+      auto* peer = rt.peer<rt::AnnotationPeer>(a.h(0));
+      if (!peer) rt.throw_new("Ljava/lang/InternalError;", "AnnotationPeer manquant");
+      auto it = peer->elements.find(m_name);
+      if (it == peer->elements.end()) {
+        rt.throw_new("Ljava/lang/annotation/IncompleteAnnotationException;", m_name);
+      }
+      return convert_encoded_value(rt, it->second, peer->dex, m_sig);
+    };
+    proxy_cls->methods.push_back(std::move(m));
+  }
+  // equals
+  {
+    auto m = std::make_unique<rt::Method>();
+    m->owner = proxy_cls;
+    m->name = "equals";
+    m->signature = "(Ljava/lang/Object;)Z";
+    m->access = dex::kAccPublic;
+    m->arg_words = 2;
+    m->native = [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      Handle self = a.h(0);
+      Handle other = a.h(1);
+      if (self == other) return rt::ret_bool(true);
+      auto* p1 = rt.peer<rt::AnnotationPeer>(self);
+      auto* p2 = rt.peer<rt::AnnotationPeer>(other);
+      if (!p1 || !p2 || p1->anno_class != p2->anno_class) return rt::ret_bool(false);
+      if (p1->elements.size() != p2->elements.size()) return rt::ret_bool(false);
+      for (const auto& [k, v1] : p1->elements) {
+        auto it2 = p2->elements.find(k);
+        if (it2 == p2->elements.end()) return rt::ret_bool(false);
+        if (v1.type != it2->second.type || v1.bits != it2->second.bits) return rt::ret_bool(false);
+      }
+      return rt::ret_bool(true);
+    };
+    proxy_cls->methods.push_back(std::move(m));
+  }
+  // hashCode
+  {
+    auto m = std::make_unique<rt::Method>();
+    m->owner = proxy_cls;
+    m->name = "hashCode";
+    m->signature = "()I";
+    m->access = dex::kAccPublic;
+    m->arg_words = 1;
+    m->native = [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      auto* p = rt.peer<rt::AnnotationPeer>(a.h(0));
+      if (!p) return 0;
+      int32_t hash = 0;
+      for (const auto& [k, v] : p->elements) {
+        int32_t k_hash = rt::java_string_hash(rt::u16(k));
+        int32_t v_hash = int32_t(v.bits ^ (v.bits >> 32));
+        hash += (127 * k_hash) ^ v_hash;
+      }
+      return rt::ret_int(hash);
+    };
+    proxy_cls->methods.push_back(std::move(m));
+  }
+  // toString
+  {
+    auto m = std::make_unique<rt::Method>();
+    m->owner = proxy_cls;
+    m->name = "toString";
+    m->signature = "()Ljava/lang/String;";
+    m->access = dex::kAccPublic;
+    m->arg_words = 1;
+    m->native = [anno_cls](Runtime& rt, NativeArgs& a) -> uint64_t {
+      auto* p = rt.peer<rt::AnnotationPeer>(a.h(0));
+      std::string s = "@" + anno_cls->java_name() + "(";
+      if (p) {
+        bool first = true;
+        for (const auto& [k, v] : p->elements) {
+          if (!first) s += ", ";
+          first = false;
+          s += k + "=";
+          if (v.type == dex::EncodedValue::kString && p->dex) {
+            s += "\"" + p->dex->string(uint32_t(v.bits)) + "\"";
+          } else if (v.type == dex::EncodedValue::kBoolean) {
+            s += (v.bits & 1) ? "true" : "false";
+          } else {
+            s += std::to_string(v.bits);
+          }
+        }
+      }
+      s += ")";
+      return rt.new_string_utf8(s);
+    };
+    proxy_cls->methods.push_back(std::move(m));
+  }
+}
+
+Handle create_annotation_instance(Runtime& rt, rt::Class* anno_cls, const rt::EncodedAnnotation& ea) {
+  if (!anno_cls) return kNull;
+  std::string proxy_desc = "$Anno$" + anno_cls->descriptor.substr(1);
+  rt::Class* proxy_cls = rt.loaded_class(proxy_desc);
+  if (!proxy_cls) {
+    proxy_cls = rt.define_synthetic_class(proxy_desc, rt.find_class("Ljava/lang/Object;"),
+                                          {anno_cls, rt.find_class("Ljava/lang/annotation/Annotation;")},
+                                          dex::kAccPublic | dex::kAccFinal);
+    setup_annotation_proxy_methods(rt, proxy_cls, anno_cls);
+  }
+  Handle h = rt.alloc(proxy_cls);
+  auto peer = std::make_unique<rt::AnnotationPeer>();
+  peer->anno_class = anno_cls;
+  peer->dex = ea.dex;
+  peer->elements = ea.elements;
+  rt.object(h)->peer = std::move(peer);
+  return h;
+}
+
+Handle get_declared_annotations(Runtime& rt, const std::unordered_map<std::string, rt::EncodedAnnotation>& map) {
+  std::vector<Handle> annos;
+  for (const auto& [desc, ea] : map) {
+    if (ea.visibility != 1) continue;  // RUNTIME visibility only
+    if (rt::Class* anno_cls = rt.lookup_class(desc)) {
+      Handle inst = create_annotation_instance(rt, anno_cls, ea);
+      if (inst != kNull) annos.push_back(inst);
+    }
+  }
+  return object_array(rt, "[Ljava/lang/annotation/Annotation;", annos);
+}
+
+Handle get_signature_annotation_array(Runtime& rt, const std::vector<std::string>& sig) {
+  if (sig.empty()) return kNull;
+  std::vector<Handle> items;
+  items.reserve(sig.size());
+  for (const auto& s : sig) items.push_back(rt.new_string_utf8(s));
+  return object_array(rt, "[Ljava/lang/String;", items);
+}
+
+Handle get_annotation_for_class(Runtime& rt, rt::Class* cls, rt::Class* anno_cls) {
+  if (!cls || !anno_cls) return kNull;
+  const auto& map = cls->annotations().annotations;
+  auto it = map.find(anno_cls->descriptor);
+  if (it != map.end() && it->second.visibility == 1) {
+    return create_annotation_instance(rt, anno_cls, it->second);
+  }
+  // Inheritance if @Inherited
+  const auto& meta = anno_cls->annotations().annotations;
+  if (meta.find("Ljava/lang/annotation/Inherited;") != meta.end()) {
+    for (rt::Class* k = cls->super; k; k = k->super) {
+      const auto& smap = k->annotations().annotations;
+      auto sit = smap.find(anno_cls->descriptor);
+      if (sit != smap.end() && sit->second.visibility == 1) {
+        return create_annotation_instance(rt, anno_cls, sit->second);
+      }
+    }
+  }
+  return kNull;
+}
+
+bool is_annotation_present_for_class(Runtime& rt, rt::Class* cls, rt::Class* anno_cls) {
+  if (!cls || !anno_cls) return false;
+  const auto& map = cls->annotations().annotations;
+  auto it = map.find(anno_cls->descriptor);
+  if (it != map.end() && it->second.visibility == 1) return true;
+  const auto& meta = anno_cls->annotations().annotations;
+  if (meta.find("Ljava/lang/annotation/Inherited;") != meta.end()) {
+    for (rt::Class* k = cls->super; k; k = k->super) {
+      const auto& smap = k->annotations().annotations;
+      auto sit = smap.find(anno_cls->descriptor);
+      if (sit != smap.end() && sit->second.visibility == 1) return true;
+    }
+  }
+  return false;
+}
+
 std::string java_to_class_descriptor(const std::string& name) {
   if (!name.empty() && name[0] == '[') {
     std::string d = name;
@@ -449,9 +729,35 @@ void register_class_reflection(rt::NativeRegistry& r) {
   c.method("getClassLoader", "()Ljava/lang/ClassLoader;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     return class_loader_of(rt, class_arg(rt, a.h(0), "Class"), false);
   });
-  c.unsupported("getAnnotation", "(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;", kNoAnnotations);
-  c.unsupported("getAnnotations", "()[Ljava/lang/annotation/Annotation;", kNoAnnotations);
-  c.unsupported("isAnnotationPresent", "(Ljava/lang/Class;)Z", kNoAnnotations);
+  c.method("getAnnotation", "(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Class* cls = class_arg(rt, a.h(0), "Class");
+    rt::Class* anno_cls = class_arg(rt, a.h(1), "annotationClass");
+    return get_annotation_for_class(rt, cls, anno_cls);
+  });
+  c.method("getDeclaredAnnotations", "()[Ljava/lang/annotation/Annotation;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Class* cls = class_arg(rt, a.h(0), "Class");
+    return get_declared_annotations(rt, cls->annotations().annotations);
+  });
+  c.method("getAnnotations", "()[Ljava/lang/annotation/Annotation;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Class* cls = class_arg(rt, a.h(0), "Class");
+    std::unordered_map<std::string, rt::EncodedAnnotation> all = cls->annotations().annotations;
+    for (rt::Class* k = cls->super; k; k = k->super) {
+      for (const auto& [desc, ea] : k->annotations().annotations) {
+        if (ea.visibility != 1 || all.count(desc)) continue;
+        if (rt::Class* ac = rt.lookup_class(desc)) {
+          if (ac->annotations().annotations.count("Ljava/lang/annotation/Inherited;")) {
+            all.emplace(desc, ea);
+          }
+        }
+      }
+    }
+    return get_declared_annotations(rt, all);
+  });
+  c.method("isAnnotationPresent", "(Ljava/lang/Class;)Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Class* cls = class_arg(rt, a.h(0), "Class");
+    rt::Class* anno_cls = class_arg(rt, a.h(1), "annotationClass");
+    return rt::ret_bool(is_annotation_present_for_class(rt, cls, anno_cls));
+  });
   // From the system annotations of the DEX (as ART's annotations::GetEnclosingClass,
   // GetDeclaringClass): a local or anonymous class is enclosed by its method's class.
   c.method("getEnclosingClass", "()Ljava/lang/Class;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
@@ -468,6 +774,27 @@ void register_class_reflection(rt::NativeRegistry& r) {
     const rt::ClassAnnotations& an = class_arg(rt, a.h(0), "Class")->annotations();
     if (an.anonymous || an.enclosing_class.empty()) return kNull;
     return mirror_or_null(rt, an.enclosing_class);
+  });
+  c.method("getSignatureAnnotation", "()[Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Class* cls = class_arg(rt, a.h(0), "Class");
+    return get_signature_annotation_array(rt, cls->annotations().signature);
+  });
+  c.method("getDeclaredAnnotation", "(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Class* cls = class_arg(rt, a.h(0), "Class");
+    rt::Class* anno_cls = class_arg(rt, a.h(1), "annotationClass");
+    const auto& map = cls->annotations().annotations;
+    auto it = map.find(anno_cls->descriptor);
+    if (it != map.end() && it->second.visibility == 1) {
+      return create_annotation_instance(rt, anno_cls, it->second);
+    }
+    return kNull;
+  });
+  c.method("isDeclaredAnnotationPresent", "(Ljava/lang/Class;)Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Class* cls = class_arg(rt, a.h(0), "Class");
+    rt::Class* anno_cls = class_arg(rt, a.h(1), "annotationClass");
+    const auto& map = cls->annotations().annotations;
+    auto it = map.find(anno_cls->descriptor);
+    return rt::ret_bool(it != map.end() && it->second.visibility == 1);
   });
 
   auto loader = r.define("Ljava/lang/ClassLoader;", "Ljava/lang/Object;", {}, 0x1, S::kPartial,
@@ -510,9 +837,62 @@ void register_members(rt::NativeRegistry& r) {
   r.define("Ljava/lang/reflect/AccessibleObject;", "Ljava/lang/Object;")
       .method("setAccessible", "(Z)V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; },
               S::kPartial, "aucun contrôle d'accès n'est appliqué par le prototype")
-      .method("isAccessible", "()Z", [](Runtime&, NativeArgs&) -> uint64_t { return 1; })
-      .unsupported("getAnnotation", "(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;", kNoAnnotations)
-      .unsupported("isAnnotationPresent", "(Ljava/lang/Class;)Z", kNoAnnotations);
+      .method("getAnnotation", "(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+        Handle self = a.h(0);
+        rt::Class* anno_cls = class_arg(rt, a.h(1), "annotationClass");
+        if (auto* mp = rt.peer<rt::MethodPeer>(self)) {
+          const auto& map = mp->method->annotations().annotations;
+          auto it = map.find(anno_cls->descriptor);
+          if (it != map.end() && it->second.visibility == 1) {
+            return create_annotation_instance(rt, anno_cls, it->second);
+          }
+          return kNull;
+        }
+        if (auto* fp = rt.peer<rt::FieldPeer>(self)) {
+          const auto& map = fp->field->annotations().annotations;
+          auto it = map.find(anno_cls->descriptor);
+          if (it != map.end() && it->second.visibility == 1) {
+            return create_annotation_instance(rt, anno_cls, it->second);
+          }
+          return kNull;
+        }
+        return kNull;
+      })
+      .method("isAnnotationPresent", "(Ljava/lang/Class;)Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+        Handle self = a.h(0);
+        rt::Class* anno_cls = class_arg(rt, a.h(1), "annotationClass");
+        if (auto* mp = rt.peer<rt::MethodPeer>(self)) {
+          const auto& map = mp->method->annotations().annotations;
+          auto it = map.find(anno_cls->descriptor);
+          return rt::ret_bool(it != map.end() && it->second.visibility == 1);
+        }
+        if (auto* fp = rt.peer<rt::FieldPeer>(self)) {
+          const auto& map = fp->field->annotations().annotations;
+          auto it = map.find(anno_cls->descriptor);
+          return rt::ret_bool(it != map.end() && it->second.visibility == 1);
+        }
+        return rt::ret_bool(false);
+      })
+      .method("getDeclaredAnnotations", "()[Ljava/lang/annotation/Annotation;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+        Handle self = a.h(0);
+        if (auto* mp = rt.peer<rt::MethodPeer>(self)) {
+          return get_declared_annotations(rt, mp->method->annotations().annotations);
+        }
+        if (auto* fp = rt.peer<rt::FieldPeer>(self)) {
+          return get_declared_annotations(rt, fp->field->annotations().annotations);
+        }
+        return rt.new_array("[Ljava/lang/annotation/Annotation;", 0);
+      })
+      .method("getAnnotations", "()[Ljava/lang/annotation/Annotation;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+        Handle self = a.h(0);
+        if (auto* mp = rt.peer<rt::MethodPeer>(self)) {
+          return get_declared_annotations(rt, mp->method->annotations().annotations);
+        }
+        if (auto* fp = rt.peer<rt::FieldPeer>(self)) {
+          return get_declared_annotations(rt, fp->field->annotations().annotations);
+        }
+        return rt.new_array("[Ljava/lang/annotation/Annotation;", 0);
+      });
 
   for (const char* desc : {"Ljava/lang/reflect/Method;", "Ljava/lang/reflect/Constructor;"}) {
     bool ctor = std::string(desc) == "Ljava/lang/reflect/Constructor;";
@@ -536,9 +916,39 @@ void register_members(rt::NativeRegistry& r) {
     b.method("getParameterCount", "()I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
       return rt::ret_int(int32_t(params_of(method_of(rt, a.h(0))).size()));
     });
-    b.method("getExceptionTypes", "()[Ljava/lang/Class;", [](Runtime& rt, NativeArgs&) -> uint64_t {
-      return object_array(rt, "[Ljava/lang/Class;", {});
-    }, S::kPartial, "clause throws non lue (annotations)");
+    b.method("getExceptionTypes", "()[Ljava/lang/Class;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      rt::Method* m = method_of(rt, a.h(0));
+      const auto& throws_classes = m->annotations().throws_classes;
+      std::vector<Handle> objs;
+      objs.reserve(throws_classes.size());
+      for (const std::string& th_desc : throws_classes) {
+        if (rt::Class* c = rt.lookup_class(th_desc)) {
+          objs.push_back(rt.class_mirror(c));
+        }
+      }
+      return object_array(rt, "[Ljava/lang/Class;", objs);
+    });
+    b.method("getParameterAnnotations", "()[[Ljava/lang/annotation/Annotation;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      rt::Method* m = method_of(rt, a.h(0));
+      auto params = params_of(m);
+      uint32_t count = uint32_t(params.size());
+      Handle outer = rt.new_array("[[Ljava/lang/annotation/Annotation;", int32_t(count));
+      const auto& param_annos = m->annotations().parameter_annotations;
+      for (uint32_t i = 0; i < count; ++i) {
+        Handle inner = kNull;
+        if (i < param_annos.size()) {
+          inner = get_declared_annotations(rt, param_annos[i]);
+        } else {
+          inner = rt.new_array("[Ljava/lang/annotation/Annotation;", 0);
+        }
+        std::memcpy(&rt.array(outer, "[[Ljava/lang/annotation/Annotation;").data[size_t(i) * 4], &inner, 4);
+      }
+      return outer;
+    });
+    b.method("getSignatureAnnotation", "()[Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      rt::Method* m = method_of(rt, a.h(0));
+      return get_signature_annotation_array(rt, m->annotations().signature);
+    });
     b.method("isVarArgs", "()Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
       return rt::ret_bool(method_of(rt, a.h(0))->access & dex::kAccVarargs);
     });
@@ -615,6 +1025,10 @@ void register_members(rt::NativeRegistry& r) {
   });
   f.method("getDeclaringClass", "()Ljava/lang/Class;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     return rt.class_mirror(field_of(rt, a.h(0))->owner);
+  });
+  f.method("getSignatureAnnotation", "()[Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Field* fld = field_of(rt, a.h(0));
+    return get_signature_annotation_array(rt, fld->annotations().signature);
   });
   // ART's Field.getArtField(), stored by FieldVarHandle: an opaque cookie.
   f.method("getArtField", "()J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
@@ -877,23 +1291,42 @@ void register_art_reflection_natives(rt::NativeRegistry& r) {
     }
     return object_array(rt, "[Ljava/lang/Class;", objs);
   });
+  r.bind(cls, "getSignatureAnnotation", "()[Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Class* c = class_arg(rt, a.h(0), "Class");
+    return get_signature_annotation_array(rt, c->annotations().signature);
+  });
+  r.bind(cls, "getDeclaredAnnotation", "(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Class* c = class_arg(rt, a.h(0), "Class");
+    rt::Class* anno_cls = class_arg(rt, a.h(1), "annotationClass");
+    const auto& map = c->annotations().annotations;
+    auto it = map.find(anno_cls->descriptor);
+    if (it != map.end() && it->second.visibility == 1) {
+      return create_annotation_instance(rt, anno_cls, it->second);
+    }
+    return kNull;
+  });
+  r.bind(cls, "isDeclaredAnnotationPresent", "(Ljava/lang/Class;)Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Class* c = class_arg(rt, a.h(0), "Class");
+    rt::Class* anno_cls = class_arg(rt, a.h(1), "annotationClass");
+    const auto& map = c->annotations().annotations;
+    auto it = map.find(anno_cls->descriptor);
+    return rt::ret_bool(it != map.end() && it->second.visibility == 1);
+  });
+  r.bind(cls, "getDeclaredAnnotations", "()[Ljava/lang/annotation/Annotation;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Class* c = class_arg(rt, a.h(0), "Class");
+    return get_declared_annotations(rt, c->annotations().annotations);
+  });
   for (const auto& [name, sig] : std::initializer_list<std::pair<const char*, const char*>>{
-           {"getSignatureAnnotation", "()[Ljava/lang/String;"},
            {"getNestHostFromAnnotation", "()Ljava/lang/Class;"},
            {"getNestMembersFromAnnotation", "()[Ljava/lang/Class;"},
            {"getPermittedSubclassesFromAnnotation", "()[Ljava/lang/Class;"},
-           {"getDeclaredAnnotation", "(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;"},
            {"getRecordAnnotationElement", "(Ljava/lang/String;Ljava/lang/Class;)[Ljava/lang/Object;"}}) {
     r.bind(cls, name, sig, null_result, S::kStub, none);
   }
   for (const auto& [name, sig] : std::initializer_list<std::pair<const char*, const char*>>{
-           {"isRecord0", "()Z"}, {"isValue", "()Z"},
-           {"isDeclaredAnnotationPresent", "(Ljava/lang/Class;)Z"}}) {
+           {"isRecord0", "()Z"}, {"isValue", "()Z"}}) {
     r.bind(cls, name, sig, false_result, S::kStub, none);
   }
-  r.bind(cls, "getDeclaredAnnotations", "()[Ljava/lang/annotation/Annotation;", [](Runtime& rt, NativeArgs&) -> uint64_t {
-    return rt.new_array("[Ljava/lang/annotation/Annotation;", 0);
-  }, S::kStub, none);
 
   const char* ref = "Ljava/lang/ref/Reference;";
   r.bind(ref, "getReferent", "()Ljava/lang/Object;", [](Runtime& rt, NativeArgs& a) -> uint64_t {

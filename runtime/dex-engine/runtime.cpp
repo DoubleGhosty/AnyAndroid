@@ -65,42 +65,184 @@ std::string Class::java_name() const {
   return java(descriptor);
 }
 
+const MethodAnnotations& Method::annotations() {
+  if (!annotations_) {
+    if (owner) const_cast<Class*>(owner)->annotations();
+    if (!annotations_) annotations_ = std::make_unique<MethodAnnotations>();
+  }
+  return *annotations_;
+}
+
+const FieldAnnotations& Field::annotations() {
+  if (!annotations_) {
+    if (owner) const_cast<Class*>(owner)->annotations();
+    if (!annotations_) annotations_ = std::make_unique<FieldAnnotations>();
+  }
+  return *annotations_;
+}
+
 const ClassAnnotations& Class::annotations() {
-  if (annotations_) return *annotations_;
+  if (!annotations_) load_annotations();
+  return *annotations_;
+}
+
+ClassAnnotations& Class::mutable_annotations() {
+  if (!annotations_) load_annotations();
+  return *annotations_;
+}
+
+void Class::load_annotations() {
+  if (annotations_) return;
   annotations_ = std::make_unique<ClassAnnotations>();
-  if (!dex_cache || is_array() || primitive) return *annotations_;
+  if (!dex_cache || is_array() || primitive) return;
   const dex::DexFile& dex = *dex_cache->dex;
   ClassAnnotations& out = *annotations_;
   try {
-    for (const dex::Annotation& a : dex.class_annotations(dex.class_def(class_def_idx))) {
-      if (a.visibility != 2) continue;  // system annotations only
-      const std::string& type = dex.type_descriptor(a.type_idx);
-      auto value = [&](std::string_view name) -> const dex::EncodedValue* {
-        for (const auto& [n, v] : a.elements) {
-          if (dex.string(n) == name) return &v;
-        }
-        return nullptr;
-      };
-      using V = dex::EncodedValue;
-      if (type == "Ldalvik/annotation/InnerClass;") {
-        out.inner = true;
-        const V* name = value("name");
-        out.anonymous = !name || name->type == V::kNull;
-        if (name && name->type == V::kString && name->bits < dex.num_strings()) out.inner_name = dex.string(uint32_t(name->bits));
-        const V* flags = value("accessFlags");
-        if (flags && flags->type == V::kInt) out.inner_flags = int32_t(flags->bits);
-      } else if (type == "Ldalvik/annotation/EnclosingClass;") {
-        const V* v = value("value");
-        if (v && v->type == V::kType && v->bits < dex.num_types()) out.enclosing_class = dex.type_descriptor(uint32_t(v->bits));
-      } else if (type == "Ldalvik/annotation/EnclosingMethod;") {
-        const V* v = value("value");
-        if (v && v->type == V::kMethod && v->bits < dex.num_methods()) out.enclosing_method = uint32_t(v->bits);
-      } else if (type == "Ldalvik/annotation/MemberClasses;") {
-        const V* v = value("value");
-        if (v && v->type == V::kArray) {
-          for (const V& e : v->array) {
-            if (e.type == V::kType && e.bits < dex.num_types()) out.member_classes.push_back(dex.type_descriptor(uint32_t(e.bits)));
+    const dex::ClassDef& def = dex.class_def(class_def_idx);
+    dex::AnnotationsDirectory dir = dex.annotations_directory(def);
+
+    auto parse_anno = [&](const dex::Annotation& a, EncodedAnnotation& ea) {
+      ea.visibility = a.visibility;
+      ea.type_descriptor = dex.type_descriptor(a.type_idx);
+      ea.dex = &dex;
+      for (const auto& [n, v] : a.elements) {
+        ea.elements.emplace(dex.string(n), v);
+      }
+    };
+
+    using V = dex::EncodedValue;
+
+    // 1. Class annotations
+    for (const dex::Annotation& a : dir.class_annotations) {
+      if (a.visibility != 1 && a.visibility != 2) continue;
+      EncodedAnnotation ea;
+      parse_anno(a, ea);
+      const std::string& type = ea.type_descriptor;
+      if (a.visibility == 2) {
+        if (type == "Ldalvik/annotation/InnerClass;") {
+          out.inner = true;
+          auto it = ea.elements.find("name");
+          out.anonymous = (it == ea.elements.end() || it->second.type == V::kNull);
+          if (it != ea.elements.end() && it->second.type == V::kString && it->second.bits < dex.num_strings()) {
+            out.inner_name = dex.string(uint32_t(it->second.bits));
           }
+          auto itf = ea.elements.find("accessFlags");
+          if (itf != ea.elements.end() && itf->second.type == V::kInt) {
+            out.inner_flags = int32_t(itf->second.bits);
+          }
+        } else if (type == "Ldalvik/annotation/EnclosingClass;") {
+          auto it = ea.elements.find("value");
+          if (it != ea.elements.end() && it->second.type == V::kType && it->second.bits < dex.num_types()) {
+            out.enclosing_class = dex.type_descriptor(uint32_t(it->second.bits));
+          }
+        } else if (type == "Ldalvik/annotation/EnclosingMethod;") {
+          auto it = ea.elements.find("value");
+          if (it != ea.elements.end() && it->second.type == V::kMethod && it->second.bits < dex.num_methods()) {
+            out.enclosing_method = uint32_t(it->second.bits);
+          }
+        } else if (type == "Ldalvik/annotation/MemberClasses;") {
+          auto it = ea.elements.find("value");
+          if (it != ea.elements.end() && it->second.type == V::kArray) {
+            for (const V& e : it->second.array) {
+              if (e.type == V::kType && e.bits < dex.num_types()) {
+                out.member_classes.push_back(dex.type_descriptor(uint32_t(e.bits)));
+              }
+            }
+          }
+        } else if (type == "Ldalvik/annotation/Signature;") {
+          auto it = ea.elements.find("value");
+          if (it != ea.elements.end() && it->second.type == V::kArray) {
+            for (const V& e : it->second.array) {
+              if (e.type == V::kString && e.bits < dex.num_strings()) {
+                out.signature.push_back(dex.string(uint32_t(e.bits)));
+              }
+            }
+          }
+        }
+      }
+      out.annotations.emplace(type, std::move(ea));
+    }
+
+    // 2. Field annotations
+    for (const dex::FieldAnnotation& fa : dir.field_annotations) {
+      Field* f = nullptr;
+      for (const auto& fld : fields) {
+        if (fld->field_idx == fa.field_idx) { f = fld.get(); break; }
+      }
+      if (!f) continue;
+      if (!f->annotations_) f->annotations_ = std::make_unique<FieldAnnotations>();
+      for (const dex::Annotation& a : fa.annotations) {
+        if (a.visibility != 1 && a.visibility != 2) continue;
+        EncodedAnnotation ea;
+        parse_anno(a, ea);
+        const std::string& type = ea.type_descriptor;
+        if (a.visibility == 2 && type == "Ldalvik/annotation/Signature;") {
+          auto it = ea.elements.find("value");
+          if (it != ea.elements.end() && it->second.type == V::kArray) {
+            for (const V& e : it->second.array) {
+              if (e.type == V::kString && e.bits < dex.num_strings()) {
+                f->annotations_->signature.push_back(dex.string(uint32_t(e.bits)));
+              }
+            }
+          }
+        }
+        f->annotations_->annotations.emplace(type, std::move(ea));
+      }
+    }
+
+    // 3. Method annotations
+    for (const dex::MethodAnnotation& ma : dir.method_annotations) {
+      Method* m = nullptr;
+      for (const auto& mtd : methods) {
+        if (mtd->method_idx == ma.method_idx) { m = mtd.get(); break; }
+      }
+      if (!m) continue;
+      if (!m->annotations_) m->annotations_ = std::make_unique<MethodAnnotations>();
+      for (const dex::Annotation& a : ma.annotations) {
+        if (a.visibility != 1 && a.visibility != 2) continue;
+        EncodedAnnotation ea;
+        parse_anno(a, ea);
+        const std::string& type = ea.type_descriptor;
+        if (a.visibility == 2) {
+          if (type == "Ldalvik/annotation/Signature;") {
+            auto it = ea.elements.find("value");
+            if (it != ea.elements.end() && it->second.type == V::kArray) {
+              for (const V& e : it->second.array) {
+                if (e.type == V::kString && e.bits < dex.num_strings()) {
+                  m->annotations_->signature.push_back(dex.string(uint32_t(e.bits)));
+                }
+              }
+            }
+          } else if (type == "Ldalvik/annotation/Throws;") {
+            auto it = ea.elements.find("value");
+            if (it != ea.elements.end() && it->second.type == V::kArray) {
+              for (const V& e : it->second.array) {
+                if (e.type == V::kType && e.bits < dex.num_types()) {
+                  m->annotations_->throws_classes.push_back(dex.type_descriptor(uint32_t(e.bits)));
+                }
+              }
+            }
+          }
+        }
+        m->annotations_->annotations.emplace(type, std::move(ea));
+      }
+    }
+
+    // 4. Parameter annotations
+    for (const dex::ParameterAnnotation& pa : dir.parameter_annotations) {
+      Method* m = nullptr;
+      for (const auto& mtd : methods) {
+        if (mtd->method_idx == pa.method_idx) { m = mtd.get(); break; }
+      }
+      if (!m) continue;
+      if (!m->annotations_) m->annotations_ = std::make_unique<MethodAnnotations>();
+      m->annotations_->parameter_annotations.resize(pa.annotations.size());
+      for (size_t p = 0; p < pa.annotations.size(); ++p) {
+        for (const dex::Annotation& a : pa.annotations[p]) {
+          if (a.visibility != 1 && a.visibility != 2) continue;
+          EncodedAnnotation ea;
+          parse_anno(a, ea);
+          m->annotations_->parameter_annotations[p].emplace(ea.type_descriptor, std::move(ea));
         }
       }
     }
@@ -108,7 +250,6 @@ const ClassAnnotations& Class::annotations() {
     log::warn("runtime", "annotations illisibles pour " + java_name() + " : " + e.what());
     out = ClassAnnotations{};
   }
-  return out;
 }
 
 std::string Class::simple_name() {
@@ -296,6 +437,21 @@ Class* Runtime::define_class(const dex::DexFile* dex, std::string_view descripto
   return define_from_dex(*cache, *idx);
 }
 
+Class* Runtime::define_synthetic_class(std::string descriptor, Class* super, std::vector<Class*> interfaces, uint32_t access) {
+  auto it = classes_.find(descriptor);
+  if (it != classes_.end()) return it->second.get();
+  auto cls = std::make_unique<Class>();
+  cls->descriptor = descriptor;
+  cls->super = super ? super : find_class("Ljava/lang/Object;");
+  cls->interfaces = std::move(interfaces);
+  cls->access = access;
+  cls->instance_slots = cls->super ? cls->super->instance_slots : 0;
+  compute_ref_slots(cls.get());
+  Class* raw = cls.get();
+  classes_.emplace(descriptor, std::move(cls));
+  return raw;
+}
+
 std::vector<const dex::DexFile*> Runtime::app_dex_files() const {
   std::vector<const dex::DexFile*> out;
   for (const auto& cache : dex_caches_) {
@@ -435,6 +591,7 @@ void Runtime::merge_boot_bytecode(Class* cls) {
         f->name = name;
         f->type = type;
         f->access = ef.access_flags | dex::kAccStatic;
+        f->field_idx = ef.field_idx;
         f->slot = uint32_t(cls->statics.size());
         cls->statics.resize(cls->statics.size() + (f->wide() ? 2 : 1));
         cls->fields.push_back(std::move(f));
@@ -554,6 +711,7 @@ Class* Runtime::define_from_dex(DexCache& cache, uint32_t idx) {
       f->name = dex.string(fid.name_idx);
       f->type = dex.type_descriptor(fid.type_idx);
       f->access = ef.access_flags | (is_static ? uint32_t(dex::kAccStatic) : 0u);
+      f->field_idx = ef.field_idx;
       uint32_t width = f->wide() ? 2 : 1;
       if (is_static) {
         f->slot = uint32_t(cls->statics.size());
