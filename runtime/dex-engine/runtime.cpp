@@ -1049,6 +1049,22 @@ Field* Runtime::field_from_cookie(uint64_t cookie) {
   return field_cookies_[cookie - 1];
 }
 
+uint64_t Runtime::method_cookie(Method* m) {
+  auto it = method_cookie_of_.find(m);
+  if (it != method_cookie_of_.end()) return it->second;
+  method_cookies_.push_back(m);
+  uint64_t cookie = method_cookies_.size();
+  method_cookie_of_.emplace(m, cookie);
+  return cookie;
+}
+
+Method* Runtime::method_from_cookie(uint64_t cookie) {
+  if (cookie == 0 || cookie > method_cookies_.size()) {
+    throw_new("Ljava/lang/IllegalArgumentException;", "identifiant de méthode invalide " + std::to_string(cookie));
+  }
+  return method_cookies_[cookie - 1];
+}
+
 Method* Runtime::resolve_virtual(Class* cls, std::string_view name, std::string_view sig) {
   std::string key = std::string(name) + std::string(sig);
   auto it = cls->vcache.find(key);

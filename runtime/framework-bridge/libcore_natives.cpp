@@ -1460,14 +1460,498 @@ uint64_t varhandle_access(Runtime& rt, const std::string& mode, const std::strin
   rt.throw_new("Ljava/lang/UnsupportedOperationException;", "mode d'accès VarHandle inconnu : " + mode);
 }
 
+uint64_t methodhandle_invoke(Runtime& rt, const std::string& name, const std::string& callsite,
+                             const uint32_t* args, uint32_t count);
+
+enum MethodHandleKind : int32_t {
+  kInvokeVirtual = 0,
+  kInvokeSuper = 1,
+  kInvokeDirect = 2,
+  kInvokeStatic = 3,
+  kInvokeInterface = 4,
+  kInvokeTransform = 5,
+  kInvokeCallSiteTransform = 6,
+  kInvokeVarHandle = 7,
+  kInvokeVarHandleExact = 8,
+  kInstanceGet = 9,
+  kInstancePut = 10,
+  kStaticGet = 11,
+  kStaticPut = 12,
+};
+
+bool can_widen_primitive(char from, char to) {
+  if (from == to) return true;
+  switch (from) {
+    case 'B': return to == 'S' || to == 'I' || to == 'J' || to == 'F' || to == 'D';
+    case 'S':
+    case 'C': return to == 'I' || to == 'J' || to == 'F' || to == 'D';
+    case 'I': return to == 'J' || to == 'F' || to == 'D';
+    case 'J': return to == 'F' || to == 'D';
+    case 'F': return to == 'D';
+    default: return false;
+  }
+}
+
+uint64_t widen_primitive_val(char from, char to, uint64_t v) {
+  if (from == to) return v;
+  switch (from) {
+    case 'B': {
+      int8_t val = int8_t(v);
+      if (to == 'S') return uint32_t(int16_t(val));
+      if (to == 'I') return uint32_t(int32_t(val));
+      if (to == 'J') return uint64_t(int64_t(val));
+      if (to == 'F') return rt::ret_float(float(val));
+      if (to == 'D') return rt::ret_double(double(val));
+      break;
+    }
+    case 'S': {
+      int16_t val = int16_t(v);
+      if (to == 'I') return uint32_t(int32_t(val));
+      if (to == 'J') return uint64_t(int64_t(val));
+      if (to == 'F') return rt::ret_float(float(val));
+      if (to == 'D') return rt::ret_double(double(val));
+      break;
+    }
+    case 'C': {
+      uint16_t val = uint16_t(v);
+      if (to == 'I') return uint32_t(val);
+      if (to == 'J') return uint64_t(val);
+      if (to == 'F') return rt::ret_float(float(val));
+      if (to == 'D') return rt::ret_double(double(val));
+      break;
+    }
+    case 'I': {
+      int32_t val = int32_t(v);
+      if (to == 'J') return uint64_t(int64_t(val));
+      if (to == 'F') return rt::ret_float(float(val));
+      if (to == 'D') return rt::ret_double(double(val));
+      break;
+    }
+    case 'J': {
+      int64_t val = int64_t(v);
+      if (to == 'F') return rt::ret_float(float(val));
+      if (to == 'D') return rt::ret_double(double(val));
+      break;
+    }
+    case 'F': {
+      float val;
+      uint32_t u = uint32_t(v);
+      std::memcpy(&val, &u, 4);
+      if (to == 'D') return rt::ret_double(double(val));
+      break;
+    }
+    default: break;
+  }
+  return v;
+}
+
+uint64_t convert_primitive_return(char from, char to, uint64_t v) {
+  if (from == to) return v;
+  if (can_widen_primitive(from, to)) return widen_primitive_val(from, to, v);
+  switch (from) {
+    case 'D': {
+      double d;
+      std::memcpy(&d, &v, 8);
+      if (to == 'F') return rt::ret_float(float(d));
+      if (to == 'J') return uint64_t(int64_t(d));
+      if (to == 'I') return uint32_t(int32_t(d));
+      if (to == 'S') return uint32_t(int16_t(d));
+      if (to == 'B') return uint32_t(int8_t(d));
+      if (to == 'C') return uint32_t(uint16_t(d));
+      if (to == 'Z') return uint32_t(int32_t(d) & 1);
+      break;
+    }
+    case 'F': {
+      float f;
+      uint32_t u = uint32_t(v);
+      std::memcpy(&f, &u, 4);
+      if (to == 'J') return uint64_t(int64_t(f));
+      if (to == 'I') return uint32_t(int32_t(f));
+      if (to == 'S') return uint32_t(int16_t(f));
+      if (to == 'B') return uint32_t(int8_t(f));
+      if (to == 'C') return uint32_t(uint16_t(f));
+      if (to == 'Z') return uint32_t(int32_t(f) & 1);
+      break;
+    }
+    case 'J': {
+      int64_t j = int64_t(v);
+      if (to == 'I') return uint32_t(int32_t(j));
+      if (to == 'S') return uint32_t(int16_t(j));
+      if (to == 'B') return uint32_t(int8_t(j));
+      if (to == 'C') return uint32_t(uint16_t(j));
+      if (to == 'Z') return uint32_t(int32_t(j) & 1);
+      break;
+    }
+    case 'I': {
+      int32_t i = int32_t(v);
+      if (to == 'S') return uint32_t(int16_t(i));
+      if (to == 'B') return uint32_t(int8_t(i));
+      if (to == 'C') return uint32_t(uint16_t(i));
+      if (to == 'Z') return uint32_t(i & 1);
+      break;
+    }
+    default: break;
+  }
+  return v;
+}
+
+struct MethodHandleTarget {
+  int32_t kind = 0;
+  rt::Method* method = nullptr;
+  rt::Field* field = nullptr;
+};
+
+MethodHandleTarget resolve_mh_target(Runtime& rt, Handle mh_handle) {
+  rt::Object& mh = rt.nonnull(mh_handle, "MethodHandle");
+  MethodHandleTarget target;
+
+  rt::Field* kind_f = find_field(mh.klass, "handleKind", "I");
+  if (kind_f) target.kind = int32_t(mh.fields.at(kind_f->slot));
+
+  rt::Field* art_f = find_field(mh.klass, "artFieldOrMethod", "J");
+  uint64_t cookie = 0;
+  if (art_f) {
+    cookie = uint64_t(mh.fields.at(art_f->slot)) | (uint64_t(mh.fields.at(art_f->slot + 1)) << 32);
+  }
+
+  if (cookie != 0) {
+    if (target.kind >= kInstanceGet) {
+      target.field = rt.field_from_cookie(cookie);
+    } else {
+      target.method = rt.method_from_cookie(cookie);
+    }
+  } else if (rt::Field* info_f = find_field(mh.klass, "info", "Ljava/lang/invoke/MethodHandleInfo;")) {
+    Handle info_h = Handle(mh.fields.at(info_f->slot));
+    if (info_h != kNull) {
+      rt::Object* info_obj = rt.object(info_h);
+      if (rt::Field* mem_f = find_field(info_obj->klass, "member", "Ljava/lang/reflect/Member;")) {
+        Handle mem_h = Handle(info_obj->fields.at(mem_f->slot));
+        if (auto* mp = rt.peer<rt::MethodPeer>(mem_h)) target.method = mp->method;
+        else if (auto* fp = rt.peer<rt::FieldPeer>(mem_h)) target.field = fp->field;
+      }
+    }
+  } else if (rt::Field* tgt_f = find_field(mh.klass, "target", "Ljava/lang/invoke/MethodHandle;")) {
+    Handle next_h = Handle(mh.fields.at(tgt_f->slot));
+    if (next_h != kNull) return resolve_mh_target(rt, next_h);
+  }
+
+  if (target.method && target.kind == 0) {
+    if (target.method->access & dex::kAccStatic) {
+      target.kind = kInvokeStatic;
+    } else if (target.method->name == "<init>" ||
+               (target.method->access & (dex::kAccPrivate | dex::kAccConstructor))) {
+      target.kind = kInvokeDirect;
+    } else if (target.method->owner->is_interface()) {
+      target.kind = kInvokeInterface;
+    } else {
+      target.kind = kInvokeVirtual;
+    }
+  }
+
+  return target;
+}
+
+void unpack_method_type(Runtime& rt, Handle mh_handle, const MethodHandleTarget& target,
+                        std::vector<std::string>& out_params, std::string& out_ret) {
+  rt::Object& mh = rt.nonnull(mh_handle, "MethodHandle");
+  Handle mt_handle = kNull;
+  if (rt::Field* nom = find_field(mh.klass, "nominalType", "Ljava/lang/invoke/MethodType;")) {
+    mt_handle = Handle(mh.fields.at(nom->slot));
+  }
+  if (mt_handle == kNull) {
+    if (rt::Field* tf = find_field(mh.klass, "type", "Ljava/lang/invoke/MethodType;")) {
+      mt_handle = Handle(mh.fields.at(tf->slot));
+    }
+  }
+
+  if (mt_handle != kNull) {
+    rt::Object& mt = rt.nonnull(mt_handle, "MethodType");
+    rt::Field* rf = find_field(mt.klass, "rtype", "Ljava/lang/Class;");
+    rt::Field* pf = find_field(mt.klass, "ptypes", "[Ljava/lang/Class;");
+    if (!rf || !pf) rt.throw_new("Ljava/lang/InternalError;", "MethodType incomplet");
+
+    Handle rtype_h = Handle(mt.fields.at(rf->slot));
+    rt::Class* r_cls = rt.mirror_class(rtype_h);
+    out_ret = r_cls ? r_cls->descriptor : "V";
+
+    Handle ptypes_h = Handle(mt.fields.at(pf->slot));
+    rt::ArrayObject& arr = rt.array(ptypes_h, "MethodType.ptypes");
+    out_params.clear();
+    for (uint32_t i = 0; i < arr.length; ++i) {
+      Handle elem_h;
+      std::memcpy(&elem_h, &arr.data[size_t(i) * 4], 4);
+      rt::Class* p_cls = rt.mirror_class(elem_h);
+      out_params.push_back(p_cls ? p_cls->descriptor : "Ljava/lang/Object;");
+    }
+    return;
+  }
+
+  if (target.method) {
+    std::vector<std::string> m_params;
+    std::string m_ret;
+    dex::split_signature(target.method->signature, m_params, m_ret);
+    out_params.clear();
+    if (target.kind != kInvokeStatic) {
+      out_params.push_back(target.method->owner->descriptor);
+    }
+    for (const auto& p : m_params) {
+      out_params.push_back(p);
+    }
+    out_ret = m_ret;
+    return;
+  }
+
+  if (target.field) {
+    out_params.clear();
+    if (target.kind == kInstanceGet) {
+      out_params.push_back(target.field->owner->descriptor);
+      out_ret = target.field->type;
+    } else if (target.kind == kInstancePut) {
+      out_params.push_back(target.field->owner->descriptor);
+      out_params.push_back(target.field->type);
+      out_ret = "V";
+    } else if (target.kind == kStaticGet) {
+      out_ret = target.field->type;
+    } else if (target.kind == kStaticPut) {
+      out_params.push_back(target.field->type);
+      out_ret = "V";
+    }
+    return;
+  }
+
+  rt.throw_new("Ljava/lang/InternalError;", "MethodHandle sans type ni cible résolue");
+}
+
+uint64_t convert_arg_for_invoke(Runtime& rt, const std::string& src_t, const std::string& dst_t, uint64_t val) {
+  if (src_t == dst_t) return val;
+  char src_k = kind_of(src_t);
+  char dst_k = kind_of(dst_t);
+
+  if (src_k != 'L' && dst_k != 'L') {
+    if (!can_widen_primitive(src_k, dst_k)) {
+      wrong_type(rt, std::string("conversion numérique interdite de ") + src_k + " vers " + dst_k);
+    }
+    return widen_primitive_val(src_k, dst_k, val);
+  }
+
+  if (src_k != 'L' && dst_k == 'L') {
+    Handle boxed = box(rt, src_k, val);
+    rt::Class* dst_cls = rt.find_class(dst_t);
+    if (!rt.instance_of(boxed, dst_cls)) {
+      wrong_type(rt, "la valeur encapsulée n'est pas assignable à " + dst_t);
+    }
+    return boxed;
+  }
+
+  if (src_k == 'L' && dst_k != 'L') {
+    if (val == kNull) rt.throw_npe("déballage d'une référence nulle");
+    char unbox_t = 0;
+    uint64_t bits = 0;
+    if (!unbox(rt, Handle(val), unbox_t, bits)) {
+      wrong_type(rt, "objet non primitif fourni là où " + dst_t + " est attendu");
+    }
+    if (unbox_t == dst_k) return bits;
+    if (can_widen_primitive(unbox_t, dst_k)) return widen_primitive_val(unbox_t, dst_k, bits);
+    wrong_type(rt, std::string("type déballé ") + unbox_t + " incompatible avec " + dst_k);
+  }
+
+  if (src_k == 'L' && dst_k == 'L') {
+    if (val != kNull) {
+      rt::Class* dst_cls = rt.find_class(dst_t);
+      if (!rt.instance_of(Handle(val), dst_cls)) {
+        rt.throw_new("Ljava/lang/ClassCastException;",
+                     rt.class_of(Handle(val))->java_name() + " ne peut pas être converti en " + dst_cls->java_name());
+      }
+    }
+    return val;
+  }
+
+  return val;
+}
+
+uint64_t convert_return_for_invoke(Runtime& rt, const std::string& target_ret, const std::string& callsite_ret, uint64_t val) {
+  if (callsite_ret == "V") return 0;
+  if (target_ret == "V") return 0;
+  if (target_ret == callsite_ret) return val;
+
+  char tgt_k = kind_of(target_ret);
+  char cs_k = kind_of(callsite_ret);
+
+  if (tgt_k != 'L' && cs_k != 'L') {
+    return convert_primitive_return(tgt_k, cs_k, val);
+  }
+  if (tgt_k != 'L' && cs_k == 'L') {
+    Handle boxed = box(rt, tgt_k, val);
+    rt::Class* exp_cls = rt.find_class(callsite_ret);
+    if (!rt.instance_of(boxed, exp_cls)) {
+      rt.throw_new("Ljava/lang/ClassCastException;", "valeur de retour incompatible");
+    }
+    return boxed;
+  }
+  if (tgt_k == 'L' && cs_k != 'L') {
+    if (val == kNull) rt.throw_npe("déballage de retour nul");
+    char unbox_t = 0;
+    uint64_t bits = 0;
+    if (!unbox(rt, Handle(val), unbox_t, bits)) {
+      wrong_type(rt, "valeur de retour non déballable en " + callsite_ret);
+    }
+    return convert_primitive_return(unbox_t, cs_k, bits);
+  }
+  if (tgt_k == 'L' && cs_k == 'L') {
+    if (val != kNull) {
+      rt::Class* exp_cls = rt.find_class(callsite_ret);
+      if (!rt.instance_of(Handle(val), exp_cls)) {
+        rt.throw_new("Ljava/lang/ClassCastException;",
+                     rt.class_of(Handle(val))->java_name() + " incompatible avec le retour attendu " + exp_cls->java_name());
+      }
+    }
+    return val;
+  }
+
+  return val;
+}
+
+uint64_t dispatch_target(Runtime& rt, const MethodHandleTarget& target, const uint32_t* arg_words, uint32_t nwords) {
+  if (target.method) {
+    rt::Method* m = target.method;
+    switch (target.kind) {
+      case kInvokeStatic:
+        rt.ensure_initialized(m->owner);
+        return rt.invoke(m, arg_words, nwords);
+
+      case kInvokeDirect:
+      case kInvokeSuper: {
+        if (nwords == 0 || arg_words[0] == kNull) rt.throw_npe("receveur MethodHandle");
+        return rt.invoke(m, arg_words, nwords);
+      }
+
+      case kInvokeVirtual:
+      case kInvokeInterface: {
+        if (nwords == 0 || arg_words[0] == kNull) rt.throw_npe("receveur MethodHandle");
+        rt::Object* recv = rt.object(arg_words[0]);
+        rt::Method* resolved = rt.resolve_virtual(recv->klass, m->name, m->signature);
+        if (!resolved) rt.throw_new("Ljava/lang/NoSuchMethodError;", recv->klass->java_name() + "." + m->name);
+        return rt.invoke(resolved, arg_words, nwords);
+      }
+
+      default:
+        return rt.invoke(m, arg_words, nwords);
+    }
+  }
+
+  if (target.field) {
+    rt::Field* f = target.field;
+    char ft = kind_of(f->type);
+    bool wide = f->wide();
+
+    switch (target.kind) {
+      case kStaticGet: {
+        rt.ensure_initialized(f->owner);
+        uint32_t* slot = &f->owner->statics.at(f->slot);
+        return wide ? uint64_t(slot[0]) | (uint64_t(slot[1]) << 32) : canonical(ft, slot[0]);
+      }
+      case kStaticPut: {
+        rt.ensure_initialized(f->owner);
+        uint32_t* slot = &f->owner->statics.at(f->slot);
+        slot[0] = arg_words[0];
+        if (wide) slot[1] = arg_words[1];
+        return 0;
+      }
+      case kInstanceGet: {
+        if (nwords == 0 || arg_words[0] == kNull) rt.throw_npe("receveur MethodHandle");
+        rt::Object& recv = rt.nonnull(arg_words[0], "receveur de champ");
+        uint32_t* slot = &recv.fields.at(f->slot);
+        return wide ? uint64_t(slot[0]) | (uint64_t(slot[1]) << 32) : canonical(ft, slot[0]);
+      }
+      case kInstancePut: {
+        if (nwords == 0 || arg_words[0] == kNull) rt.throw_npe("receveur MethodHandle");
+        rt::Object& recv = rt.nonnull(arg_words[0], "receveur de champ");
+        uint32_t* slot = &recv.fields.at(f->slot);
+        slot[0] = arg_words[1];
+        if (wide) slot[1] = arg_words[2];
+        return 0;
+      }
+      default: break;
+    }
+  }
+
+  rt.throw_unsupported("MethodHandle", "cible du MethodHandle non résolue");
+}
+
+uint64_t methodhandle_invoke(Runtime& rt, const std::string& name, const std::string& callsite,
+                             const uint32_t* args, uint32_t count) {
+  if (name != "invokeExact" && name != "invoke") {
+    rt.throw_new("Ljava/lang/NoSuchMethodError;", "MethodHandle." + name);
+  }
+  const bool exact = (name == "invokeExact");
+
+  std::vector<std::string> callsite_params;
+  std::string callsite_ret;
+  if (!dex::split_signature(callsite, callsite_params, callsite_ret)) {
+    wrong_type(rt, "prototype de site d'appel invalide : " + callsite);
+  }
+
+  Handle mh_handle = args[0];
+  MethodHandleTarget target = resolve_mh_target(rt, mh_handle);
+  std::vector<std::string> target_params;
+  std::string target_ret;
+  unpack_method_type(rt, mh_handle, target, target_params, target_ret);
+
+  if (exact) {
+    if (callsite_params.size() != target_params.size()) {
+      wrong_type(rt, "invokeExact : nombre d'arguments différent du type cible");
+    }
+    for (size_t i = 0; i < callsite_params.size(); ++i) {
+      if (callsite_params[i] != target_params[i]) {
+        wrong_type(rt, "invokeExact : type d'argument " + std::to_string(i) + " (" + callsite_params[i] +
+                           ") ne correspond pas exactement à " + target_params[i]);
+      }
+    }
+    if (callsite_ret != target_ret) {
+      wrong_type(rt, "invokeExact : type de retour " + callsite_ret + " ne correspond pas à " + target_ret);
+    }
+    return dispatch_target(rt, target, args + 1, count - 1);
+  }
+
+  if (callsite_params.size() != target_params.size()) {
+    wrong_type(rt, "invoke : arité incompatible. Attendu " + std::to_string(target_params.size()) +
+                       ", reçu " + std::to_string(callsite_params.size()));
+  }
+
+  std::vector<uint64_t> raw_callsite_vals;
+  uint32_t w = 1;
+  for (const auto& p : callsite_params) {
+    bool wide = p == "J" || p == "D";
+    if (w + (wide ? 2 : 1) > count) wrong_type(rt, "arguments insuffisants dans le cadre");
+    raw_callsite_vals.push_back(wide ? uint64_t(args[w]) | (uint64_t(args[w + 1]) << 32) : args[w]);
+    w += wide ? 2 : 1;
+  }
+
+  std::vector<uint64_t> converted_vals;
+  for (size_t i = 0; i < callsite_params.size(); ++i) {
+    converted_vals.push_back(convert_arg_for_invoke(rt, callsite_params[i], target_params[i], raw_callsite_vals[i]));
+  }
+
+  std::vector<uint32_t> target_words;
+  for (size_t i = 0; i < target_params.size(); ++i) {
+    bool wide = target_params[i] == "J" || target_params[i] == "D";
+    target_words.push_back(uint32_t(converted_vals[i]));
+    if (wide) target_words.push_back(uint32_t(converted_vals[i] >> 32));
+  }
+
+  uint64_t raw_result = dispatch_target(rt, target, target_words.data(), uint32_t(target_words.size()));
+  return convert_return_for_invoke(rt, target_ret, callsite_ret, raw_result);
+}
+
 void register_invoke(rt::NativeRegistry& r) {
   r.set_polymorphic_handler([](Runtime& rt, rt::Class* declared, const std::string& name, const std::string& callsite,
                                const uint32_t* args, uint32_t count) -> uint64_t {
     for (rt::Class* c = declared; c; c = c->super) {
       if (c->descriptor == "Ljava/lang/invoke/VarHandle;") return varhandle_access(rt, name, callsite, args, count);
+      if (c->descriptor == "Ljava/lang/invoke/MethodHandle;") return methodhandle_invoke(rt, name, callsite, args, count);
     }
     rt.throw_unsupported(declared->descriptor + "->" + name + callsite,
-                         "MethodHandle.invoke/invokeExact pas encore pris en charge (VarHandle uniquement)");
+                         "invoke-polymorphic non pris en charge sur " + declared->java_name());
   });
 }
 

@@ -712,6 +712,7 @@ void register_throwables(NativeRegistry& r) {
       {"Ljava/lang/NumberFormatException;", "Ljava/lang/IllegalArgumentException;"},
       {"Ljava/lang/IllegalStateException;", "Ljava/lang/RuntimeException;"},
       {"Ljava/lang/UnsupportedOperationException;", "Ljava/lang/RuntimeException;"},
+      {"Ljava/lang/invoke/WrongMethodTypeException;", "Ljava/lang/RuntimeException;"},
       {"Ljava/lang/SecurityException;", "Ljava/lang/RuntimeException;"},
       {"Ljava/util/NoSuchElementException;", "Ljava/lang/RuntimeException;"},
       {"Ljava/util/ConcurrentModificationException;", "Ljava/lang/RuntimeException;"},

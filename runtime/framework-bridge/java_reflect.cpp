@@ -39,6 +39,11 @@ Handle make_method_object(Runtime& rt, rt::Method* m) {
   auto p = std::make_unique<MethodPeer>();
   p->method = m;
   rt.object(h)->peer = std::move(p);
+  if (rt::Field* f = find_field(rt.object(h)->klass, "artMethod", "J")) {
+    uint64_t cookie = rt.method_cookie(m);
+    rt.object(h)->fields.at(f->slot) = uint32_t(cookie);
+    rt.object(h)->fields.at(f->slot + 1) = uint32_t(cookie >> 32);
+  }
   return h;
 }
 
@@ -519,6 +524,9 @@ void register_members(rt::NativeRegistry& r) {
     b.method("getModifiers", "()I", [](Runtime& rt, NativeArgs& a) -> uint64_t { return rt::ret_int(method_modifiers(method_of(rt, a.h(0)))); });
     b.method("getDeclaringClass", "()Ljava/lang/Class;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
       return rt.class_mirror(method_of(rt, a.h(0))->owner);
+    });
+    b.method("getArtMethod", "()J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      return rt.method_cookie(method_of(rt, a.h(0)));
     });
     b.method("getParameterTypes", "()[Ljava/lang/Class;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
       std::vector<Handle> objs;

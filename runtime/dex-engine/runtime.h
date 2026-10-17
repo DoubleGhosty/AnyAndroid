@@ -507,6 +507,8 @@ class Runtime {
   // Java objects (ART's Field.getArtField(), VarHandle): never raw pointers.
   uint64_t field_cookie(Field* f);
   Field* field_from_cookie(uint64_t cookie);
+  uint64_t method_cookie(Method* m);
+  Method* method_from_cookie(uint64_t cookie);
 
   // --- Threads and monitors ---------------------------------------------------
   VmThread* current_thread() const { return running_; }
@@ -667,6 +669,8 @@ class Runtime {
   bool boot_mode_ = false;
   std::vector<Field*> field_cookies_;
   std::unordered_map<Field*, uint64_t> field_cookie_of_;
+  std::vector<Method*> method_cookies_;
+  std::unordered_map<Method*, uint64_t> method_cookie_of_;
   std::set<std::string> unsupported_;
   std::set<std::string> stubs_used_;
   std::vector<std::string> phantoms_;
