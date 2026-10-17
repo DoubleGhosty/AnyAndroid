@@ -2,7 +2,7 @@
   "metadata": {
     "project": "AnyAndroid for Windows",
     "version": "0.1.0",
-    "generated_at": "2026-10-17T21:38:57.964859+00:00",
+    "generated_at": "2026-10-17T21:40:10.338046+00:00",
     "target": "Android natif sur Windows (sans VM ni hyperviseur)"
   },
   "summary": {
@@ -60,11 +60,11 @@
       {
         "id": "G4",
         "name": "Couche native ELF (bibliothèques `.so` des applications)",
-        "description": "**En cours** / À faire : architecture chargeur ELF x86_64, bionic isolée et JNI",
+        "description": "**En cours** / À faire : architecture chargeur ELF x86_64, bionic isolée et JNI (ADR-009)",
         "progress": 0,
         "weight": 25,
-        "status": "**En cours** / À faire : architecture chargeur ELF x86_64, bionic isolée et JNI",
-        "adr": "ADR-002",
+        "status": "**En cours** / À faire : architecture chargeur ELF x86_64, bionic isolée et JNI (ADR-009)",
+        "adr": "ADR-009",
         "state": "pending"
       },
       {

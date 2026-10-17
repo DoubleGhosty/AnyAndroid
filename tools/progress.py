@@ -58,7 +58,7 @@ def parse_milestones():
     content = STATUS_FILE.read_text(encoding="utf-8")
     items = []
 
-    adr_map = {"G0": "ADR-002", "G1": "ADR-003", "G2": "ADR-004", "G3": "ADR-006", "G4": "ADR-002", "G5": "ADR-002"}
+    adr_map = {"G0": "ADR-002", "G1": "ADR-003", "G2": "ADR-004", "G3": "ADR-006", "G4": "ADR-009", "G5": "ADR-002"}
     # Extraire les lignes du tableau : | G0 | Contenu | Avancement % | État |
     row_re = re.compile(r"^\|\s*(G\d)\s*\|\s*([^|]+)\|\s*(\d+)\s*%\s*\|\s*([^|]+)\|", re.M)
     for m in row_re.finditer(content):
