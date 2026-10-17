@@ -2,11 +2,11 @@
   "metadata": {
     "project": "AnyAndroid for Windows",
     "version": "0.1.0",
-    "generated_at": "2026-10-17T19:43:41.653808+00:00",
+    "generated_at": "2026-10-17T20:18:16.363769+00:00",
     "target": "Android natif sur Windows (sans VM ni hyperviseur)"
   },
   "summary": {
-    "overall_percent": 48.0,
+    "overall_percent": 49.0,
     "bridge_percent": 88.0,
     "libcore_percent": 47.2,
     "dalvik_percent": 99.6,
@@ -50,10 +50,10 @@
       {
         "id": "G3",
         "name": "Vrai `framework.jar` et une application AOSP affichée",
-        "description": "**En cours** : plan de l'ADR-006, J0-J2 et J4 faits, J5 atteint (démarrage par les vrais gestionnaires jusqu'à la première image), J6 (texte) bien avancé, J7 : la fenêtre est dessinée par le Skia d'AOSP, J8 atteint (fenêtre Win32 et pipeline d'entrées)",
-        "progress": 80,
+        "description": "**En cours** : plan de l'ADR-006, J0-J2 et J4 faits, J5 atteint (démarrage par les vrais gestionnaires jusqu'à la première image), J6 (texte) bien avancé, J7 terminé (moteur 2D logiciel Skia, rotations 3D, drawGlyphs, AGSL RuntimeShader/RuntimeColorFilter), J8 atteint (fenêtre Win32 et pipeline d'entrées)",
+        "progress": 82,
         "weight": 35,
-        "status": "**En cours** : plan de l'ADR-006, J0-J2 et J4 faits, J5 atteint (démarrage par les vrais gestionnaires jusqu'à la première image), J6 (texte) bien avancé, J7 : la fenêtre est dessinée par le Skia d'AOSP, J8 atteint (fenêtre Win32 et pipeline d'entrées)",
+        "status": "**En cours** : plan de l'ADR-006, J0-J2 et J4 faits, J5 atteint (démarrage par les vrais gestionnaires jusqu'à la première image), J6 (texte) bien avancé, J7 terminé (moteur 2D logiciel Skia, rotations 3D, drawGlyphs, AGSL RuntimeShader/RuntimeColorFilter), J8 atteint (fenêtre Win32 et pipeline d'entrées)",
         "adr": "ADR-006",
         "state": "in_progress"
       },
@@ -78,7 +78,7 @@
         "state": "pending"
       }
     ],
-    "overall_percent": 48.0
+    "overall_percent": 49.0
   },
   "bridge": {
     "classes": {
@@ -11138,7 +11138,7 @@
     "total_suites": 37,
     "passed_suites": 34,
     "optional_suites": 3,
-    "unit_tests": 181,
+    "unit_tests": 185,
     "e2e_suites": 33,
     "fuzz_suites": 3,
     "percent_core": 100.0,
