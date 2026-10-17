@@ -38,6 +38,12 @@ class FrameWindow {
   // it, the window is destroyed.
   void set_on_close(std::function<void()> fn);
 
+  using TouchCallback = std::function<void(int32_t action, float x, float y, int64_t down_time, int64_t event_time)>;
+  using KeyCallback = std::function<void(int32_t device_id, int32_t key_code, int32_t meta_state, bool down, int64_t time)>;
+
+  void set_on_touch(TouchCallback fn);
+  void set_on_key(KeyCallback fn);
+
  private:
   static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
   LRESULT handle(UINT msg, WPARAM wp, LPARAM lp);
@@ -51,6 +57,11 @@ class FrameWindow {
   bool ready_ = false;
   HWND hwnd_ = nullptr;
   std::function<void()> on_close_;
+  TouchCallback on_touch_;
+  KeyCallback on_key_;
+  bool touching_ = false;
+  float last_x_ = 0.0f, last_y_ = 0.0f;
+  int64_t down_time_ = 0;
   // The frame shown, BGRA for GDI.
   int32_t frame_width_ = 0, frame_height_ = 0;
   std::vector<uint32_t> bgra_;

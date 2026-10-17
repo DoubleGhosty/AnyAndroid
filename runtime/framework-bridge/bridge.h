@@ -146,6 +146,12 @@ bool decode_png_pixels(const uint8_t* data, size_t size, DecodedPng& out);
 // Opaque sun.misc.Unsafe offset of an instance field slot (Field.getOffset()).
 int64_t unsafe_field_offset(uint32_t slot);
 
+// Window input delivery (J8): touch and keyboard events dispatched to the
+// active window's InputEventReceiver on its Looper.
+void set_active_runtime(rt::Runtime* rt);
+bool post_window_touch(int32_t action, float x, float y, int64_t down_time, int64_t event_time);
+bool post_window_key(int32_t device_id, int32_t key_code, int32_t meta_state, bool down, int64_t time);
+
 // Helpers shared with the lifecycle module.
 ActivityPeer* activity_peer(rt::Runtime& rt, rt::Handle activity);
 ViewPeer* view_peer(rt::Runtime& rt, rt::Handle view);

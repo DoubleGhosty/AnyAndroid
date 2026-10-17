@@ -2,7 +2,7 @@
 
 Ce document est le prompt complet à donner à un agent IA qui poursuit le développement
 **sans supervision**. Tout ce qui suit lui est adressé. Il est tenu à jour au fil des jalons
-(dernière mise à jour : 2026-10-16, jalon J4 atteint).
+(dernière mise à jour : 2026-10-17, jalon J8 atteint).
 
 ---
 
@@ -110,10 +110,10 @@ Architecture (ADR-001, ADR-003) :
 
 Étapes (ADR-002) : G0 socle, G1 runtime Dalvik, G2 libcore AOSP, **G3 vrai framework (en cours)**,
 G4 code natif (chargeur ELF + bionic), G5 microG puis GApps. Le plan de G3 (ADR-006) : J0-J2
-outillage et chargeurs (faits), J3 services système v1 (en cours), **J4 démarrage direct jusqu'à
-`onResume` (fait le 2026-10-16)**, J5 démarrage par les vrais gestionnaires d'`ActivityThread`,
-J6 texte, J7 rendu logiciel, J8 fenêtre Win32 et entrées, J9-J10 navigation et une vraie
-application affichée.
+outillage et chargeurs (faits), J3 services système v1 (en cours), J4 démarrage direct jusqu'à
+`onResume` (fait), J5 démarrage par les vrais gestionnaires d'`ActivityThread` (fait),
+J6 texte (bien avancé), J7 rendu logiciel (fait), **J8 fenêtre Win32 et entrées (fait le 2026-10-17)**,
+J9-J10 navigation et une vraie application affichée.
 
 ## 5. Mettre en place l'environnement
 
@@ -205,9 +205,15 @@ Fait et vérifié (voir STATUS.md pour le détail) :
 - **G3/J4 (fait)** : `aa.host.Launcher` crée l'`Application` puis `MainActivity` de
   `samples/basic-activity` ; `onCreate` (vues, `setContentView`, décor, `Toolbar`, icône
   adaptative), `onStart`, `onResume`, « activité au premier plan ». Test `e2e-launch`.
+- **G3/J5 (fait)** : démarrage par les vrais gestionnaires (`ProcessLauncher` et `ActivityThread`),
+  `ClientTransaction`, traversée de `ViewRootImpl` et publication de la première image.
+- **G3/J7 (fait)** : moteur 2D logiciel avec `SkiaCanvas` HWUI sur Skia AOSP et dessin dans la surface.
+- **G3/J8 (fait)** : affichage dans une fenêtre Win32 (`exec --window`), service `input`,
+  natives `KeyCharacterMap`, `KeyEvent`, `MotionEvent` (portage libinput 52 natives), `InputChannel`,
+  `InputEventReceiver` et boucle d'événements Win32 réveillant le Looper Android.
 - Natives graphiques fidèles à HWUI/Skia : `Paint`, `RenderNode` (magasins de propriétés),
   `Path` (modèle `SkPath`, `approximate`), `PathParser` (SVG, arcs en coniques), `Matrix`
-  (`SkMatrix`), `Canvas` (état sans pixels : pile, matrice, découpe), `Region` (`SkRegion`),
+  (`SkMatrix`), `Canvas` (Skia AOSP), `Region` (`SkRegion`),
   `VectorDrawable` (arbre), `Font`/`FontFamily`/`Typeface` (minikin), images (PNG, 9-patch,
   `Bitmap`, `ImageDecoder`).
 - Correctifs de fond récents : horloge monotone unique et **attentes précises** (minuteur haute
@@ -218,34 +224,26 @@ Fait et vérifié (voir STATUS.md pour le détail) :
 Étiquettes de `HandleTable` déjà prises (uniques, vérifiées par `check_handle_kinds.cmake`) :
 0x1101 ColorSpace, 0x1102 RenderNode, 0x1103 Paint, 0x1104-0x1108 polices, 0x1109 Path,
 0x110A Matrix, 0x110B Bitmap, 0x110C NinePatch, 0x110D ImageDecoder, 0x110E PathParser.PathData,
-0x110F Canvas, 0x1110 Region, 0x1111 RegionIterator, 0x1112 VectorDrawable. **Suivante : 0x1113.**
+0x110F Canvas, 0x1110 Region, 0x1111 RegionIterator, 0x1112 VectorDrawable, 0x1113 String,
+0x1114 Layer, 0x1115 Transaction, 0x1116 Receiver, 0x1117 Channel, 0x1118 InputReceiver,
+0x1119 Setter, 0x111A Builder, 0x111B Measured, 0x111C LineBreakerConfig, 0x111D LineBreakResult,
+0x111E BufferQueue, 0x111F NativeSurface, 0x1120 Fence, 0x1124 MaskFilter, 0x1125 PathEffect,
+0x1126 KeyCharacterMap, 0x1127 MotionEvent. **Suivante : 0x1128.**
 
 ## 9. Prochaines étapes, dans l'ordre
 
-1. **J3, reste** : `DisplayService.getOverlaySupport` (natives d'`OverlayProperties`) quand un
-   appelant en aura besoin ; chaque nouvelle méthode « (non implémentée) » de la trace se traite
-   avec les valeurs de l'AOSP. (Faits : accessibilité, gamme de couleurs, `checkPermissionForDevice`,
-   réglages persistés dans `/data/system`, `ANDROID_ID` aléatoire stable.)
-2. **J5 : démarrage par les vrais gestionnaires** (ADR-006) : passer de `Launcher` à
-   `ActivityThread.handleBindApplication` … `handleLaunchActivity`/`handleResumeActivity` par des
-   `ClientTransaction` (`LaunchActivityItem`, `ResumeActivityItem`) exécutées sur le vrai
-   `Looper` du thread principal ; fenêtre logique (`IWindowSession.addToDisplayAsUser`,
-   `relayout` calculé par `WindowLayout`), `ViewRootImpl` jusqu'à la première traversée
-   (`performTraversals` : mesure et mise en page). Prévoir un mode de test déterministe fondé
-   sur l'horloge commune (`common/clock.h`) — l'ancien pilote `looper_driver.cpp` était faux et
-   a été retiré.
-3. **J6 : texte** : mesure et mise en forme (minikin : `MeasuredText`, `LineBreaker`), puis
-   choisir le moteur de mise en forme (HarfBuzz ou équivalent) par un ADR.
-4. **J7 : rendu logiciel** : un ADR-007 choisit le moteur 2D (rasteriseur maison fidèle à Skia,
-   portage d'un moteur existant…). Puis les natives de dessin de `BaseCanvas`/`RecordingCanvas`,
-   `drawSoftware` du vrai `ViewRootImpl`, `Region.setPath`, `VectorDrawable.nDraw`.
-5. **J8 : fenêtre Win32 et entrées** ; **J9-J10** : navigation, puis une vraie application de
-   la GSI affichée et utilisable (l'ADR-006 vise `Music`).
-6. **G4 : code natif** : chargeur ELF et bionic. L'[évaluation d'ANDROWIN](evaluations/ANDROWIN.md)
+1. **J7, fin** : `RuntimeShader` et `RuntimeColorFilter` (AGSL, utilisés par les ondulations de
+   Material), `drawGlyphs` et les rotations 3D de `RenderNode`.
+2. **J6, fin** : `TextRunShaper`/`PositionedGlyphs`, motifs de césure. Le pilotage déterministe des
+   tests est à concevoir sur l'horloge commune (`common/clock.h`).
+3. **J9-J10 : navigation et vraie application AOSP affichée** : navigation entre activités, cycle
+   de vie complet, compositeur minimal pour couches multiples (dialogues, menus) et démonstration
+   avec une application AOSP (comme `Music`).
+4. **G4 : code natif** : chargeur ELF et bionic. L'[évaluation d'ANDROWIN](evaluations/ANDROWIN.md)
    décrit ntdroid (ART réel dans un processus Windows par interception d'appels système) : c'est
    la référence pour un **processus hôte isolé** dédié au code natif ; l'option « ART réel à la
    place de notre interpréteur » est archivée.
-7. **G5 : microG** (démarrer GmsCore avec nos services : comptes, `GoogleApiAvailability`), puis
+5. **G5 : microG** (démarrer GmsCore avec nos services : comptes, `GoogleApiAvailability`), puis
    les GApps dans les limites du §2.1.
 
 ## 10. Savoir-faire technique

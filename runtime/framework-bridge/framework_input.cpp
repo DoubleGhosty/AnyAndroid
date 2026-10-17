@@ -104,21 +104,25 @@ int32_t next_event_id() {
   return int32_t((3u << 30) | (counter.fetch_add(1) & 0x3FFFFFFFu));
 }
 
+}  // namespace
+
 // android_view_KeyEvent_obtainAsCopy: KeyEvent.obtain(id, downTime, eventTime,
 // action, code, repeat, metaState, deviceId, scanCode, flags, source,
 // displayId, hmac, characters), times in nanoseconds.
-Handle obtain_key_event(Runtime& rt, int32_t device_id, int32_t key_code, int32_t meta_state, bool down,
-                        int64_t time) {
+rt::Handle obtain_key_event(rt::Runtime& rt, int32_t device_id, int32_t key_code, int32_t meta_state, bool down,
+                            int64_t time) {
   constexpr int32_t kSourceKeyboard = 0x101, kInvalidDisplay = -1;
-  Handle hmac = rt.new_array("[B", 32);  // INVALID_HMAC
+  rt::Handle hmac = rt.new_array("[B", 32);  // INVALID_HMAC
   rt::GlobalRef keep(rt, hmac);
   uint32_t t_lo = uint32_t(uint64_t(time)), t_hi = uint32_t(uint64_t(time) >> 32);
-  return Handle(rt.call_static("Landroid/view/KeyEvent;", "obtain",
-                               "(IJJIIIIIIIII[BLjava/lang/String;)Landroid/view/KeyEvent;",
-                               {uint32_t(next_event_id()), t_lo, t_hi, t_lo, t_hi, uint32_t(down ? 0 : 1),
-                                uint32_t(key_code), 0, uint32_t(meta_state), uint32_t(device_id), 0, 0,
-                                uint32_t(kSourceKeyboard), uint32_t(kInvalidDisplay), hmac, kNull}));
+  return rt::Handle(rt.call_static("Landroid/view/KeyEvent;", "obtain",
+                                   "(IJJIIIIIIIII[BLjava/lang/String;)Landroid/view/KeyEvent;",
+                                   {uint32_t(next_event_id()), t_lo, t_hi, t_lo, t_hi, uint32_t(down ? 0 : 1),
+                                    uint32_t(key_code), 0, uint32_t(meta_state), uint32_t(device_id), 0, 0,
+                                    uint32_t(kSourceKeyboard), uint32_t(kInvalidDisplay), hmac, rt::kNull}));
 }
+
+namespace {
 
 void set_int_field(Runtime& rt, Handle obj, const char* name, int32_t v) {
   rt::Object& o = rt.nonnull(obj, name);

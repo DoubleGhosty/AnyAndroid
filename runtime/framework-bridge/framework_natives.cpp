@@ -218,6 +218,7 @@ struct NativeTimer {
 };
 
 struct NativeQueue {
+  std::mutex lock;
   Handle poller = kNull;  // java.lang.Thread blocked in nativePollOnce
   bool polling = false;
   bool woken = false;  // wake requested before or during the poll
@@ -241,12 +242,15 @@ NativeQueue& queue(Runtime& rt, int64_t ptr) {
 bool run_due_timers(Runtime& rt, NativeQueue& q) {
   std::vector<NativeTimer> due;
   int64_t now = monotonic_nanos();
-  for (auto it = q.timers.begin(); it != q.timers.end();) {
-    if (it->deadline <= now) {
-      due.push_back(std::move(*it));
-      it = q.timers.erase(it);
-    } else {
-      ++it;
+  {
+    std::lock_guard<std::mutex> guard(q.lock);
+    for (auto it = q.timers.begin(); it != q.timers.end();) {
+      if (it->deadline <= now) {
+        due.push_back(std::move(*it));
+        it = q.timers.erase(it);
+      } else {
+        ++it;
+      }
     }
   }
   std::stable_sort(due.begin(), due.end(), [](const auto& a, const auto& b) { return a.deadline < b.deadline; });
@@ -254,7 +258,8 @@ bool run_due_timers(Runtime& rt, NativeQueue& q) {
   return !due.empty();
 }
 
-int64_t next_timer(const NativeQueue& q) {
+int64_t next_timer(NativeQueue& q) {
+  std::lock_guard<std::mutex> guard(q.lock);
   int64_t next = INT64_MAX;
   for (const auto& t : q.timers) next = std::min(next, t.deadline);
   return next;
@@ -264,8 +269,15 @@ int64_t next_timer(const NativeQueue& q) {
 
 void post_queue_callback(rt::Runtime& rt, int64_t queue_ptr, int64_t deadline, std::function<void(rt::Runtime&)> fn) {
   NativeQueue& q = queue(rt, queue_ptr);
-  q.timers.push_back({deadline, std::move(fn)});
-  if (q.polling && q.poller != kNull) rt.unpark(q.poller);  // to wait for the new deadline
+  Handle poller = kNull;
+  bool polling = false;
+  {
+    std::lock_guard<std::mutex> guard(q.lock);
+    q.timers.push_back({deadline, std::move(fn)});
+    polling = q.polling;
+    poller = q.poller;
+  }
+  if (polling && poller != kNull) rt.unpark(poller);  // to wait for the new deadline
 }
 
 namespace {
@@ -289,8 +301,13 @@ void register_message_queue(rt::NativeRegistry& r) {
     int32_t timeout = a.i32(3);
     {
       NativeQueue& q = queue(rt, ptr);
-      if (q.woken) {
-        q.woken = false;
+      bool was_woken = false;
+      {
+        std::lock_guard<std::mutex> guard(q.lock);
+        was_woken = q.woken;
+        if (was_woken) q.woken = false;
+      }
+      if (was_woken) {
         run_due_timers(rt, q);
         return 0;
       }
@@ -305,13 +322,21 @@ void register_message_queue(rt::NativeRegistry& r) {
         run_due_timers(rt, q);
         break;
       }
-      q.poller = rt.current_thread_peer();
-      q.polling = true;
+      {
+        std::lock_guard<std::mutex> guard(q.lock);
+        q.poller = rt.current_thread_peer();
+        q.polling = true;
+      }
       rt.park_current(false, remaining);  // relative nanoseconds, 0 = until unparked
       NativeQueue& after = queue(rt, ptr);
-      after.polling = false;
-      if (after.woken) {
-        after.woken = false;
+      bool after_woken = false;
+      {
+        std::lock_guard<std::mutex> guard(after.lock);
+        after.polling = false;
+        after_woken = after.woken;
+        if (after_woken) after.woken = false;
+      }
+      if (after_woken) {
         run_due_timers(rt, after);
         break;
       }
@@ -321,12 +346,21 @@ void register_message_queue(rt::NativeRegistry& r) {
   }, S::kPartial, "rappels natifs à échéance (vsync), pas de descripteurs surveillés");
   r.bind(mq, "nativeWake", "(J)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     NativeQueue& q = queue(rt, a.i64(0));
-    q.woken = true;
-    if (q.polling && q.poller != kNull) rt.unpark(q.poller);
+    Handle poller = kNull;
+    bool polling = false;
+    {
+      std::lock_guard<std::mutex> guard(q.lock);
+      q.woken = true;
+      polling = q.polling;
+      poller = q.poller;
+    }
+    if (polling && poller != kNull) rt.unpark(poller);
     return 0;
   });
   r.bind(mq, "nativeIsPolling", "(J)Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    return rt::ret_bool(queue(rt, a.i64(0)).polling);
+    NativeQueue& q = queue(rt, a.i64(0));
+    std::lock_guard<std::mutex> guard(q.lock);
+    return rt::ret_bool(q.polling);
   });
   r.bind(mq, "nativeSetFileDescriptorEvents", "(JII)V", [](Runtime& rt, NativeArgs&) -> uint64_t {
     rt.throw_unsupported("Landroid/os/MessageQueue;->nativeSetFileDescriptorEvents(JII)V",

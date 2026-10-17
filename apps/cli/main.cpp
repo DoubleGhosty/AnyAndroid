@@ -603,6 +603,13 @@ int cmd_exec(const Args& a) {
       std::fflush(nullptr);
       ExitProcess(0);
     });
+    bridge::set_active_runtime(&runtime);
+    screen->set_on_touch([](int32_t action, float x, float y, int64_t down_time, int64_t event_time) {
+      bridge::post_window_touch(action, x, y, down_time, event_time);
+    });
+    screen->set_on_key([](int32_t device_id, int32_t key_code, int32_t meta_state, bool down, int64_t time) {
+      bridge::post_window_key(device_id, key_code, meta_state, down, time);
+    });
   }
   if (a.has("--frame-out") || screen) {
     fs::path frame_path = a.has("--frame-out") ? path_from_utf8(a.get("--frame-out")) : fs::path();
