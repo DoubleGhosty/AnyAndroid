@@ -106,7 +106,9 @@ public final class ProcessLauncher implements ActivityService.AttachHandler {
         0, false, false, false, false,  // debug mode, binder tracking, allocations, backup, persistent
         configuration(), compat, null, new Bundle(), "unknown",  // services, core settings, serial
         // Autofill, content capture, then the compat changes: system_server only sends the ones
-        // that differ from the preloaded rules (overrides, none here), and none to log.
+        // that differ from the preloaded rules, that is overrides (none here) and the changes
+        // of the APEX modules' compat configs, which zygote does not preload and this host does
+        // not read (they stay enabled); none to log.
         null, null, new long[0], new long[0], new long[0], false,
         null, sharedMemoryFd, 0L, 0L);  // font map: the preinstalled one is loaded
   }

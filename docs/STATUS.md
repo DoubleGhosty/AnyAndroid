@@ -313,6 +313,11 @@ natives de `KeyCharacterMap` et `KeyEvent` sont branchées.
 - le lanceur direct `aa.host.Launcher` (J4) n'installe pas `AppCompatCallbacks` comme
   `handleBindApplication` : tous les changements de compatibilité y restent actifs, quelle que
   soit la version cible (`ProcessLauncher`, J5, suit les règles préchargées) ;
+- les règles préchargées ne couvrent que `/system/etc/compatconfig` et
+  `/system/system_ext/etc/compatconfig`, comme celles de zygote. Les changements déclarés par les
+  modules APEX (par exemple ceux de la libcore dans `com.android.art`) ne sont pas lus : le
+  `system_server` d'Android les enverrait désactivés à `bindApplication` selon la version cible,
+  ici ils restent actifs ;
 - la trace `--trace-services` ne liste que les appels du framework aux objets `Binder` de
   l'hôte ; une méthode non implémentée y apparaît avec « (non implémentée) » et renvoie une
   valeur neutre ;
