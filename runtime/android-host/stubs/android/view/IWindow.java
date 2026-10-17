@@ -1,3 +1,5 @@
 package android.view;
 
-public interface IWindow {}
+import android.os.IInterface;
+
+public interface IWindow extends IInterface {}

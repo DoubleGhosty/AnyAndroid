@@ -1,6 +1,7 @@
 package android.view;
 
 import android.os.Binder;
+import android.os.IBinder;
 
 public interface IWindowSession {
   abstract class Stub extends Binder implements IWindowSession {
@@ -21,5 +22,5 @@ public interface IWindowSession {
   void relayoutAsync(IWindow window, WindowManager.LayoutParams attrs, int requestedWidth, int requestedHeight,
       int viewVisibility, int flags, int seq, int lastSyncSeqId, SurfaceControl outSurfaceControl);
 
-  void remove(IWindow window);
+  void remove(IBinder clientToken);
 }

@@ -23,7 +23,8 @@ public interface IActivityClientController {
 
   void activityPaused(IBinder token);
 
-  void activityStopped(IBinder token, Bundle state, PersistableBundle persistentState, CharSequence description);
+  void activityStopped(IBinder token, Bundle state, PersistableBundle persistentState,
+      HandoffActivityData handoffActivityData, CharSequence description);
 
   void activityDestroyed(IBinder token);
 

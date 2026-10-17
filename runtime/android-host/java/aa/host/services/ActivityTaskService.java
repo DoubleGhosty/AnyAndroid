@@ -2,6 +2,7 @@ package aa.host.services;
 
 import aa.host.Reflect;
 import android.app.ActivityManager;
+import android.app.HandoffActivityData;
 import android.app.IActivityClientController;
 import android.app.IActivityTaskManager;
 import android.app.IApplicationThread;
@@ -73,16 +74,19 @@ public final class ActivityTaskService extends IActivityTaskManager.Stub {
     return client;
   }
 
-  /** Pushes the initial activity token created by the launcher onto the stack. */
-  public synchronized void recordInitialActivity(IBinder token, Intent intent, ActivityInfo info) {
-    ActivityRecord rec = new ActivityRecord(token, intent, info);
-    rec.state = STATE_INITIALIZING;
-    stack.push(rec);
-    activities.put(token, rec);
-  }
-
-  public synchronized ActivityRecord getTopActivity() {
-    return stack.peek();
+  /**
+   * Pushes the initial activity token created by the launcher onto the stack. Static: a public
+   * instance method of a binder service must override the framework's interface (ServicesProbe).
+   */
+  public static void recordInitialActivity(IBinder token, Intent intent, ActivityInfo info) {
+    ActivityTaskService service = sInstance;
+    if (service == null) return;
+    synchronized (service) {
+      ActivityRecord rec = new ActivityRecord(token, intent, info);
+      rec.state = STATE_INITIALIZING;
+      service.stack.push(rec);
+      service.activities.put(token, rec);
+    }
   }
 
   @Override
@@ -310,7 +314,8 @@ public final class ActivityTaskService extends IActivityTaskManager.Stub {
     }
 
     @Override
-    public void activityStopped(IBinder token, Bundle state, PersistableBundle persistentState, CharSequence description) {
+    public void activityStopped(IBinder token, Bundle state, PersistableBundle persistentState,
+        HandoffActivityData handoffActivityData, CharSequence description) {
       service.onActivityStopped(token);
     }
 

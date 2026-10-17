@@ -139,10 +139,7 @@ public final class ProcessLauncher implements ActivityService.AttachHandler {
         Reflect.newInstance(Reflect.type("android.window.ActivityWindowInfo")), 0);
     Object resume = Reflect.newInstance(Reflect.type("android.app.servertransaction.ResumeActivityItem"),
         token, PROCESS_STATE_TOP, true, false);
-    ActivityTaskService ats = ActivityTaskService.getInstance();
-    if (ats != null) {
-      ats.recordInitialActivity(token, intent, info);
-    }
+    ActivityTaskService.recordInitialActivity(token, intent, info);
     Object transaction = Reflect.newInstance(Reflect.type("android.app.servertransaction.ClientTransaction"), thread);
     Reflect.call(transaction, "addTransactionItem", launch);
     Reflect.call(transaction, "addTransactionItem", resume);

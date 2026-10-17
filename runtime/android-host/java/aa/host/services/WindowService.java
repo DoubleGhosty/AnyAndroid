@@ -123,11 +123,11 @@ public final class WindowService extends IWindowManager.Stub {
     }
 
     @Override
-    public void remove(IWindow window) {
-      if (window == null) return;
+    public void remove(IBinder clientToken) {
+      if (clientToken == null) return;
       WindowRecord rec;
       synchronized (windows) {
-        rec = windows.remove(window.asBinder());
+        rec = windows.remove(clientToken);
       }
       if (rec != null && rec.serverChannel != null) {
         try {
