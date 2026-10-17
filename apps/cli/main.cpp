@@ -88,8 +88,9 @@ void usage() {
       "      --profile : à la fin, les méthodes les plus coûteuses (instructions, appels) sur stderr.\n"
       "      --trace-services : écrit sur stdout chaque appel du framework aux services de l'hôte.\n"
       "      --frame-out <fichier.png> : écrit chaque image publiée par une fenêtre (la dernière reste).\n"
-      "      --window [--title <texte>] : montre l'écran de l'appareil dans une fenêtre Windows (images\n"
-      "        publiées par le vrai framework) ; la fermer termine le processus.\n"
+      "      --window [--title <texte>] : montre l'écran dans une fenêtre Windows interactive (clics/glisser\n"
+      "        souris = tactile, clavier = KeyEvent, Échap = retour arrière / KEYCODE_BACK) ; la fermer\n"
+      "        termine le processus.\n"
       "  libcore natives --bootclasspath <dossier> [--libcore-only] [--all] [--core]\n"
       "      Couverture des méthodes natives de la libcore par AnyAndroid ; --core liste les membres\n"
       "      des classes du cœur de la VM référencés mais absents.\n"
@@ -489,7 +490,7 @@ int cmd_run(const Args& a) {
   }
 
   std::unique_ptr<ui::Backend> backend;
-  if (a.has("--headless")) {
+  if (a.has("--headless") || a.has("--script") || a.has("--do")) {
     std::string script = a.get("--do");
     if (a.has("--script")) script = read_text_file(path_from_utf8(a.get("--script"))) + "\n" + script;
     backend = std::make_unique<backend::HeadlessBackend>(script, stdout);
