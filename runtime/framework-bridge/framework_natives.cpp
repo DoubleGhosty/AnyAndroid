@@ -562,6 +562,7 @@ void register_framework_natives(rt::NativeRegistry& r) {
   register_process_binder(r);
   register_parcel_natives(r);
   register_framework_input(r);
+  register_framework_motion_event(r);
   register_resource_natives(r);
 }
 

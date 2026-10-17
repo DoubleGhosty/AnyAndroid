@@ -182,6 +182,41 @@ void parcel_write_string8(Runtime& rt, Handle parcel_object, const std::string& 
   write_raw(rt, p, v.c_str(), uint32_t(v.size() + 1));
 }
 
+int64_t parcel_read_i64(Runtime& rt, Handle parcel_object, bool* ok) {
+  NativeParcel& p = parcel_of_object(rt, parcel_object);
+  const uint8_t* at = read_raw(p, 8);
+  if (!at) {
+    *ok = false;
+    return 0;
+  }
+  int64_t v;
+  std::memcpy(&v, at, 8);
+  return v;
+}
+
+void parcel_write_i64(Runtime& rt, Handle parcel_object, int64_t v) {
+  write_i64(rt, parcel_of_object(rt, parcel_object), v);
+}
+
+std::vector<uint8_t> parcel_read_byte_vector(Runtime& rt, Handle parcel_object, bool* ok) {
+  NativeParcel& p = parcel_of_object(rt, parcel_object);
+  const uint8_t* at = read_raw(p, 4);
+  int32_t len = 0;
+  if (at) std::memcpy(&len, at, 4);
+  const uint8_t* bytes = !at || len < 0 ? nullptr : read_raw(p, uint32_t(len));
+  if (!bytes) {
+    *ok = false;
+    return {};
+  }
+  return std::vector<uint8_t>(bytes, bytes + len);
+}
+
+void parcel_write_byte_vector(Runtime& rt, Handle parcel_object, const std::vector<uint8_t>& v) {
+  NativeParcel& p = parcel_of_object(rt, parcel_object);
+  write_i32(rt, p, int32_t(v.size()));
+  write_raw(rt, p, v.data(), uint32_t(v.size()));
+}
+
 void register_parcel_natives(rt::NativeRegistry& r) {
   const char* pc = "Landroid/os/Parcel;";
   r.bind(pc, "nativeCreate", "()J", [](Runtime&, NativeArgs&) -> uint64_t {
