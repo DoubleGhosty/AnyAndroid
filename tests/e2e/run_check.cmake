@@ -2,12 +2,14 @@
 #
 #   cmake -DCMD=<exe|arg|arg...> -DEXPECT_CODE=<n>
 #         [-DGOLDEN=<fichier>] [-DMATCH=<regex>] [-DACTUAL=<fichier>]
-#         [-DFRESH_DIR=<dossier>] [-DFRAME=<fichier.png> -DFRAME_SIZE=<l>x<h>]
+#         [-DFRESH_DIR=<dossier>] [-DFRAME=<fichier.png> -DFRAME_SIZE=<l>x<h>
+#         [-DFRAME_PROBES=<x>,<y>,#RRGGBB|... -DPROBE_CLI=<exe|arg...>]]
 #         -P run_check.cmake
 #
 # Arguments are separated by '|' so that they survive CTest's list handling.
 # FRESH_DIR (the --data-dir of the command) is emptied before the run. FRAME
-# (the --frame-out of the command) must be a PNG of FRAME_SIZE afterwards.
+# (the --frame-out of the command) must be a PNG of FRAME_SIZE afterwards,
+# whose pixels have the colours of FRAME_PROBES (read by `image probe`).
 
 string(REPLACE "|" ";" command "${CMD}")
 # Programs on AOSP's real libcore (FRESH_DIR set) load the framework from the
@@ -68,5 +70,29 @@ if(DEFINED FRAME)
   math(EXPR height "0x${height_hex}")
   if(NOT signature STREQUAL "89504e470d0a1a0a" OR NOT "${width}x${height}" STREQUAL "${FRAME_SIZE}")
     message(FATAL_ERROR "${FRAME} : PNG ${width}x${height} (attendu ${FRAME_SIZE}), signature ${signature}")
+  endif()
+  if(DEFINED FRAME_PROBES)
+    string(REPLACE "|" ";" probes "${FRAME_PROBES}")
+    string(REPLACE "|" ";" probe_cli "${PROBE_CLI}")
+    set(points "")
+    set(expected "")
+    foreach(probe IN LISTS probes)
+      string(REGEX MATCH "^([0-9]+,[0-9]+),(#[0-9A-F]+)$" valid "${probe}")
+      if(NOT valid)
+        message(FATAL_ERROR "sonde invalide « ${probe} » (attendu <x>,<y>,#RRGGBB)")
+      endif()
+      list(APPEND points "${CMAKE_MATCH_1}")
+      string(APPEND expected "${probe}\n")
+    endforeach()
+    execute_process(COMMAND ${probe_cli} image probe "${FRAME}" ${points}
+      RESULT_VARIABLE code
+      OUTPUT_VARIABLE colors
+      ERROR_VARIABLE err
+      TIMEOUT 60)
+    string(REPLACE "\r\n" "\n" colors "${colors}")
+    if(NOT "${code}" STREQUAL "0" OR NOT "${colors}" STREQUAL "${expected}")
+      message(FATAL_ERROR "${FRAME} : pixels différents des sondes (code ${code})\n--- attendus ---\n${expected}"
+                          "--- obtenus ---\n${colors}\n--- stderr ---\n${err}")
+    endif()
   endif()
 endif()

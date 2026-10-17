@@ -1205,3 +1205,43 @@ TEST(graphics_image_decoder_png_and_ninepatch) {
   // Close decoder
   call(rt, id, "nClose", "(J)V", Args().j(dec_ptr));
 }
+
+// The decoder as the host reads frames back (`image probe`): a PNG written by
+// miniz as `exec --frame-out` writes them, RGBA rows, read as 0xAARRGGBB.
+TEST(graphics_decode_png_pixels_reads_frames) {
+  const int w = 5, h = 3;
+  std::vector<uint8_t> rgba(size_t(w) * h * 4, 0);
+  auto put = [&](int x, int y, uint32_t argb) {
+    uint8_t* p = &rgba[(size_t(y) * w + x) * 4];
+    p[0] = uint8_t(argb >> 16), p[1] = uint8_t(argb >> 8), p[2] = uint8_t(argb), p[3] = uint8_t(argb >> 24);
+  };
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) put(x, y, 0xFFEDEDF6);
+  }
+  put(0, 0, 0xFF1A1B20);
+  put(4, 0, 0xFF787A84);
+  put(2, 1, 0x80102030);
+  put(4, 2, 0xFF30323A);
+  size_t length = 0;
+  void* png = tdefl_write_image_to_png_file_in_memory_ex(rgba.data(), w, h, 4, &length, 6, MZ_FALSE);
+  CHECK(png != nullptr);
+  std::vector<uint8_t> bytes(static_cast<uint8_t*>(png), static_cast<uint8_t*>(png) + length);
+  mz_free(png);
+
+  bridge::DecodedPng decoded;
+  CHECK(bridge::decode_png_pixels(bytes.data(), bytes.size(), decoded));
+  CHECK_EQ(decoded.width, uint32_t(w));
+  CHECK_EQ(decoded.height, uint32_t(h));
+  CHECK_EQ(decoded.pixels.size(), size_t(w) * h);
+  auto at = [&](int x, int y) { return decoded.pixels[size_t(y) * w + x]; };
+  CHECK_EQ(at(0, 0), uint32_t(0xFF1A1B20));
+  CHECK_EQ(at(4, 0), uint32_t(0xFF787A84));
+  CHECK_EQ(at(2, 1), uint32_t(0x80102030));  // unpremultiplied, as stored
+  CHECK_EQ(at(4, 2), uint32_t(0xFF30323A));
+  CHECK_EQ(at(3, 2), uint32_t(0xFFEDEDF6));
+
+  // Not a PNG, or cut short: refused.
+  bridge::DecodedPng refused;
+  CHECK(!bridge::decode_png_pixels(bytes.data() + 1, bytes.size() - 1, refused));
+  CHECK(!bridge::decode_png_pixels(bytes.data(), bytes.size() / 2, refused));
+}
