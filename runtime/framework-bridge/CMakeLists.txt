@@ -11,6 +11,7 @@ add_library(aa_bridge STATIC
   framework_images.cpp
   framework_input.cpp
   framework_matrix.cpp
+  framework_motion_event.cpp
   framework_paint.cpp
   framework_path.cpp
   framework_region.cpp
@@ -18,6 +19,7 @@ add_library(aa_bridge STATIC
   framework_text.cpp
   framework_vector_drawable.cpp
   key_character_map.cpp
+  motion_event.cpp
   framework_natives.cpp
   framework_parcel.cpp
   framework_resources.cpp

@@ -183,8 +183,23 @@ int32_t parcel_read_i32(rt::Runtime& rt, rt::Handle parcel, bool* ok);
 void parcel_write_i32(rt::Runtime& rt, rt::Handle parcel, int32_t v);
 std::string parcel_read_string8(rt::Runtime& rt, rt::Handle parcel, bool* ok);
 void parcel_write_string8(rt::Runtime& rt, rt::Handle parcel, const std::string& v);
+// libbinder's int64 and byte vector (int32 length, then the bytes); a null
+// or truncated vector clears *ok.
+int64_t parcel_read_i64(rt::Runtime& rt, rt::Handle parcel, bool* ok);
+void parcel_write_i64(rt::Runtime& rt, rt::Handle parcel, int64_t v);
+std::vector<uint8_t> parcel_read_byte_vector(rt::Runtime& rt, rt::Handle parcel, bool* ok);
+void parcel_write_byte_vector(rt::Runtime& rt, rt::Handle parcel, const std::vector<uint8_t>& v);
 // KeyCharacterMap, KeyEvent (framework_input.cpp), registered by register_framework_natives.
 void register_framework_input(rt::NativeRegistry& r);
+// MotionEvent (framework_motion_event.cpp), registered by register_framework_natives.
+void register_framework_motion_event(rt::NativeRegistry& r);
+class MotionEvent;
+// android_view_MotionEvent_obtainAsCopy: a Java MotionEvent (MotionEvent.obtain())
+// holding a copy of `event` with its history, for the input receivers.
+rt::Handle obtain_motion_event(rt::Runtime& rt, const MotionEvent& event);
+// android_view_MotionEvent_getNativePtr: the event of a Java MotionEvent
+// (nullptr for null or a recycled one).
+std::shared_ptr<MotionEvent> motion_event_of(rt::Runtime& rt, rt::Handle event);
 void register_appmem_natives(rt::NativeRegistry& r);
 void register_resource_natives(rt::NativeRegistry& r);
 // Android system properties of the emulated device (build.prop and
