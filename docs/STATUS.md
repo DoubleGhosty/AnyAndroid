@@ -41,24 +41,24 @@ le nombre de fichiers.
 |-------|------------------------------------------------------------|-----------:|------|
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
-| G2    | Vraie libcore d'AOSP (Android 17)                           | 92 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
+| G2    | Vraie libcore d'AOSP (Android 17)                           | 100 %      | Terminé : NIO.2 et `FileChannel` sur VFS, E/S scatter-gather, cycle de vie `Cleaner`/`PhantomReference`, dispatch `MethodHandle` polymorphique, annotations DEX complètes et réflexion générique, timezones et POSIX résiduels ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
 | G3    | Vrai `framework.jar` et une application AOSP affichée       | 100 %      | Terminé : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0 à J10 terminés (J5 démarrage par les vrais gestionnaires, J6 texte complet FreeType/HarfBuzz, J7 moteur 2D logiciel Skia/AGSL, J8 fenêtre Win32 et entrées, J9 navigation, cycle de vie et compositeur multi-surfaces, J10 application AOSP et pipeline d'entrées interactives) |
-| G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | **En cours** / À faire : architecture chargeur ELF x86_64, bionic isolée et JNI ([ADR-009](adr/ADR-009-couche-native-elf.md)) |
+| G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | **En cours** / Prochaine priorité : architecture chargeur ELF x86_64, bionic isolée et JNI ([ADR-009](adr/ADR-009-couche-native-elf.md)) |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
-| **Total** | **Android natif sur Windows**                          | **≈ 55 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
+| **Total** | **Android natif sur Windows**                          | **≈ 65 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
 
 ```
 G0 ██████████ 100 %
 G1 ██████████ 100 %
-G2 █████████░  92 %
+G2 ██████████ 100 %
 G3 ██████████ 100 %
 G4 ░░░░░░░░░░   0 %
 G5 ░░░░░░░░░░   0 %
    ───────────────
-   █████½░░░░ ≈ 55 % vers « Android natif sur Windows »
+   ██████½░░░ ≈ 65 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 37 suites de tests et 189 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 37 suites de tests et 194 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.

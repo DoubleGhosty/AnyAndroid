@@ -2,11 +2,11 @@
   "metadata": {
     "project": "AnyAndroid for Windows",
     "version": "0.1.0",
-    "generated_at": "2026-10-17T21:40:22.862655+00:00",
+    "generated_at": "2026-10-17T22:40:44.544814+00:00",
     "target": "Android natif sur Windows (sans VM ni hyperviseur)"
   },
   "summary": {
-    "overall_percent": 55.0,
+    "overall_percent": 65.0,
     "bridge_percent": 88.0,
     "libcore_percent": 47.2,
     "dalvik_percent": 99.6,
@@ -40,12 +40,12 @@
       {
         "id": "G2",
         "name": "Vraie libcore d'AOSP (Android 17)",
-        "description": "NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée (ADR-004)",
-        "progress": 92,
+        "description": "Terminé : NIO.2 et `FileChannel` sur VFS, E/S scatter-gather, cycle de vie `Cleaner`/`PhantomReference`, dispatch `MethodHandle` polymorphique, annotations DEX complètes et réflexion générique, timezones et POSIX résiduels (ADR-004)",
+        "progress": 100,
         "weight": 10,
-        "status": "NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée (ADR-004)",
+        "status": "Terminé : NIO.2 et `FileChannel` sur VFS, E/S scatter-gather, cycle de vie `Cleaner`/`PhantomReference`, dispatch `MethodHandle` polymorphique, annotations DEX complètes et réflexion générique, timezones et POSIX résiduels (ADR-004)",
         "adr": "ADR-004",
-        "state": "in_progress"
+        "state": "completed"
       },
       {
         "id": "G3",
@@ -60,10 +60,10 @@
       {
         "id": "G4",
         "name": "Couche native ELF (bibliothèques `.so` des applications)",
-        "description": "**En cours** / À faire : architecture chargeur ELF x86_64, bionic isolée et JNI (ADR-009)",
+        "description": "**En cours** / Prochaine priorité : architecture chargeur ELF x86_64, bionic isolée et JNI (ADR-009)",
         "progress": 0,
         "weight": 25,
-        "status": "**En cours** / À faire : architecture chargeur ELF x86_64, bionic isolée et JNI (ADR-009)",
+        "status": "**En cours** / Prochaine priorité : architecture chargeur ELF x86_64, bionic isolée et JNI (ADR-009)",
         "adr": "ADR-009",
         "state": "pending"
       },
@@ -78,7 +78,7 @@
         "state": "pending"
       }
     ],
-    "overall_percent": 55.0
+    "overall_percent": 65.0
   },
   "bridge": {
     "classes": {
@@ -11138,7 +11138,7 @@
     "total_suites": 37,
     "passed_suites": 34,
     "optional_suites": 3,
-    "unit_tests": 189,
+    "unit_tests": 194,
     "e2e_suites": 33,
     "fuzz_suites": 3,
     "percent_core": 100.0,
