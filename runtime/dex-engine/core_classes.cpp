@@ -925,19 +925,53 @@ void register_thread(NativeRegistry& r) {
 }
 
 void register_references(NativeRegistry& r) {
-  r.define("Ljava/lang/ref/ReferenceQueue;", "Ljava/lang/Object;", {}, 0x1, ApiStatus::kPartial,
-           "les références ne sont jamais mises en file")
-      .ctor("()V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
+  auto rq = r.define("Ljava/lang/ref/ReferenceQueue;", "Ljava/lang/Object;", {}, 0x1);
+  rq.ctor("()V", [](Runtime&, NativeArgs& a) -> uint64_t {
+    a.self().peer = std::make_unique<ReferenceQueuePeer>();
+    return 0;
+  });
+  auto pop_queue = [](Runtime& rt, Handle q_h) -> Handle {
+    auto* qp = rt.peer<ReferenceQueuePeer>(q_h);
+    if (!qp || qp->queued.empty()) return kNull;
+    Handle ref = qp->queued.front();
+    qp->queued.erase(qp->queued.begin());
+    if (auto* ref_obj = rt.object(ref)) {
+      if (Field* qn = ref_obj->klass->declared_field("queueNext", "Ljava/lang/ref/Reference;")) {
+        ref_obj->fields.at(qn->slot) = kNull;
+      }
+    }
+    return ref;
+  };
+  rq.method("poll", "()Ljava/lang/ref/Reference;", [pop_queue](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return pop_queue(rt, a.h(0));
+  });
+  rq.method("remove", "()Ljava/lang/ref/Reference;", [pop_queue](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return pop_queue(rt, a.h(0));
+  });
+  rq.method("remove", "(J)Ljava/lang/ref/Reference;", [pop_queue](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return pop_queue(rt, a.h(0));
+  });
+  rq.method("enqueue", "(Ljava/lang/ref/Reference;)Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    Handle q_h = a.h(0);
+    Handle r_h = a.h(1);
+    if (r_h == kNull) return 0;
+    auto* qp = rt.peer<ReferenceQueuePeer>(q_h);
+    if (!qp) {
+      rt.object(q_h)->peer = std::make_unique<ReferenceQueuePeer>();
+      qp = rt.peer<ReferenceQueuePeer>(q_h);
+    }
+    qp->queued.push_back(r_h);
+    return 1;
+  });
+
   auto ref = r.define("Ljava/lang/ref/Reference;", "Ljava/lang/Object;", {}, 0x1 | 0x400);
-  // Queue links read and written by libcore's ReferenceQueue. The referent
-  // itself stays in the native peer so that the collector treats it weakly.
   ref.field("queue", "Ljava/lang/ref/ReferenceQueue;");
   ref.field("queueNext", "Ljava/lang/ref/Reference;");
   ref.field("pendingNext", "Ljava/lang/ref/Reference;");
-  // Weak by default (PhantomReference, FinalizerReference, Cleaner).
   auto make_ref = [](bool weak) {
     return [weak](Runtime& rt, NativeArgs& a) -> uint64_t {
       auto p = std::make_unique<ReferencePeer>();
+      p->self = a.h(0);
       p->referent = a.h(1);
       p->weak = weak;
       Object& self = a.self();
@@ -950,8 +984,7 @@ void register_references(NativeRegistry& r) {
     };
   };
   ref.ctor("(Ljava/lang/Object;)V", make_ref(true));
-  ref.ctor("(Ljava/lang/Object;Ljava/lang/ref/ReferenceQueue;)V", make_ref(true), ApiStatus::kPartial,
-           "jamais mise en file par le ramasse-miettes");
+  ref.ctor("(Ljava/lang/Object;Ljava/lang/ref/ReferenceQueue;)V", make_ref(true));
   ref.method("get", "()Ljava/lang/Object;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto* p = rt.peer<ReferencePeer>(a.h(0));
     return p ? p->referent : kNull;
@@ -960,10 +993,8 @@ void register_references(NativeRegistry& r) {
     if (auto* p = rt.peer<ReferencePeer>(a.h(0))) p->referent = kNull;
     return 0;
   });
-  // The argument is a root of the caller's frame until the call returns,
-  // which is all the fence guarantees; libcore's bytecode version costs
-  // several instructions on every DirectByteBuffer access.
   ref.static_method("reachabilityFence", "(Ljava/lang/Object;)V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
+
   for (bool weak : {true, false}) {
     auto b = r.define(weak ? "Ljava/lang/ref/WeakReference;" : "Ljava/lang/ref/SoftReference;", "Ljava/lang/ref/Reference;",
                       {}, 0x1, weak ? ApiStatus::kSupported : ApiStatus::kPartial,
@@ -972,9 +1003,92 @@ void register_references(NativeRegistry& r) {
       b.field("timestamp", "J");
     }
     b.ctor("(Ljava/lang/Object;)V", make_ref(weak));
-    b.ctor("(Ljava/lang/Object;Ljava/lang/ref/ReferenceQueue;)V", make_ref(weak), ApiStatus::kPartial,
-           "jamais mise en file par le ramasse-miettes");
+    b.ctor("(Ljava/lang/Object;Ljava/lang/ref/ReferenceQueue;)V", make_ref(weak));
   }
+
+  auto pr = r.define("Ljava/lang/ref/PhantomReference;", "Ljava/lang/ref/Reference;", {}, 0x1);
+  pr.ctor("(Ljava/lang/Object;Ljava/lang/ref/ReferenceQueue;)V", make_ref(true));
+  pr.ctor("(Ljava/lang/Object;)V", make_ref(true));
+  pr.method("get", "()Ljava/lang/Object;", [](Runtime&, NativeArgs&) -> uint64_t { return kNull; });
+
+  auto cl = r.define("Lsun/misc/Cleaner;", "Ljava/lang/ref/PhantomReference;", {}, 0x1);
+  cl.static_field("first", "Lsun/misc/Cleaner;", [](Runtime&) -> uint64_t { return kNull; });
+  cl.field("thunk", "Ljava/lang/Runnable;");
+  cl.field("next", "Lsun/misc/Cleaner;");
+  cl.field("prev", "Lsun/misc/Cleaner;");
+  cl.ctor("(Ljava/lang/Object;Ljava/lang/Runnable;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto p = std::make_unique<ReferencePeer>();
+    p->self = a.h(0);
+    p->referent = a.h(1);
+    p->weak = true;
+    Object& self = a.self();
+    self.peer = std::move(p);
+    Class* cl_cls = rt.find_class("Lsun/misc/Cleaner;");
+    if (Field* tf = cl_cls->declared_field("thunk", "Ljava/lang/Runnable;")) {
+      self.fields.at(tf->slot) = a.h(2);
+    }
+    return 0;
+  });
+  cl.static_method("create", "(Ljava/lang/Object;Ljava/lang/Runnable;)Lsun/misc/Cleaner;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    Handle ob = a.h(0);
+    Handle thunk = a.h(1);
+    if (thunk == kNull) return kNull;
+    Class* cl_cls = rt.find_class("Lsun/misc/Cleaner;");
+    Handle c = rt.alloc(cl_cls);
+    rt.call_virtual(c, "<init>", "(Ljava/lang/Object;Ljava/lang/Runnable;)V", {ob, thunk});
+
+    Field* first_f = cl_cls->declared_field("first", "Lsun/misc/Cleaner;");
+    Field* next_f = cl_cls->declared_field("next", "Lsun/misc/Cleaner;");
+    Field* prev_f = cl_cls->declared_field("prev", "Lsun/misc/Cleaner;");
+    if (first_f && next_f && prev_f) {
+      Handle first = cl_cls->statics.at(first_f->slot);
+      if (first != kNull) {
+        if (Object* first_obj = rt.object(first)) {
+          first_obj->fields.at(prev_f->slot) = c;
+        }
+        rt.object(c)->fields.at(next_f->slot) = first;
+      }
+      cl_cls->statics.at(first_f->slot) = c;
+    }
+    return c;
+  });
+  cl.method("clean", "()V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    Handle self_h = a.h(0);
+    Object* o = rt.object(self_h);
+    if (!o) return 0;
+    Class* cl_cls = rt.find_class("Lsun/misc/Cleaner;");
+    Field* tf = cl_cls->declared_field("thunk", "Ljava/lang/Runnable;");
+    Field* first_f = cl_cls->declared_field("first", "Lsun/misc/Cleaner;");
+    Field* next_f = cl_cls->declared_field("next", "Lsun/misc/Cleaner;");
+    Field* prev_f = cl_cls->declared_field("prev", "Lsun/misc/Cleaner;");
+
+    if (first_f && next_f && prev_f) {
+      Handle next = o->fields.at(next_f->slot);
+      Handle prev = o->fields.at(prev_f->slot);
+      if (prev != kNull) {
+        if (Object* p = rt.object(prev)) p->fields.at(next_f->slot) = next;
+      } else if (cl_cls->statics.at(first_f->slot) == self_h) {
+        cl_cls->statics.at(first_f->slot) = next;
+      }
+      if (next != kNull) {
+        if (Object* n = rt.object(next)) n->fields.at(prev_f->slot) = prev;
+      }
+      o->fields.at(next_f->slot) = self_h;
+      o->fields.at(prev_f->slot) = self_h;
+    }
+
+    if (tf) {
+      Handle thunk = o->fields.at(tf->slot);
+      if (thunk != kNull) {
+        o->fields.at(tf->slot) = kNull;
+        try {
+          rt.call_virtual(thunk, "run", "()V");
+        } catch (const JavaThrow&) {
+        }
+      }
+    }
+    return 0;
+  });
 }
 
 }  // namespace

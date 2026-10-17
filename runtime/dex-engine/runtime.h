@@ -113,6 +113,7 @@ struct FieldPeer final : NativePeer {
 
 // java.lang.ref.Reference state. Soft references are kept strong.
 struct ReferencePeer final : NativePeer {
+  Handle self = kNull;
   Handle referent = kNull;
   bool weak = true;
   void trace(std::vector<Handle>& out) const override {
@@ -120,6 +121,13 @@ struct ReferencePeer final : NativePeer {
   }
   void sweep_weak(const std::function<bool(Handle)>& is_live) override {
     if (weak && referent && !is_live(referent)) referent = kNull;
+  }
+};
+
+struct ReferenceQueuePeer final : NativePeer {
+  std::vector<Handle> queued;
+  void trace(std::vector<Handle>& out) const override {
+    for (Handle h : queued) out.push_back(h);
   }
 };
 

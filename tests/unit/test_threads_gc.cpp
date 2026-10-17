@@ -365,6 +365,24 @@ const char* kMain = R"SMALI(
 .end method
 )SMALI";
 
+const char* kCleanThunk = R"SMALI(
+.class public LCleanThunk;
+.super Ljava/lang/Object;
+.implements Ljava/lang/Runnable;
+.field public static cleaned:I
+.method public constructor <init>()V
+    .registers 1
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+    return-void
+.end method
+.method public run()V
+    .registers 2
+    const/4 v0, 1
+    sput v0, LCleanThunk;->cleaned:I
+    return-void
+.end method
+)SMALI";
+
 struct ThreadVm {
   std::unique_ptr<dex::DexFile> dex;
   std::unique_ptr<rt::Runtime> rt;
@@ -372,7 +390,7 @@ struct ThreadVm {
 
   explicit ThreadVm(rt::RuntimeOptions opts = {}) {
     std::vector<tool::ClassDef> classes;
-    for (const char* s : {kShared, kIncrementer, kBox, kProducer, kSleeper, kThrower, kSpinner, kMain}) {
+    for (const char* s : {kShared, kIncrementer, kBox, kProducer, kSleeper, kThrower, kSpinner, kMain, kCleanThunk}) {
       classes.push_back(tool::assemble_smali(s, "threads.smali"));
     }
     dex = dex::DexFile::open(tool::write_dex(classes), "threads.dex");
@@ -511,4 +529,66 @@ TEST(gc_detects_stale_handles) {
   int still_stale = 0;
   for (uint32_t h : hidden) still_stale += !vm.rt->is_valid_handle(h ^ 0x5A5A5A5Au);
   CHECK(still_stale >= stale);
+}
+
+[[gnu::noinline]] void setup_weak_ref(rt::Runtime& rt, rt::Handle rq, rt::Handle& out_wr) {
+  rt::Class* weak_cls = rt.find_class("Ljava/lang/ref/WeakReference;");
+  rt::Handle target = rt.alloc(rt.find_class("Ljava/lang/Object;"));
+  out_wr = rt.alloc(weak_cls);
+  rt.call_virtual(out_wr, "<init>", "(Ljava/lang/Object;Ljava/lang/ref/ReferenceQueue;)V", {target, rq});
+}
+
+[[gnu::noinline]] void setup_cleaner(rt::Runtime& rt, rt::Handle thunk, rt::Handle& out_cleaner) {
+  rt::Handle target = rt.alloc(rt.find_class("Ljava/lang/Object;"));
+  out_cleaner = rt::Handle(rt.call_static("Lsun/misc/Cleaner;", "create",
+                                          "(Ljava/lang/Object;Ljava/lang/Runnable;)Lsun/misc/Cleaner;",
+                                          {target, thunk}));
+}
+
+TEST(gc_cleaners_and_reference_queue) {
+  ThreadVm vm;
+  rt::Runtime& rt = *vm.rt;
+
+  try {
+    // 1. ReferenceQueue test with WeakReference
+    rt::Class* rq_cls = rt.find_class("Ljava/lang/ref/ReferenceQueue;");
+    rt::Handle rq = rt.alloc(rq_cls);
+    rt.call_virtual(rq, "<init>", "()V");
+
+    rt::Handle wr = rt::kNull;
+    setup_weak_ref(rt, rq, wr);
+    CHECK(wr != rt::kNull);
+
+    // Verify queue is empty before collection
+    CHECK_EQ(rt.call_virtual(rq, "poll", "()Ljava/lang/ref/Reference;"), rt::kNull);
+
+    scrub_stack();
+    rt.collect_garbage();
+
+    // After collection, wr must be queued in rq!
+    rt::Handle polled = rt::Handle(rt.call_virtual(rq, "poll", "()Ljava/lang/ref/Reference;"));
+    CHECK_EQ(polled, wr);
+    CHECK_EQ(rt.call_virtual(rq, "poll", "()Ljava/lang/ref/Reference;"), rt::kNull);
+
+    // 2. sun.misc.Cleaner test
+    rt::Class* thunk_cls = rt.find_class("LCleanThunk;");
+    rt::Handle thunk = rt.alloc(thunk_cls);
+    rt.call_virtual(thunk, "<init>", "()V");
+    rt::Field* cleaned_f = thunk_cls->declared_field("cleaned", "I");
+    thunk_cls->statics.at(cleaned_f->slot) = 0;
+
+    rt::Handle cleaner = rt::kNull;
+    setup_cleaner(rt, thunk, cleaner);
+    CHECK(cleaner != rt::kNull);
+    CHECK_EQ(thunk_cls->statics.at(cleaned_f->slot), 0u);
+
+    scrub_stack();
+    rt.collect_garbage();
+
+    // The cleaner should have been triggered automatically during sweep!
+    CHECK_EQ(thunk_cls->statics.at(cleaned_f->slot), 1u);
+  } catch (const rt::JavaThrow& t) {
+    std::fprintf(stderr, "TEST THREW: %s\n", rt.describe_throwable(t.exception).c_str());
+    throw;
+  }
 }

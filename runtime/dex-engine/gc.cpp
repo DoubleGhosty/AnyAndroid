@@ -128,10 +128,33 @@ void Runtime::collect_garbage() {
   // --- Weak references, then sweep ----------------------------------------------------
   auto is_live = [&](Handle h) { return is_valid_handle(h) && marks[h & 0xFFFFFF] != 0; };
   std::vector<uint32_t> dying;
+  std::vector<Handle> pending_cleaners;
+  std::vector<std::pair<Handle, Handle>> pending_enqueues;
+
+  Class* cleaner_cls = lookup_class("Lsun/misc/Cleaner;");
+  Class* ref_cls = lookup_class("Ljava/lang/ref/Reference;");
+  Field* queue_field = ref_cls ? ref_cls->declared_field("queue", "Ljava/lang/ref/ReferenceQueue;") : nullptr;
+
   for (uint32_t i = 1; i < slots_.size(); ++i) {
     if (!slots_[i].obj) continue;
     if (marks[i]) {
-      if (slots_[i].obj->peer) slots_[i].obj->peer->sweep_weak(is_live);
+      Object* o = slots_[i].obj.get();
+      if (auto* rp = dynamic_cast<ReferencePeer*>(o->peer.get())) {
+        if (rp->weak && rp->referent && !is_live(rp->referent)) {
+          Handle ref_h = Handle(i | (uint32_t(slots_[i].gen) << 24));
+          if (cleaner_cls && instance_of(ref_h, cleaner_cls)) {
+            pending_cleaners.push_back(ref_h);
+          } else if (queue_field && queue_field->slot < o->fields.size()) {
+            Handle q = o->fields.at(queue_field->slot);
+            if (q != kNull) {
+              pending_enqueues.push_back({q, ref_h});
+            }
+          }
+          rp->referent = kNull;
+        }
+      } else if (slots_[i].obj->peer) {
+        slots_[i].obj->peer->sweep_weak(is_live);
+      }
     } else {
       dying.push_back(i);
     }
@@ -165,6 +188,17 @@ void Runtime::collect_garbage() {
     log::write(options_.verbose_gc ? log::Level::Info : log::Level::Debug, "gc", buf);
   }
   in_gc_ = false;
+
+  for (Handle cl : pending_cleaners) {
+    try {
+      call_virtual(cl, "clean", "()V");
+    } catch (...) {}
+  }
+  for (const auto& [q, ref] : pending_enqueues) {
+    try {
+      call_virtual(q, "enqueue", "(Ljava/lang/ref/Reference;)Z", {ref});
+    } catch (...) {}
+  }
 }
 
 }  // namespace aa::rt

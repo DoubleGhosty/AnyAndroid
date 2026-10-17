@@ -1102,7 +1102,7 @@ Method* Runtime::find_static(Class* cls, std::string_view name, std::string_view
 uint64_t Runtime::call_virtual(Handle receiver, std::string_view name, std::string_view sig,
                                std::vector<uint32_t> extra_args) {
   Object& o = nonnull(receiver, "this");
-  Method* m = resolve_virtual(o.klass, name, sig);
+  Method* m = (name == "<init>") ? o.klass->declared_method(name, sig) : resolve_virtual(o.klass, name, sig);
   if (!m) missing_method(o.klass, name, sig, false);
   std::vector<uint32_t> args;
   args.reserve(extra_args.size() + 1);
