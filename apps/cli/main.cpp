@@ -520,7 +520,8 @@ int cmd_run(const Args& a) {
 }
 
 // The display of the emulated device (DisplayService of the host code).
-constexpr int32_t kDisplayWidth = 1080, kDisplayHeight = 1920;
+using bridge::kDisplayHeight;
+using bridge::kDisplayWidth;
 // How long an input script's `after-frames` waits.
 constexpr int64_t kInputFramesTimeoutSeconds = 240;
 

@@ -121,9 +121,13 @@ void register_libcore_natives(rt::NativeRegistry& registry);
 // libcore expects to be ready first (java.lang.System before anything that
 // reaches dalvik.system.VMRuntime). Call inside a Runtime::Scope.
 void start_libcore(rt::Runtime& rt);
-// A frame posted to a window's buffer queue (Surface.unlockCanvasAndPost):
-// width x height pixels, RGBA bytes premultiplied (Skia's N32 as Android
-// lays it out), rows packed. A copy, for the host to show or record.
+// The display, as the host's DisplayService reports it (1080 x 1920 pixels).
+constexpr int32_t kDisplayWidth = 1080, kDisplayHeight = 1920;
+// A frame of the display: the windows' layers composed as SurfaceFlinger
+// does, presented when a buffer is posted (Surface.unlockCanvasAndPost) or a
+// transaction changes what shows. width x height pixels, RGBA bytes
+// premultiplied (Skia's N32 as Android lays it out), rows packed. A copy, for
+// the host to show or record.
 struct PostedFrame {
   int32_t layer_id = 0;
   std::string layer_name;
@@ -132,8 +136,8 @@ struct PostedFrame {
   bool opaque = false;
   std::shared_ptr<const std::vector<uint32_t>> pixels;
 };
-// Called on the posting thread for every frame; none by default (the frames
-// are then not copied).
+// Called on the presenting thread for every frame; none by default (the
+// frames are then not composed).
 void set_frame_listener(std::function<void(const PostedFrame&)> listener);
 
 // --- Input from the host (J8 of ADR-006) --------------------------------------

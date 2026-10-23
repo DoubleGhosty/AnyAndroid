@@ -2,6 +2,7 @@
 // property store and the style rules of fonts and typefaces (HWUI, minikin).
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -1675,7 +1676,7 @@ TEST(graphics_text_run_shaper_and_positioned_glyphs) {
            std::string("java.lang.ArrayIndexOutOfBoundsException"));
 }
 
-TEST(surface_multi_layer_compositor_blends_layers_and_applies_dim) {
+TEST(surface_compositor_walks_the_layer_tree) {
   std::vector<tool::ClassDef> defs;
   defs.push_back(tool::assemble_smali(R"(
 .class public Landroid/graphics/Canvas;
@@ -1728,94 +1729,98 @@ TEST(surface_multi_layer_compositor_blends_layers_and_applies_dim) {
     frame_count++;
   });
 
-  // 1. Create Base Layer (1080x1920)
-  int64_t sc1 = int64_t(call(rt, "Landroid/view/SurfaceControl;", "nativeCreate",
-                             "(Landroid/view/SurfaceSession;Ljava/lang/String;IIIIJLandroid/os/Parcel;)J",
-                             Args().h(rt::kNull).h(rt.new_string_utf8("base")).i(1080).i(1920).i(1).i(0).j(0).h(rt::kNull)));
-  CHECK(sc1 != 0);
-  int64_t bq1 = int64_t(call(rt, "Landroid/graphics/BLASTBufferQueue;", "nativeCreate",
-                             "(Ljava/lang/String;Z)J", Args().h(rt.new_string_utf8("bq1")).z(false)));
-  CHECK(bq1 != 0);
-  call(rt, "Landroid/graphics/BLASTBufferQueue;", "nativeUpdate", "(JJJJI)V",
-       Args().j(bq1).j(sc1).j(1080).j(1920).i(1));
-  rt::Handle s1 = rt::Handle(call(rt, "Landroid/graphics/BLASTBufferQueue;", "nativeGetSurface",
-                                  "(JZ)Landroid/view/Surface;", Args().j(bq1).z(false)));
-  CHECK(s1 != rt::kNull);
-  int64_t s1_ptr = get_field_i64(rt, s1, "mNativeObject");
-
+  const char* sc = "Landroid/view/SurfaceControl;";
+  const char* bbq = "Landroid/graphics/BLASTBufferQueue;";
+  const char* create_sig = "(Landroid/view/SurfaceSession;Ljava/lang/String;IIIIJLandroid/os/Parcel;)J";
+  auto create = [&](const char* name, int32_t w, int32_t h, int32_t flags) {
+    return int64_t(call(rt, sc, "nativeCreate", create_sig,
+                        Args().h(rt::kNull).h(rt.new_string_utf8(name)).i(w).i(h).i(1).i(flags).j(0).h(rt::kNull)));
+  };
   rt::Handle cv_obj = bridge::construct(rt, "Landroid/graphics/Canvas;", "()V", {});
   int64_t c_native = int64_t(call(rt, "Landroid/graphics/Canvas;", "nInitRaster", "(J)J", Args().j(0)));
   set_field_i64(rt, cv_obj, "mNativeCanvasWrapper", c_native);
+  // A buffer queue on the layer, one frame of one color posted.
+  auto post_color = [&](int64_t layer, int32_t w, int32_t h, uint32_t argb) {
+    int64_t q = int64_t(call(rt, bbq, "nativeCreate", "(Ljava/lang/String;Z)J",
+                             Args().h(rt.new_string_utf8("bq")).z(false)));
+    call(rt, bbq, "nativeUpdate", "(JJJJI)V", Args().j(q).j(layer).j(w).j(h).i(1));
+    rt::Handle surface = rt::Handle(call(rt, bbq, "nativeGetSurface", "(JZ)Landroid/view/Surface;",
+                                         Args().j(q).z(false)));
+    int64_t s_ptr = get_field_i64(rt, surface, "mNativeObject");
+    call(rt, "Landroid/view/Surface;", "nativeLockCanvas", "(JLandroid/graphics/Canvas;Landroid/graphics/Rect;)J",
+         Args().j(s_ptr).h(cv_obj).h(rt::kNull));
+    call(rt, "Landroid/graphics/BaseCanvas;", "nDrawColor", "(JII)V", Args().j(c_native).i(int32_t(argb)).i(3));
+    call(rt, "Landroid/view/Surface;", "nativeUnlockCanvasAndPost", "(JLandroid/graphics/Canvas;)V",
+         Args().j(s_ptr).h(cv_obj));
+    return q;
+  };
+  auto apply = [&](const std::function<void(int64_t)>& changes) {
+    int64_t t = int64_t(call(rt, sc, "nativeCreateTransaction", "()J"));
+    changes(t);
+    call(rt, sc, "nativeApplyTransaction", "(JZZ)V", Args().j(t).z(false).z(false));
+  };
+  auto pixel = [&](int x, int y) { return last_frame.pixels->at(size_t(y) * 1080 + size_t(x)); };
+  auto red = [](uint32_t px) { return px & 0xFF; };
+  auto blue = [](uint32_t px) { return (px >> 16) & 0xFF; };
 
-  // Draw pure blue into base layer (0xFF0000FF: alpha 255, red 0, green 0, blue 255)
-  call(rt, "Landroid/view/Surface;", "nativeLockCanvas", "(JLandroid/graphics/Canvas;Landroid/graphics/Rect;)J",
-       Args().j(s1_ptr).h(cv_obj).h(rt::kNull));
-  call(rt, "Landroid/graphics/BaseCanvas;", "nDrawColor", "(JII)V",
-       Args().j(c_native).i(int32_t(0xFF0000FF)).i(3));
-  call(rt, "Landroid/view/Surface;", "nativeUnlockCanvasAndPost", "(JLandroid/graphics/Canvas;)V",
-       Args().j(s1_ptr).h(cv_obj));
-
+  // A root layer covering the display: its buffer is the frame.
+  int64_t base = create("base", 1080, 1920, 0);
+  int64_t bq1 = post_color(base, 1080, 1920, 0xFF0000FF);
   CHECK_EQ(frame_count, 1);
   CHECK_EQ(last_frame.width, 1080);
   CHECK_EQ(last_frame.height, 1920);
-  CHECK(last_frame.pixels != nullptr);
-  uint32_t base_px = last_frame.pixels->at(100 * 1080 + 100);
-  CHECK_EQ(base_px & 0xFF, 0u);             // Red channel
-  CHECK_EQ((base_px >> 16) & 0xFF, 255u);   // Blue channel
+  CHECK_EQ(last_frame.layer_name, std::string("base"));
+  CHECK_EQ(blue(pixel(100, 100)), 255u);
 
-  // 2. Create Dialog Layer (400x300 at x=100, y=100 with FLAG_DIM_BEHIND = 2)
-  int64_t sc2 = int64_t(call(rt, "Landroid/view/SurfaceControl;", "nativeCreate",
-                             "(Landroid/view/SurfaceSession;Ljava/lang/String;IIIIJLandroid/os/Parcel;)J",
-                             Args().h(rt::kNull).h(rt.new_string_utf8("dialog")).i(400).i(300).i(1).i(0).j(0).h(rt::kNull)));
-  CHECK(sc2 != 0);
-  int64_t t = int64_t(call(rt, "Landroid/view/SurfaceControl;", "nativeCreateTransaction", "()J"));
-  call(rt, "Landroid/view/SurfaceControl;", "nativeSetPosition", "(JJFF)V",
-       Args().j(t).j(sc2).f(100.0f).f(100.0f));
-  call(rt, "Landroid/view/SurfaceControl;", "nativeSetLayer", "(JJI)V",
-       Args().j(t).j(sc2).i(1));
-  call(rt, "Landroid/view/SurfaceControl;", "nativeSetFlags", "(JJII)V",
-       Args().j(t).j(sc2).i(2).i(2));
-  call(rt, "Landroid/view/SurfaceControl;", "nativeApplyTransaction", "(JZZ)V",
-       Args().j(t).z(false).z(false));
-
-  int64_t bq2 = int64_t(call(rt, "Landroid/graphics/BLASTBufferQueue;", "nativeCreate",
-                             "(Ljava/lang/String;Z)J", Args().h(rt.new_string_utf8("bq2")).z(false)));
-  call(rt, "Landroid/graphics/BLASTBufferQueue;", "nativeUpdate", "(JJJJI)V",
-       Args().j(bq2).j(sc2).j(400).j(300).i(1));
-  rt::Handle s2 = rt::Handle(call(rt, "Landroid/graphics/BLASTBufferQueue;", "nativeGetSurface",
-                                  "(JZ)Landroid/view/Surface;", Args().j(bq2).z(false)));
-  int64_t s2_ptr = get_field_i64(rt, s2, "mNativeObject");
-
-  // Draw pure red into dialog layer (0xFFFF0000: alpha 255, red 255, green 0, blue 0)
-  call(rt, "Landroid/view/Surface;", "nativeLockCanvas", "(JLandroid/graphics/Canvas;Landroid/graphics/Rect;)J",
-       Args().j(s2_ptr).h(cv_obj).h(rt::kNull));
-  call(rt, "Landroid/graphics/BaseCanvas;", "nDrawColor", "(JII)V",
-       Args().j(c_native).i(int32_t(0xFFFF0000)).i(3));
-  call(rt, "Landroid/view/Surface;", "nativeUnlockCanvasAndPost", "(JLandroid/graphics/Canvas;)V",
-       Args().j(s2_ptr).h(cv_obj));
-
+  // A window as Android 17 makes it: the window manager's container layer at
+  // the frame, the client's layer created out of the tree (NOT_ADD_TO_ROOT).
+  constexpr int32_t kNotAddToRoot = 0x8000, kContainer = 0x80000, kEffect = 0x20000;
+  int64_t window = create("Window", 0, 0, kContainer);
+  apply([&](int64_t t) {
+    call(rt, sc, "nativeSetPosition", "(JJFF)V", Args().j(t).j(window).f(100.0f).f(100.0f));
+    call(rt, sc, "nativeSetLayer", "(JJI)V", Args().j(t).j(window).i(2));
+  });
+  CHECK_EQ(frame_count, 1);  // nothing drawn changed
+  int64_t client = create("VRI-dialog", 0, 0, kNotAddToRoot);
+  int64_t bq2 = post_color(client, 400, 300, 0xFFFF0000);
+  CHECK_EQ(frame_count, 1);  // out of the tree: not shown
+  apply([&](int64_t t) { call(rt, sc, "nativeReparent", "(JJJ)V", Args().j(t).j(client).j(window)); });
   CHECK_EQ(frame_count, 2);
-  CHECK_EQ(last_frame.width, 1080);
-  CHECK_EQ(last_frame.height, 1920);
   CHECK_EQ(last_frame.layer_name, std::string("composited"));
-  CHECK(last_frame.pixels != nullptr);
+  CHECK_EQ(red(pixel(150, 150)), 255u);  // at the container's position
+  CHECK_EQ(blue(pixel(150, 150)), 0u);
+  CHECK_EQ(blue(pixel(50, 50)), 255u);
+  CHECK_EQ(blue(pixel(510, 410)), 255u);  // past its 400 x 300
 
-  // Pixel inside dialog at (150, 150): red
-  uint32_t dialog_px = last_frame.pixels->at(150 * 1080 + 150);
-  CHECK_EQ(dialog_px & 0xFF, 255u);           // Red channel
-  CHECK_EQ((dialog_px >> 16) & 0xFF, 0u);     // Blue channel
+  // Dimmer: a black color layer of alpha 0.6 just below the window.
+  int64_t dim = create("Dim Layer", 0, 0, kEffect);
+  rt::GlobalRef black(rt, rt.new_array("[F", 3));
+  apply([&](int64_t t) {
+    call(rt, sc, "nativeSetColor", "(JJ[F)V", Args().j(t).j(dim).h(black.get()));
+    call(rt, sc, "nativeSetRelativeLayer", "(JJJI)V", Args().j(t).j(dim).j(window).i(-1));
+    call(rt, sc, "nativeSetAlpha", "(JJF)V", Args().j(t).j(dim).f(0.6f));
+  });
+  CHECK_EQ(frame_count, 3);
+  CHECK_EQ(red(pixel(150, 150)), 255u);  // the window, above the dim
+  uint32_t dimmed = blue(pixel(50, 50));  // 255 x 0.4
+  CHECK(dimmed >= 100u && dimmed <= 104u);
 
-  // Pixel outside dialog at (50, 50): dimmed blue (60% dim layer applied over blue 0xFF0000FF)
-  uint32_t bg_px = last_frame.pixels->at(50 * 1080 + 50);
-  uint32_t r = bg_px & 0xFF;
-  uint32_t b = (bg_px >> 16) & 0xFF;
-  CHECK_EQ(r, 0u);
-  CHECK(b >= 90u && b <= 115u);
+  // Hiding the container hides the client under it; the dim stays.
+  apply([&](int64_t t) { call(rt, sc, "nativeSetFlags", "(JJII)V", Args().j(t).j(window).i(1).i(1)); });
+  CHECK_EQ(frame_count, 4);
+  CHECK_EQ(red(pixel(150, 150)), 0u);
+  dimmed = blue(pixel(150, 150));
+  CHECK(dimmed >= 100u && dimmed <= 104u);
 
-  // Cleanup
+  // Transaction.remove: out of the tree; the base buffer alone again.
+  apply([&](int64_t t) { call(rt, sc, "nativeReparent", "(JJJ)V", Args().j(t).j(dim).j(0)); });
+  CHECK_EQ(frame_count, 5);
+  CHECK_EQ(last_frame.layer_name, std::string("base"));
+  CHECK_EQ(blue(pixel(50, 50)), 255u);
+
   bridge::set_frame_listener(nullptr);
-  call(rt, "Landroid/graphics/BLASTBufferQueue;", "nativeDestroy", "(J)V", Args().j(bq1));
-  call(rt, "Landroid/graphics/BLASTBufferQueue;", "nativeDestroy", "(J)V", Args().j(bq2));
+  call(rt, bbq, "nativeDestroy", "(J)V", Args().j(bq1));
+  call(rt, bbq, "nativeDestroy", "(J)V", Args().j(bq2));
 }
 
 

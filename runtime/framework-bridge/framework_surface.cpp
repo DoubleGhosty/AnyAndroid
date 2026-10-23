@@ -1,12 +1,13 @@
 // android.view.SurfaceControl, SurfaceControl.Transaction and Surface natives
 // (G3, ADR-006 J5), each signature checked against the framework.jar of
-// Android 17. The window's surfaces are logical until the compositor (J7-J8):
-// a SurfaceControl holds what SurfaceFlinger would know of a layer, and a
-// Transaction collects changes that apply() makes current. Natives are bound
-// as the real startup path reaches them.
+// Android 17. A SurfaceControl holds what SurfaceFlinger knows of a layer, a
+// Transaction collects changes that apply() makes current, and the layer tree
+// is composed in software into the display's frames (J9). Natives are bound as
+// the real startup path reaches them.
 #include "framework-bridge/internal.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstring>
 #include <deque>
@@ -15,10 +16,12 @@
 #include <mutex>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
 #include "common/clock.h"
+#include "common/log.h"
 #include "framework-bridge/handles.h"
 #include "framework-bridge/input_dispatcher.h"
 #include "include/core/SkBitmap.h"
@@ -46,12 +49,20 @@ struct Layer {
   std::mutex lock;
   int32_t id = 0;  // the layer id, also its handle (the binder token SurfaceFlinger gives)
   std::string name;
-  int32_t width = 0, height = 0, format = 0, flags = 0;
+  int32_t width = 0, height = 0, format = 0;
+  int32_t create_flags = 0;     // ISurfaceComposerClient flags given to createSurface
+  int32_t state_flags = 0;      // layer_state_t flags (setFlags)
   int32_t parent = 0;           // id of the parent layer, 0 for none
   int32_t relative_to = 0;      // id of the layer z is relative to, 0 for none
   int32_t z = 0;
   float x = 0, y = 0, alpha = 1;
   bool hidden = false;
+  // Out of the tree: created with NOT_ADD_TO_ROOT and no parent, or
+  // reparented to null (Transaction.remove). Neither it nor its children show.
+  bool offscreen = false;
+  bool effect = false;          // FX_SURFACE_EFFECT: a color layer, no buffer
+  bool has_color = false;       // setColor on an effect layer
+  float color[3] = {0, 0, 0};
   int32_t transform_hint = 0;
   int32_t buffer_width = 0, buffer_height = 0;  // default buffer size (BLASTBufferQueue)
   // The other properties a transaction set, as the raw values of their
@@ -148,6 +159,14 @@ int64_t next_transaction_id() {
 HandleTable<Layer>& layers() {
   static auto* t = new HandleTable<Layer>(0x1114);  // never destroyed
   return *t;
+}
+
+// Every layer by id, for the tree the compositor walks (parents and relative
+// layers are known by id).
+std::mutex layer_ids_lock;
+std::map<int32_t, std::weak_ptr<Layer>>& layer_ids() {
+  static auto* m = new std::map<int32_t, std::weak_ptr<Layer>>;  // never destroyed
+  return *m;
 }
 
 HandleTable<Transaction>& transactions() {
@@ -333,6 +352,228 @@ std::shared_ptr<std::function<void(const PostedFrame&)>> frame_listener() {
 
 static std::mutex active_buffer_queues_lock;
 static std::vector<std::weak_ptr<BufferQueue>> active_buffer_queues;
+
+// --- Composition (SurfaceFlinger) ---------------------------------------------
+//
+// The layer tree as SurfaceFlinger builds it (LayerHierarchy,
+// LayerSnapshotBuilder): a layer shows when its chain of parents reaches a
+// root that is in the tree, none of them hidden; its position and alpha add
+// up and multiply down that chain. Siblings are drawn by z, then id; a child
+// of negative z below its parent; a layer with a relative z among the
+// children of its relative parent. A buffer layer is drawn at its position,
+// an effect layer with a color fills the display (no crop). Not done:
+// crops, matrices, corner radii, shadows, blur.
+
+// One thing to draw: a buffer (queue) or a color.
+struct DrawItem {
+  int32_t id = 0;
+  std::string name;
+  std::shared_ptr<BufferQueue> queue;  // null for a color layer
+  int64_t frame_number = 0;
+  int32_t width = 0, height = 0;  // of the buffer
+  float x = 0, y = 0, alpha = 1;
+  float color[3] = {0, 0, 0};
+  bool operator==(const DrawItem& o) const {
+    return id == o.id && queue == o.queue && frame_number == o.frame_number && width == o.width &&
+           height == o.height && x == o.x && y == o.y && alpha == o.alpha && color[0] == o.color[0] &&
+           color[1] == o.color[1] && color[2] == o.color[2];
+  }
+};
+
+std::vector<DrawItem> layers_to_draw() {
+  struct Node {
+    int32_t id = 0, parent = 0, relative_to = 0, z = 0;
+    float x = 0, y = 0, alpha = 1;
+    bool hidden = false, offscreen = false, effect = false, has_color = false;
+    float color[3] = {0, 0, 0};
+    std::string name;
+    std::shared_ptr<BufferQueue> queue;
+    int64_t frame_number = 0;
+    int32_t width = 0, height = 0;
+  };
+  std::map<int32_t, Node> nodes;
+  {
+    std::vector<std::shared_ptr<Layer>> live;
+    {
+      std::lock_guard<std::mutex> guard(layer_ids_lock);
+      for (auto it = layer_ids().begin(); it != layer_ids().end();) {
+        if (auto l = it->second.lock()) {
+          live.push_back(std::move(l));
+          ++it;
+        } else {
+          it = layer_ids().erase(it);
+        }
+      }
+    }
+    for (const auto& l : live) {
+      std::lock_guard<std::mutex> guard(l->lock);
+      Node& n = nodes[l->id];
+      n.id = l->id, n.parent = l->parent, n.relative_to = l->relative_to, n.z = l->z;
+      n.x = l->x, n.y = l->y, n.alpha = l->alpha;
+      n.hidden = l->hidden, n.offscreen = l->offscreen, n.effect = l->effect, n.has_color = l->has_color;
+      std::copy(l->color, l->color + 3, n.color);
+      n.name = l->name;
+    }
+  }
+  {
+    std::lock_guard<std::mutex> guard(active_buffer_queues_lock);
+    for (auto& wp : active_buffer_queues) {
+      auto q = wp.lock();
+      if (!q) continue;
+      std::lock_guard<std::mutex> qguard(q->lock);
+      if (!q->has_frame || q->width <= 0 || q->height <= 0 || !q->layer) continue;
+      auto it = nodes.find(q->layer->id);  // the id never changes
+      if (it == nodes.end()) continue;
+      it->second.queue = q;
+      it->second.frame_number = q->frame_number;
+      it->second.width = q->width;
+      it->second.height = q->height;
+    }
+  }
+
+  // Through the parents: in the tree, visible, position and alpha.
+  struct Resolved {
+    bool on_screen = false, visible = false;
+    float x = 0, y = 0, alpha = 1;
+  };
+  std::map<int32_t, Resolved> resolved;
+  std::function<const Resolved&(int32_t, int)> resolve = [&](int32_t id, int depth) -> const Resolved& {
+    auto done = resolved.find(id);
+    if (done != resolved.end()) return done->second;
+    Resolved r;
+    const Node& n = nodes.at(id);
+    if (n.parent == 0) {
+      r.on_screen = !n.offscreen;
+      r.visible = r.on_screen && !n.hidden;
+      r.x = n.x, r.y = n.y, r.alpha = n.alpha;
+    } else if (nodes.count(n.parent) && depth < 64) {  // a parent gone takes its children off screen
+      const Resolved& p = resolve(n.parent, depth + 1);
+      r.on_screen = p.on_screen;
+      r.visible = p.visible && !n.hidden;
+      r.x = p.x + n.x, r.y = p.y + n.y, r.alpha = p.alpha * n.alpha;
+    }
+    return resolved[id] = r;
+  };
+  std::map<int32_t, std::vector<int32_t>> children;  // drawing order, 0 for the roots
+  for (const auto& [id, n] : nodes) {
+    if (!resolve(id, 0).on_screen) continue;
+    int32_t under = n.parent;
+    if (n.relative_to != 0 && nodes.count(n.relative_to) && resolve(n.relative_to, 0).on_screen) under = n.relative_to;
+    children[under].push_back(id);
+  }
+  for (auto& [under, list] : children) {
+    std::stable_sort(list.begin(), list.end(), [&](int32_t a, int32_t b) {
+      const Node &na = nodes.at(a), &nb = nodes.at(b);
+      return na.z != nb.z ? na.z < nb.z : a < b;
+    });
+  }
+
+  std::vector<DrawItem> items;
+  std::set<int32_t> visited;  // relative layers can loop
+  std::function<void(int32_t)> visit = [&](int32_t id) {
+    if (!visited.insert(id).second) return;
+    const Node& n = nodes.at(id);
+    auto kids = children.find(id);
+    if (kids != children.end()) {
+      for (int32_t c : kids->second) if (nodes.at(c).z < 0) visit(c);
+    }
+    const Resolved& r = resolved.at(id);
+    bool drawn = n.queue || (n.effect && n.has_color);
+    if (r.visible && r.alpha > 0 && drawn) {
+      DrawItem item;
+      item.id = id;
+      item.name = n.name;
+      item.queue = n.queue;
+      item.frame_number = n.frame_number;
+      item.width = n.width, item.height = n.height;
+      item.x = r.x, item.y = r.y, item.alpha = std::min(r.alpha, 1.0f);
+      std::copy(n.color, n.color + 3, item.color);
+      items.push_back(std::move(item));
+    }
+    if (kids != children.end()) {
+      for (int32_t c : kids->second) if (nodes.at(c).z >= 0) visit(c);
+    }
+  };
+  if (auto roots = children.find(0); roots != children.end()) {
+    for (int32_t id : roots->second) visit(id);
+  }
+  return items;
+}
+
+// What was last presented: a display that does not change is not presented
+// again.
+std::mutex presented_lock;
+std::vector<DrawItem> presented_items;
+int64_t presented_frames = 0;
+
+// Composes the layer tree into a frame for the host's listener when what
+// shows changed: a buffer posted on a layer in the tree, or a transaction.
+void present_display() {
+  auto listener = frame_listener();
+  if (!listener) return;
+  std::vector<DrawItem> items = layers_to_draw();
+  PostedFrame frame;
+  {
+    std::lock_guard<std::mutex> guard(presented_lock);
+    if (items == presented_items) return;
+    presented_items = items;
+    frame.frame_number = ++presented_frames;
+  }
+  if (log::enabled(log::Level::Debug)) {
+    std::string d = "image " + std::to_string(frame.frame_number) + " :";
+    for (const auto& item : items) {
+      d += " [" + item.name + " " + std::to_string(int(item.x)) + "," + std::to_string(int(item.y)) + " " +
+           (item.queue ? std::to_string(item.width) + "x" + std::to_string(item.height) : std::string("couleur")) +
+           " alpha " + std::to_string(item.alpha) + "]";
+    }
+    log::debug("compositeur", d);
+  }
+  frame.width = kDisplayWidth;
+  frame.height = kDisplayHeight;
+  // A single buffer that covers the display is presented as it is.
+  if (items.size() == 1 && items[0].queue && items[0].x == 0 && items[0].y == 0 && items[0].alpha >= 1) {
+    auto& q = items[0].queue;
+    std::lock_guard<std::mutex> guard(q->lock);
+    if (q->width == kDisplayWidth && q->height == kDisplayHeight) {
+      frame.opaque = opaque_format(q->format);
+      frame.pixels = std::make_shared<const std::vector<uint32_t>>(q->pixels->data);
+      frame.layer_id = items[0].id;
+      frame.layer_name = items[0].name;
+      (*listener)(frame);
+      return;
+    }
+  }
+  std::vector<uint32_t> pixels(size_t(kDisplayWidth) * size_t(kDisplayHeight), 0);
+  SkBitmap bitmap;
+  bitmap.installPixels(SkImageInfo::Make(kDisplayWidth, kDisplayHeight, kN32_SkColorType, kPremul_SkAlphaType,
+                                         SkColorSpace::MakeSRGB()),
+                       pixels.data(), size_t(kDisplayWidth) * 4);
+  SkCanvas canvas(bitmap);
+  canvas.clear(SK_ColorBLACK);
+  for (const auto& item : items) {
+    SkPaint paint;
+    paint.setAlphaf(item.alpha);
+    if (!item.queue) {
+      paint.setColor4f(SkColor4f{item.color[0], item.color[1], item.color[2], item.alpha}, nullptr);
+      canvas.drawPaint(paint);
+      continue;
+    }
+    std::lock_guard<std::mutex> guard(item.queue->lock);
+    const BufferQueue& q = *item.queue;
+    if (!q.pixels || q.pixels->data.size() < size_t(q.width) * size_t(q.height)) continue;
+    SkAlphaType at = opaque_format(q.format) ? kOpaque_SkAlphaType : kPremul_SkAlphaType;
+    SkPixmap pixmap(SkImageInfo::Make(q.width, q.height, kN32_SkColorType, at, SkColorSpace::MakeSRGB()),
+                    q.pixels->data.data(), size_t(q.width) * 4);
+    // Drawn at once on this raster canvas, while the queue is locked.
+    if (sk_sp<SkImage> image = SkImages::RasterFromPixmap(pixmap, nullptr, nullptr)) {
+      canvas.drawImage(image, item.x, item.y, SkSamplingOptions(), &paint);
+    }
+  }
+  frame.opaque = true;
+  frame.pixels = std::make_shared<const std::vector<uint32_t>>(std::move(pixels));
+  frame.layer_name = "composited";
+  (*listener)(frame);
+}
 
 void register_buffer_queue(rt::NativeRegistry& r) {
   const char* bq = "Landroid/graphics/BLASTBufferQueue;";
@@ -521,148 +762,18 @@ void register_buffer_queue(rt::NativeRegistry& r) {
     }
     std::vector<std::function<void()>> changes;
     Callbacks callbacks;
-    std::shared_ptr<std::function<void(const PostedFrame&)>> listener = frame_listener();
-    PostedFrame frame;
-    std::shared_ptr<Layer> layer;
     {
       std::lock_guard<std::mutex> guard(s->queue->lock);
       s->queue->frame_number++;
       s->queue->has_frame = true;
       changes.swap(s->queue->next_frame_changes);
       callbacks.take(s->queue->next_frame_callbacks);
-      if (listener) {
-        frame.frame_number = s->queue->frame_number;
-        frame.width = s->queue->width;
-        frame.height = s->queue->height;
-        frame.opaque = opaque_format(s->queue->format);
-        frame.pixels = std::make_shared<const std::vector<uint32_t>>(s->queue->pixels->data);
-        layer = s->queue->layer;
-      }
     }
     for (auto& change : changes) change();
+    present_display();
     run_callbacks(rt, callbacks);
-    if (listener) {
-      struct LayerItem {
-        std::shared_ptr<const std::vector<uint32_t>> pixels;
-        int32_t width = 0, height = 0, format = 0;
-        int32_t id = 0, z = 0, flags = 0;
-        float x = 0.0f, y = 0.0f, alpha = 1.0f;
-        std::string name;
-      };
-      std::vector<LayerItem> visible_layers;
-      {
-        std::lock_guard<std::mutex> guard(active_buffer_queues_lock);
-        active_buffer_queues.erase(
-            std::remove_if(active_buffer_queues.begin(), active_buffer_queues.end(),
-                           [](const std::weak_ptr<BufferQueue>& wp) { return wp.expired(); }),
-            active_buffer_queues.end());
-
-        for (auto& wp : active_buffer_queues) {
-          if (auto cur_q = wp.lock()) {
-            std::lock_guard<std::mutex> qguard(cur_q->lock);
-            if (!cur_q->has_frame || cur_q->width <= 0 || cur_q->height <= 0 || !cur_q->pixels ||
-                !cur_q->layer) {
-              continue;
-            }
-            std::lock_guard<std::mutex> lguard(cur_q->layer->lock);
-            if (cur_q->layer->hidden || cur_q->layer->alpha <= 0.0f) {
-              continue;
-            }
-            LayerItem item;
-            item.pixels = std::make_shared<const std::vector<uint32_t>>(cur_q->pixels->data);
-            item.width = cur_q->width;
-            item.height = cur_q->height;
-            item.format = cur_q->format;
-            item.id = cur_q->layer->id;
-            item.z = cur_q->layer->z;
-            item.flags = cur_q->layer->flags;
-            item.x = cur_q->layer->x;
-            item.y = cur_q->layer->y;
-            item.alpha = cur_q->layer->alpha;
-            item.name = cur_q->layer->name;
-            visible_layers.push_back(std::move(item));
-          }
-        }
-      }
-
-      if (visible_layers.size() <= 1) {
-        if (!visible_layers.empty()) {
-          const auto& top = visible_layers.front();
-          frame.frame_number = s->queue->frame_number;
-          frame.width = top.width;
-          frame.height = top.height;
-          frame.opaque = opaque_format(top.format);
-          frame.pixels = top.pixels;
-          frame.layer_id = top.id;
-          frame.layer_name = top.name;
-        } else if (layer) {
-          std::lock_guard<std::mutex> guard(layer->lock);
-          frame.layer_id = layer->id;
-          frame.layer_name = layer->name;
-        }
-        (*listener)(frame);
-      } else {
-        std::stable_sort(visible_layers.begin(), visible_layers.end(),
-                         [](const LayerItem& item_a, const LayerItem& item_b) {
-                           if (item_a.z != item_b.z) return item_a.z < item_b.z;
-                           return item_a.id < item_b.id;
-                         });
-
-        int32_t canvas_w = 1080;
-        int32_t canvas_h = 1920;
-        for (const auto& item : visible_layers) {
-          canvas_w = std::max(canvas_w, item.width);
-          canvas_h = std::max(canvas_h, item.height);
-        }
-
-        std::vector<uint32_t> composite_pixels(size_t(canvas_w) * size_t(canvas_h), 0);
-        SkBitmap comp_bitmap;
-        comp_bitmap.installPixels(
-            SkImageInfo::Make(canvas_w, canvas_h, kN32_SkColorType, kPremul_SkAlphaType, SkColorSpace::MakeSRGB()),
-            composite_pixels.data(), size_t(canvas_w) * 4);
-        SkCanvas canvas(comp_bitmap);
-        canvas.clear(SK_ColorBLACK);
-
-        for (size_t i = 0; i < visible_layers.size(); ++i) {
-          const auto& item = visible_layers[i];
-          if (i > 0 && ((item.flags & 0x02) != 0 || item.z > 0)) {
-            SkPaint dim_paint;
-            dim_paint.setColor(SkColorSetARGB(153, 0, 0, 0));
-            dim_paint.setBlendMode(SkBlendMode::kSrcOver);
-            canvas.drawRect(SkRect::MakeWH(SkScalar(canvas_w), SkScalar(canvas_h)), dim_paint);
-          }
-
-          if (item.pixels && item.width > 0 && item.height > 0 &&
-              item.pixels->size() >= size_t(item.width) * size_t(item.height)) {
-            SkAlphaType at = opaque_format(item.format) ? kOpaque_SkAlphaType : kPremul_SkAlphaType;
-            SkPixmap pixmap(SkImageInfo::Make(item.width, item.height, kN32_SkColorType, at, SkColorSpace::MakeSRGB()),
-                            item.pixels->data(), size_t(item.width) * 4);
-            auto* keep = new std::shared_ptr<const std::vector<uint32_t>>(item.pixels);
-            sk_sp<SkImage> img = SkImages::RasterFromPixmap(
-                pixmap, [](const void*, void* ctx) { delete static_cast<std::shared_ptr<const std::vector<uint32_t>>*>(ctx); },
-                keep);
-            if (img) {
-              SkPaint layer_paint;
-              if (item.alpha < 1.0f) {
-                layer_paint.setAlphaf(std::clamp(item.alpha, 0.0f, 1.0f));
-              }
-              canvas.drawImage(img, item.x, item.y, SkSamplingOptions(), &layer_paint);
-            }
-          }
-        }
-
-        frame.frame_number = s->queue->frame_number;
-        frame.width = canvas_w;
-        frame.height = canvas_h;
-        frame.opaque = true;
-        frame.pixels = std::make_shared<const std::vector<uint32_t>>(std::move(composite_pixels));
-        frame.layer_id = s->queue->layer ? s->queue->layer->id : 0;
-        frame.layer_name = "composited";
-        (*listener)(frame);
-      }
-    }
     return 0;
-  }, S::kPartial, "compositeur multi-couches logiciel (J9)");
+  }, S::kPartial, "composition logicielle de l'arbre des couches : ni découpe, ni matrice, ni flou");
 }
 
 int32_t next_layer_id() {
@@ -866,20 +977,31 @@ void register_framework_surface(rt::NativeRegistry& r) {
          [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_long(layer_free); });
   r.bind(sc, "nativeGetNativeTransactionFinalizer", "()J",
          [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_long(transaction_free); });
-  // SurfaceComposerClient::createSurface: a layer of the application's own
-  // window (Android 17 creates it client side, then hands it to relayout).
+  // SurfaceComposerClient::createSurface. Android 17 creates a window's layer
+  // client side (ViewRootImpl.createSurfaceControl, NOT_ADD_TO_ROOT), then
+  // the window manager puts it in the tree under the window's own layer.
   r.bind(sc, "nativeCreate", "(Landroid/view/SurfaceSession;Ljava/lang/String;IIIIJLandroid/os/Parcel;)J",
          [](Runtime& rt, NativeArgs& a) -> uint64_t {
+           // SurfaceControl's HIDDEN, NOT_ADD_TO_ROOT, FX_SURFACE_MASK, FX_SURFACE_EFFECT.
+           constexpr int32_t kHidden = 0x4, kNotAddToRoot = 0x8000, kFxMask = 0xF0000, kFxEffect = 0x20000;
            auto l = std::make_shared<Layer>();
            l->id = next_layer_id();
            l->name = rt.string_utf8(Handle(a.h(1)));
            l->width = a.i32(2);
            l->height = a.i32(3);
            l->format = a.i32(4);
-           l->flags = a.i32(5);
+           l->create_flags = a.i32(5);
            if (int64_t parent = a.i64(6)) l->parent = layer(rt, parent)->id;
+           if (l->create_flags & kHidden) l->state_flags |= 0x01;  // layer_state_t::eLayerHidden
+           l->hidden = (l->state_flags & 0x01) != 0;
+           l->offscreen = l->parent == 0 && (l->create_flags & kNotAddToRoot) != 0;
+           l->effect = (l->create_flags & kFxMask) == kFxEffect;
+           {
+             std::lock_guard<std::mutex> guard(layer_ids_lock);
+             layer_ids()[l->id] = l;
+           }
            return rt::ret_long(layers().add(std::move(l)));
-         }, S::kPartial, "couche logique : pas de compositeur avant J7-J8");
+         }, S::kPartial, "couche de l'arbre composé en logiciel, sans métadonnées");
   r.bind(sc, "nativeCopyFromSurfaceControl", "(J)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     return rt::ret_long(layers().add(layer(rt, a.i64(0))));
   });
@@ -951,17 +1073,31 @@ void register_framework_surface(rt::NativeRegistry& r) {
     queue_change(rt, a, [relative, z](Layer& l) { l.z = z, l.relative_to = relative; });
     return 0;
   });
+  // A null parent takes the layer out of the tree (Transaction.remove).
   r.bind(sc, "nativeReparent", "(JJJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t parent = a.i64(4) ? layer(rt, a.i64(4))->id : 0;
-    queue_change(rt, a, [parent](Layer& l) { l.parent = parent; });
+    queue_change(rt, a, [parent](Layer& l) { l.parent = parent, l.offscreen = parent == 0; });
     return 0;
   });
   // layer_state_t::eLayerHidden is the bit 0x01 of the flags.
   r.bind(sc, "nativeSetFlags", "(JJII)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t flags = a.i32(4), mask = a.i32(5);
     queue_change(rt, a, [flags, mask](Layer& l) {
-      l.flags = (l.flags & ~mask) | (flags & mask);
-      l.hidden = (l.flags & 0x01) != 0;
+      l.state_flags = (l.state_flags & ~mask) | (flags & mask);
+      l.hidden = (l.state_flags & 0x01) != 0;
+    });
+    return 0;
+  });
+  // The color of an effect layer, red, green, blue from 0 to 1.
+  r.bind(sc, "nativeSetColor", "(JJ[F)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (a.h(4) == kNull) rt.throw_npe("color");
+    rt::ArrayObject& arr = rt.array(a.h(4), "float[]");
+    if (arr.length < 3) rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "");
+    std::array<float, 3> c;
+    std::memcpy(c.data(), arr.data.data(), sizeof c);
+    queue_change(rt, a, [c](Layer& l) {
+      std::copy(c.begin(), c.end(), l.color);
+      l.has_color = true;
     });
     return 0;
   });
@@ -1000,9 +1136,10 @@ void register_framework_surface(rt::NativeRegistry& r) {
       callbacks.take(t->callbacks);
     }
     for (auto& change : changes) change();
+    present_display();
     run_callbacks(rt, callbacks);
     return 0;
-  }, S::kPartial, "couches logiques : pas de compositeur avant J7-J8");
+  }, S::kPartial, "appliquée et composée aussitôt, sans attente de vsync");
   r.bind(sc, "nativeAddTransactionCommittedListener", "(JLandroid/view/SurfaceControl$TransactionCommittedListener;)V",
          [](Runtime& rt, NativeArgs& a) -> uint64_t {
            auto t = transaction(rt, a.i64(0));

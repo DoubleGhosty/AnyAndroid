@@ -1,5 +1,6 @@
 package android.view;
 
+import android.graphics.Rect;
 import android.os.IBinder;
 
 public interface WindowManager {
@@ -11,6 +12,7 @@ public interface WindowManager {
     public int gravity;
     public float dimAmount;
     public IBinder token;
+    public final Rect surfaceInsets = null;
 
     public final int copyFrom(LayoutParams o) {
       throw new RuntimeException("stub");

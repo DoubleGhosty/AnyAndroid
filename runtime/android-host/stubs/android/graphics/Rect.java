@@ -15,5 +15,9 @@ public class Rect {
     this.bottom = bottom;
   }
 
+  public Rect(Rect r) {
+    throw new RuntimeException("stub");
+  }
+
   public void set(Rect src) {}
 }
