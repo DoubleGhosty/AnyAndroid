@@ -1629,21 +1629,6 @@ rt::Class* calling_class(Runtime& rt, size_t num_frames) {
   return frames[frames.size() - 1 - num_frames].method->owner;
 }
 
-// Class::IsInSamePackage: the same defining loader and the same package part
-// of the descriptor (arrays by their element classes).
-bool in_same_package(Runtime& rt, rt::Class* a, rt::Class* b) {
-  if (a == b) return true;
-  if (class_loader_of(rt, a, true) != class_loader_of(rt, b, true)) return false;
-  while (a->component) a = a->component;
-  while (b->component) b = b->component;
-  if (a == b) return true;
-  const std::string& d1 = a->descriptor;
-  const std::string& d2 = b->descriptor;
-  size_t i = 0;
-  while (i < std::min(d1.size(), d2.size()) && d1[i] == d2[i]) ++i;
-  return d1.find('/', i) == std::string::npos && d2.find('/', i) == std::string::npos;
-}
-
 // VerifyAccess (reflection.cc): may `calling` reach a member of `declaring`
 // with `access_flags` through `obj` (the receiver, or for a static field the
 // declaring class's mirror)?
@@ -2202,6 +2187,21 @@ void register_libcore_members(rt::NativeRegistry& r) {
 }
 
 }  // namespace
+
+// Class::IsInSamePackage: the same defining loader and the same package part
+// of the descriptor (arrays by their element classes).
+bool in_same_package(Runtime& rt, rt::Class* a, rt::Class* b) {
+  if (a == b) return true;
+  if (class_loader_of(rt, a, true) != class_loader_of(rt, b, true)) return false;
+  while (a->component) a = a->component;
+  while (b->component) b = b->component;
+  if (a == b) return true;
+  const std::string& d1 = a->descriptor;
+  const std::string& d2 = b->descriptor;
+  size_t i = 0;
+  while (i < std::min(d1.size(), d2.size()) && d1[i] == d2[i]) ++i;
+  return d1.find('/', i) == std::string::npos && d2.find('/', i) == std::string::npos;
+}
 
 void register_java_reflect(rt::NativeRegistry& r, Host&) {
   register_members(r);

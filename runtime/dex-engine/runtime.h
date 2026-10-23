@@ -256,6 +256,10 @@ struct DexCache {
   std::vector<Field*> fields;
   std::vector<Method*> methods;  // static/direct resolution
   std::vector<Handle> strings;
+  // java.lang.invoke constants: resolved MethodType objects (by prototype) and
+  // the CallSite of each call site, bound once by its bootstrap method.
+  std::vector<Handle> method_types;
+  std::vector<Handle> call_sites;
 };
 
 struct Class {
@@ -551,6 +555,16 @@ class Runtime {
   // polymorphic handler, typed by the call-site prototype.
   uint64_t invoke_polymorphic(Class* declared, const std::string& name, const std::string& callsite,
                               const uint32_t* args, uint32_t count);
+  // const-method-type, const-method-handle and invoke-custom: handled by the
+  // registry's invoke-dynamic handlers for the referrer `m`.
+  Handle resolve_method_type(Method* m, uint32_t proto_idx);
+  Handle resolve_method_handle(Method* m, uint32_t method_handle_idx);
+  uint64_t invoke_custom(Method* m, uint32_t call_site_idx, const uint32_t* args, uint32_t count);
+  // Resolution from bytecode (also for the DEX constants of java.lang.invoke).
+  Class* resolve_type(DexCache& cache, uint32_t type_idx);
+  Handle resolve_string(DexCache& cache, uint32_t string_idx);
+  Field* resolve_field(DexCache& cache, uint32_t field_idx, bool is_static);
+  [[noreturn]] void missing_method(Class* referenced, std::string_view name, std::string_view sig, bool is_static);
   // Opaque, bounds-checked identifiers of fields for code that stores them in
   // Java objects (ART's Field.getArtField(), VarHandle): never raw pointers.
   uint64_t field_cookie(Field* f);
@@ -667,11 +681,6 @@ class Runtime {
   uint64_t invoke_jni(Method* method, const uint32_t* args, uint32_t nargs);
   PreparedCode& prepared(Method* m);
 
-  // Resolution from bytecode.
-  Class* resolve_type(DexCache& cache, uint32_t type_idx);
-  Handle resolve_string(DexCache& cache, uint32_t string_idx);
-  Field* resolve_field(DexCache& cache, uint32_t field_idx, bool is_static);
-  [[noreturn]] void missing_method(Class* referenced, std::string_view name, std::string_view sig, bool is_static);
   Class* first_framework_ancestor(Class* cls);
 
   // Threads (threads.cpp).

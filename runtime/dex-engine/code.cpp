@@ -135,6 +135,8 @@ std::unique_ptr<PreparedCode> prepare_code(const dex::DexFile& dex, const dex::C
           if (d.index2 >= dex.num_protos()) throw_format("index de prototype invalide à " + hex(pc));
           break;
         case IndexKind::kProto: check_index(dex.num_protos(), "prototype"); break;
+        case IndexKind::kCallSite: check_index(dex.num_call_sites(), "site d'appel"); break;
+        case IndexKind::kMethodHandle: check_index(dex.num_method_handles(), "method handle"); break;
         default: break;
       }
 

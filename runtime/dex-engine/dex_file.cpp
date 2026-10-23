@@ -294,6 +294,52 @@ void DexFile::parse(const DexFile* shared) {
       throw_format("classe définie deux fois : " + text::printable(type_descriptor(d.class_idx)));
     }
   }
+
+  // The map list names the sections the header does not: call sites and
+  // method handles (TYPE_CALL_SITE_ID_ITEM 0x0007, TYPE_METHOD_HANDLE_ITEM 0x0008).
+  if (h.map_off) {
+    if (uint64_t(h.map_off) + 4 > limit_) throw_format("liste des sections hors limites");
+    uint32_t items = r.u32_at(h.map_off);
+    check_section(limit_, items, h.map_off + 4, 12, "map_list");
+    for (uint32_t i = 0; i < items; ++i) {
+      ByteReader m = r.sub(h.map_off + 4 + 12ull * i, 12);
+      uint16_t type = m.u16();
+      m.u16();
+      uint32_t size = m.u32(), off = m.u32();
+      if (type == 0x0007) {
+        check_section(limit_, size, off, 4, "call_site_ids");
+        call_sites_.resize(size);
+        for (uint32_t k = 0; k < size; ++k) {
+          call_sites_[k] = r.u32_at(off + 4ull * k);
+          if (call_sites_[k] >= limit_) throw_format("site d'appel " + std::to_string(k) + " hors limites");
+        }
+      } else if (type == 0x0008) {
+        check_section(limit_, size, off, 8, "method_handles");
+        method_handles_.resize(size);
+        for (uint32_t k = 0; k < size; ++k) {
+          ByteReader mh = r.sub(off + 8ull * k, 8);
+          MethodHandleItem& item = method_handles_[k];
+          item.type = mh.u16();
+          mh.u16();
+          item.field_or_method_idx = mh.u16();
+          bool field = item.type <= 0x03;
+          if (item.type > 0x08 || item.field_or_method_idx >= (field ? h.field_ids_size : h.method_ids_size)) {
+            throw_format("method handle " + std::to_string(k) + " invalide");
+          }
+        }
+      }
+    }
+  }
+}
+
+std::vector<EncodedValue> DexFile::call_site(uint32_t idx) const {
+  if (idx >= call_sites_.size()) throw_format("index de site d'appel invalide " + std::to_string(idx));
+  return encoded_array(call_sites_[idx]);
+}
+
+const MethodHandleItem& DexFile::method_handle(uint32_t idx) const {
+  if (idx >= method_handles_.size()) throw_format("index de method handle invalide " + std::to_string(idx));
+  return method_handles_[idx];
 }
 
 bool DexFile::checksum_valid() const {

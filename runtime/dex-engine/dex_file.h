@@ -75,6 +75,13 @@ struct MethodId {
   uint32_t name_idx;
 };
 
+// A method_handle_item: the kind (method_handle_type: 0x00-0x03 field
+// accessors, 0x04-0x08 method invocations) and the field or method index.
+struct MethodHandleItem {
+  uint16_t type;
+  uint16_t field_or_method_idx;
+};
+
 struct ClassDef {
   uint32_t class_idx;
   uint32_t access_flags;
@@ -221,6 +228,13 @@ class DexFile {
   uint32_t num_class_defs() const { return header_.class_defs_size; }
   const ClassDef& class_def(uint32_t idx) const;
   std::optional<uint32_t> find_class_def(std::string_view descriptor) const;
+  // invoke-custom and const-method-handle (DEX 038): the sections named by the map list.
+  uint32_t num_call_sites() const { return uint32_t(call_sites_.size()); }
+  // The call site's encoded_array_item: bootstrap method handle, name, method
+  // type, then the static arguments.
+  std::vector<EncodedValue> call_site(uint32_t idx) const;
+  uint32_t num_method_handles() const { return uint32_t(method_handles_.size()); }
+  const MethodHandleItem& method_handle(uint32_t idx) const;
 
   ClassData class_data(const ClassDef& def) const;
   CodeItem code_item(uint32_t offset) const;
@@ -256,6 +270,8 @@ class DexFile {
   std::vector<FieldId> fields_;
   std::vector<MethodId> methods_;
   std::vector<ClassDef> class_defs_;
+  std::vector<uint32_t> call_sites_;  // call_site_off of each call_site_id_item
+  std::vector<MethodHandleItem> method_handles_;
   std::unordered_map<std::string, uint32_t> class_def_by_descriptor_;
 };
 

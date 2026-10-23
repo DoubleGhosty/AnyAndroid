@@ -33,7 +33,8 @@ import java.util.TimeZone;
 /**
  * Self-test of the libcore paths added to AnyAndroid on 17 October (G2), on AOSP's real libcore:
  * scatter-gather I/O, MethodHandle invocation, annotations and generic signatures, reflection
- * access checks, time zones and the remaining POSIX calls. Each line is what Android prints; a
+ * access checks, invoke-custom and method handle constants, time zones and the remaining POSIX
+ * calls. Each line is what Android prints; a
  * failure prints its class.
  */
 public final class LibcoreProbe {
@@ -59,6 +60,7 @@ public final class LibcoreProbe {
     annotations();
     proxies();
     access();
+    invokeDynamic();
     timeZones();
     posix();
   }
@@ -291,6 +293,45 @@ public final class LibcoreProbe {
         String.valueOf(Class.forName("aa.host.probe.PackagePrivate").getDeclaredConstructor().newInstance())));
     check("constructeur protégé d'une classe publique", () -> denied(() ->
         Hidden.class.getDeclaredConstructor().newInstance().getClass().getName()));
+  }
+
+  // --- invoke-custom, const-method-handle and const-method-type (IndySites, written by
+  // gen/IndySitesGen.java, then D8) ----------------------------------------------------------
+
+  static void invokeDynamic() {
+    check("invoke-custom, arguments statiques", IndySites::describe);
+    check("invoke-custom, cible appelée", () -> IndySites.twice(4) + " puis " + IndySites.twice(5)
+        + ", amorce appelée " + Indy.constantBootstraps + " fois");
+    check("invoke-custom, amorce à arité variable", IndySites::joined);
+    check("invoke-custom, amorce qui rend null", () -> {
+      try {
+        return "rendu " + IndySites.broken();
+      } catch (BootstrapMethodError e) {
+        return e.getMessage() + " ; cause " + e.getCause();
+      }
+    });
+    check("const-method-handle, méthode statique", () -> {
+      MethodHandle h = IndySites.handle();
+      return h.type() + " : " + (int) h.invokeExact(8) + ", nouvel objet " + (h != IndySites.handle());
+    });
+    check("const-method-type", () -> {
+      MethodType t = IndySites.type();
+      return t + ", interné " + (t == MethodType.methodType(long.class, int.class, String.class));
+    });
+    check("const-method-handle, champ statique", () -> {
+      MethodHandle h = IndySites.getter();
+      return h.type() + " : " + (int) h.invokeExact();
+    });
+    check("const-method-handle, méthodes d'instance et d'interface", () -> {
+      MethodHandle v = IndySites.virtualHandle();
+      MethodHandle i = IndySites.interfaceHandle();
+      return v.type() + " : " + (int) v.invokeExact("seize") + " ; " + i.type() + " : "
+          + (int) i.invokeExact((CharSequence) "abc");
+    });
+    check("const-method-handle, constructeur", () -> {
+      MethodHandle c = IndySites.constructorHandle();
+      return c.type() + " : " + (StringBuilder) c.invokeExact("abc");
+    });
   }
 
   // --- Time zones (tzdata of the image, read by the i18n module's Memory) -----------------

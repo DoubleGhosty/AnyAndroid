@@ -626,9 +626,20 @@ uint64_t Runtime::execute(Method* m, const uint32_t* args, uint32_t nargs) {
               }
               result = invoke_polymorphic(declared, dex.string(mid.name_idx), dex.proto_signature(in.index2), argbuf, n);
               ++i;
-            } else if (op >= 0xfc) {
-              throw_unsupported(std::string("bytecode ") + dex::op_info(op).name,
-                                "invoke-custom et constantes MethodHandle non pris en charge");
+            } else if (op == 0xfc || op == 0xfd) {
+              // invoke-custom: the target of the call site, bound once by its
+              // bootstrap method, invoked exactly.
+              const bool range = op == 0xfd;
+              const uint32_t n = in.argc;
+              for (uint32_t k = 0; k < n; ++k) argbuf[k] = range ? regs[in.c + k] : regs[in.args[k]];
+              result = invoke_custom(m, in.index, argbuf, n);
+              ++i;
+            } else if (op == 0xfe) {  // const-method-handle
+              regs[in.a] = resolve_method_handle(m, in.index);
+              ++i;
+            } else if (op == 0xff) {  // const-method-type
+              regs[in.a] = resolve_method_type(m, in.index);
+              ++i;
             } else {
               throw_new("Ljava/lang/VerifyError;", "opcode inattendu " + hex(op));
             }

@@ -244,6 +244,9 @@ rt::Class* find_loaded_class(rt::Runtime& rt, rt::Handle loader, const std::stri
 // Class.classForName: through `loader` (null or BootClassLoader: boot space).
 // Throws ClassNotFoundException.
 rt::Class* class_for_name(rt::Runtime& rt, rt::Handle name, rt::Handle loader);
+// Class::IsInSamePackage (java_reflect.cpp): the same defining loader and the
+// same package.
+bool in_same_package(rt::Runtime& rt, rt::Class* a, rt::Class* b);
 
 // Helpers of the libcore natives (libcore_natives.cpp).
 rt::Field* find_field(rt::Class* cls, std::string_view name, std::string_view type);

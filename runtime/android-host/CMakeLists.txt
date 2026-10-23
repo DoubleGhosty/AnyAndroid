@@ -16,9 +16,10 @@ add_custom_command(OUTPUT ${AA_HOST_DEX}
   COMMAND ${CMAKE_COMMAND}
     -DJAVAC=${Java_JAVAC_EXECUTABLE} -DJAVA=${Java_JAVA_EXECUTABLE} -DR8=${AA_R8_JAR}
     -DSTUBS_ARGS=${CMAKE_CURRENT_BINARY_DIR}/stubs.args -DSOURCES_ARGS=${CMAKE_CURRENT_BINARY_DIR}/sources.args
-    -DWORK=${work} -DOUT=${AA_HOST_DEX}
+    -DWORK=${work} -DOUT=${AA_HOST_DEX} -DGEN_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/gen/IndySitesGen.java
     -P ${CMAKE_CURRENT_SOURCE_DIR}/build_host_dex.cmake
   DEPENDS ${aa_host_stubs} ${aa_host_sources} ${CMAKE_CURRENT_SOURCE_DIR}/build_host_dex.cmake
+          ${CMAKE_CURRENT_SOURCE_DIR}/gen/IndySitesGen.java
   COMMENT "javac + D8 : anyandroid-host.dex"
   VERBATIM)
 add_custom_target(anyandroid_host_dex ALL DEPENDS ${AA_HOST_DEX})

@@ -17,6 +17,7 @@ namespace aa::rt {
 class Runtime;
 class NativeArgs;
 struct Class;
+struct Method;
 
 enum class ApiStatus : uint8_t { kSupported, kPartial, kStub, kUnsupported, kInvestigate };
 
@@ -30,6 +31,16 @@ using NativeFn = std::function<uint64_t(Runtime&, NativeArgs&)>;
 // and raw argument words, argument 0 being the handle.
 using PolymorphicFn = std::function<uint64_t(Runtime&, Class* declared, const std::string& name,
                                              const std::string& callsite, const uint32_t* args, uint32_t count)>;
+
+// const-method-type, const-method-handle and invoke-custom (DEX 038), which
+// need java.lang.invoke: resolved against the DEX file and the class of the
+// referrer (the method executing the instruction).
+struct InvokeDynamicHandlers {
+  std::function<uint32_t(Runtime&, Method* referrer, uint32_t proto_idx)> method_type;
+  std::function<uint32_t(Runtime&, Method* referrer, uint32_t method_handle_idx)> method_handle;
+  std::function<uint64_t(Runtime&, Method* referrer, uint32_t call_site_idx, const uint32_t* args, uint32_t count)>
+      invoke_custom;
+};
 
 struct NativeMethodSpec {
   std::string name;
@@ -136,9 +147,12 @@ class NativeRegistry {
 
   void set_polymorphic_handler(PolymorphicFn fn) { polymorphic_ = std::move(fn); }
   const PolymorphicFn& polymorphic_handler() const { return polymorphic_; }
+  void set_invoke_dynamic_handlers(InvokeDynamicHandlers h) { invoke_dynamic_ = std::move(h); }
+  const InvokeDynamicHandlers& invoke_dynamic_handlers() const { return invoke_dynamic_; }
 
  private:
   PolymorphicFn polymorphic_;
+  InvokeDynamicHandlers invoke_dynamic_;
   std::map<std::string, std::unique_ptr<NativeClassSpec>, std::less<>> classes_;
   std::map<std::string, NativeBinding, std::less<>> bindings_;
 };

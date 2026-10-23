@@ -2042,6 +2042,412 @@ uint64_t methodhandle_invoke(Runtime& rt, const std::string& name, const std::st
   rt.throw_new("Ljava/lang/NoSuchMethodError;", "MethodHandle." + name);
 }
 
+// --- The DEX constants of java.lang.invoke: const-method-type, const-method-handle and
+// invoke-custom (ClassLinker::ResolveMethodType and ResolveMethodHandle, interpreter_common.cc
+// InvokeBootstrapMethod and DoInvokeCustom, android-17.0.0_r1).
+
+// MethodType::Create: MethodType.makeImpl(rtype, ptypes, trusted).
+Handle create_method_type(Runtime& rt, const TypeDesc& t) {
+  Handle ptypes = rt.new_array("[Ljava/lang/Class;", int32_t(t.params.size()));
+  rt::GlobalRef keep(rt, ptypes);
+  for (size_t i = 0; i < t.params.size(); ++i) {
+    Handle c = rt.class_mirror(rt.find_class(t.params[i]));
+    std::memcpy(&rt.array(ptypes, "ptypes").data[i * 4], &c, 4);
+  }
+  return Handle(rt.call_static("Ljava/lang/invoke/MethodType;", "makeImpl",
+                               "(Ljava/lang/Class;[Ljava/lang/Class;Z)Ljava/lang/invoke/MethodType;",
+                               {rt.class_mirror(rt.find_class(t.ret)), ptypes, 1}));
+}
+
+// ClassLinker::ResolveMethodType: the prototype's types, resolved for the referrer.
+TypeDesc resolve_proto(Runtime& rt, rt::DexCache& cache, uint32_t proto_idx) {
+  TypeDesc t;
+  t.ret = rt.resolve_type(cache, cache.dex->proto(proto_idx).return_type_idx)->descriptor;
+  for (uint32_t type_idx : cache.dex->proto_params(proto_idx)) {
+    t.params.push_back(rt.resolve_type(cache, type_idx)->descriptor);
+  }
+  return t;
+}
+
+// Class::CanAccessMember (lenient for protected members, as ART is).
+bool can_access_member(Runtime& rt, rt::Class* referring, rt::Class* access_to, uint32_t flags) {
+  if (referring == access_to || (flags & dex::kAccPublic)) return true;
+  if (flags & dex::kAccPrivate) return false;
+  if ((flags & dex::kAccProtected) && rt.is_assignable(referring, access_to)) return true;
+  return in_same_package(rt, referring, access_to);
+}
+
+// ArtMethod::PrettyMethod: "void a.B.m(int, java.lang.String)".
+std::string pretty_art_method(const rt::Method* m) {
+  std::vector<std::string> params;
+  std::string ret;
+  dex::split_signature(m->signature, params, ret);
+  std::string s = text::descriptor_to_java(ret) + " " + m->owner->java_name() + "." + m->name + "(";
+  for (size_t i = 0; i < params.size(); ++i) s += (i ? ", " : "") + text::descriptor_to_java(params[i]);
+  return s + ")";
+}
+
+// ThrowIllegalAccessErrorField and ThrowIllegalAccessErrorMethod (without the
+// "(declaration of ... appears in ...)" suffix, whose DEX paths are AnyAndroid's).
+[[noreturn]] void field_inaccessible(Runtime& rt, rt::Class* referring, const rt::Field* f) {
+  rt.throw_new("Ljava/lang/IllegalAccessError;", "Field '" + f->owner->java_name() + "." + f->name +
+                                                     "' is inaccessible to class '" + referring->java_name() + "'");
+}
+
+[[noreturn]] void method_inaccessible(Runtime& rt, rt::Class* referring, const rt::Method* m) {
+  rt.throw_new("Ljava/lang/IllegalAccessError;", "Method '" + pretty_art_method(m) + "' is inaccessible to class '" +
+                                                     referring->java_name() + "'");
+}
+
+// mirror::MethodHandleImpl::Create: new MethodHandleImpl(target, kind, type).
+Handle create_method_handle(Runtime& rt, uint64_t target, int32_t kind, Handle type) {
+  return construct(rt, "Ljava/lang/invoke/MethodHandleImpl;", "(JILjava/lang/invoke/MethodType;)V",
+                   {uint32_t(target), uint32_t(target >> 32), uint32_t(kind), type});
+}
+
+// ResolveMethodHandleForField.
+Handle resolve_field_handle(Runtime& rt, rt::Method* referrer, const dex::MethodHandleItem& item) {
+  rt::DexCache& cache = *referrer->owner->dex_cache;
+  const bool is_static = item.type == 0x00 || item.type == 0x01;
+  const bool is_put = item.type == 0x00 || item.type == 0x02;
+  rt::Field* f = rt.resolve_field(cache, item.field_or_method_idx, is_static);
+  if (!can_access_member(rt, referrer->owner, f->owner, f->access) || (is_put && (f->access & dex::kAccFinal))) {
+    field_inaccessible(rt, referrer->owner, f);
+  }
+  const std::string& type = rt.find_class(f->type)->descriptor;
+  TypeDesc t;
+  int32_t kind = 0;
+  switch (item.type) {
+    case 0x00: kind = kStaticPut; t.params = {type}; t.ret = "V"; break;
+    case 0x01: kind = kStaticGet; t.ret = type; break;
+    case 0x02: kind = kInstancePut; t.params = {f->owner->descriptor, type}; t.ret = "V"; break;
+    default: kind = kInstanceGet; t.params = {f->owner->descriptor}; t.ret = type; break;
+  }
+  Handle method_type = create_method_type(rt, t);
+  rt::GlobalRef keep(rt, method_type);
+  Handle field = rt.reflect_field(f);
+  rt::GlobalRef keep_field(rt, field);
+  return construct(rt, "Ljava/lang/invoke/MethodHandleImpl;",
+                   "(Ljava/lang/reflect/Field;ILjava/lang/invoke/MethodType;)V", {field, uint32_t(kind), method_type});
+}
+
+// ResolveMethodHandleForMethod. The lookups are the runtime's (by name and
+// signature); ResolveMethodWithChecks's IncompatibleClassChangeError for an
+// invocation kind that does not match the method is not reproduced.
+Handle resolve_method_handle_for_method(Runtime& rt, rt::Method* referrer, const dex::MethodHandleItem& item) {
+  rt::DexCache& cache = *referrer->owner->dex_cache;
+  const dex::DexFile& dex = *cache.dex;
+  const dex::MethodId& mid = dex.method(item.field_or_method_idx);
+  rt::Class* cls = rt.resolve_type(cache, mid.class_idx);
+  const std::string& name = dex.string(mid.name_idx);
+  const std::string& sig = dex.proto_signature(mid.proto_idx);
+  rt::Method* target = nullptr;
+  int32_t kind = 0;
+  bool receiver = true;
+  switch (item.type) {
+    case 0x04:  // invoke-static
+      kind = kInvokeStatic;
+      receiver = false;
+      target = rt.find_static(cls, name, sig);
+      if (!target) rt.missing_method(cls, name, sig, true);
+      break;
+    case 0x05:  // invoke-instance
+    case 0x08:  // invoke-interface
+      kind = item.type == 0x05 ? kInvokeVirtual : kInvokeInterface;
+      target = rt.resolve_virtual(cls, name, sig);
+      if (!target) rt.missing_method(cls, name, sig, false);
+      break;
+    case 0x06:  // invoke-constructor: a transform, made by Lookup.findConstructor below
+      kind = kInvokeTransform;
+      receiver = false;
+      target = cls->declared_method(name, sig);
+      if (!target || target->is_static()) rt.missing_method(cls, name, sig, false);
+      break;
+    default:  // 0x07 invoke-direct: a private method, or a method of a superclass
+      target = cls->declared_method(name, sig);
+      if (!target) target = rt.resolve_virtual(cls, name, sig);
+      if (!target || target->is_static()) rt.missing_method(cls, name, sig, false);
+      if (target->access & dex::kAccPrivate) {
+        kind = kInvokeDirect;
+      } else {
+        // invoke-super of the referrer's parent: the method as the referring
+        // class resolves it (FindVirtualMethodForVirtual).
+        kind = kInvokeSuper;
+        if (rt::Method* m = rt.resolve_virtual(referrer->owner, target->name, target->signature)) target = m;
+      }
+      break;
+  }
+  if (target->name == "<clinit>") {
+    rt.throw_new("Ljava/lang/ClassFormatError;", "Method handles can't target class initializer method");
+  }
+  if (!can_access_member(rt, referrer->owner, target->owner, target->access)) {
+    method_inaccessible(rt, referrer->owner, target);
+  }
+  // The receiver is the class named in the handle, not the declaring class
+  // of the method found (b/115964401).
+  TypeDesc t = resolve_proto(rt, cache, mid.proto_idx);
+  if (receiver) t.params.insert(t.params.begin(), cls->descriptor);
+  Handle method_type = create_method_type(rt, t);
+  rt::GlobalRef keep(rt, method_type);
+  if (item.type == 0x06) {
+    Handle lookup = Handle(rt.call_static("Ljava/lang/invoke/MethodHandles;", "lookup",
+                                          "()Ljava/lang/invoke/MethodHandles$Lookup;"));
+    rt::GlobalRef keep_lookup(rt, lookup);
+    return Handle(rt.call_virtual(lookup, "findConstructor",
+                                  "(Ljava/lang/Class;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;",
+                                  {rt.class_mirror(target->owner), method_type}));
+  }
+  return create_method_handle(rt, rt.method_cookie(target), kind, method_type);
+}
+
+// ClassLinker::ResolveMethodHandle (not cached: each resolution is a new handle).
+Handle resolve_method_handle(Runtime& rt, rt::Method* referrer, uint32_t idx) {
+  const dex::MethodHandleItem& item = referrer->owner->dex_cache->dex->method_handle(idx);
+  return item.type <= 0x03 ? resolve_field_handle(rt, referrer, item)
+                           : resolve_method_handle_for_method(rt, referrer, item);
+}
+
+[[noreturn]] void throw_bootstrap_error(Runtime& rt, const std::string& msg) {
+  rt.throw_new("Ljava/lang/BootstrapMethodError;", msg);
+}
+
+// ThrowClassCastException(dest, src): "<src> cannot be cast to <dest>".
+[[noreturn]] void throw_cast(Runtime& rt, const std::string& dest, const std::string& src) {
+  rt.throw_new("Ljava/lang/ClassCastException;",
+               text::descriptor_to_java(src) + " cannot be cast to " + text::descriptor_to_java(dest));
+}
+
+// GetClassForBootstrapArgument: the type of a static argument of the call site.
+std::string bootstrap_argument_type(const dex::EncodedValue& v) {
+  using V = dex::EncodedValue;
+  switch (v.type) {
+    case V::kBoolean: case V::kByte: case V::kChar: case V::kShort:  // disallowed by the JVMS: ints
+    case V::kInt: return "I";
+    case V::kLong: return "J";
+    case V::kFloat: return "F";
+    case V::kDouble: return "D";
+    case V::kMethodType: return "Ljava/lang/invoke/MethodType;";
+    case V::kMethodHandle: return "Ljava/lang/invoke/MethodHandle;";
+    case V::kString: return "Ljava/lang/String;";
+    case V::kType: return "Ljava/lang/Class;";
+    default: return {};
+  }
+}
+
+// Primitive::IsNumericType and IsWidenable (byte < char < short < int < long < float < double).
+int numeric_rank(char t) {
+  static constexpr std::string_view kOrder = "BCSIJFD";
+  size_t at = kOrder.find(t);
+  return at == std::string_view::npos ? -1 : int(at);
+}
+
+bool widenable(char from, char to) {
+  return numeric_rank(from) >= 0 && numeric_rank(to) >= 0 && numeric_rank(from) <= numeric_rank(to);
+}
+
+// GetUnboxedPrimitiveType: the primitive of a java.lang box class, or 0.
+char unboxed_type(const std::string& d) {
+  static const std::map<std::string, char, std::less<>> boxes = {
+      {"Ljava/lang/Boolean;", 'Z'}, {"Ljava/lang/Byte;", 'B'},  {"Ljava/lang/Character;", 'C'},
+      {"Ljava/lang/Short;", 'S'},   {"Ljava/lang/Integer;", 'I'}, {"Ljava/lang/Long;", 'J'},
+      {"Ljava/lang/Float;", 'F'},   {"Ljava/lang/Double;", 'D'}};
+  auto it = boxes.find(d);
+  return it == boxes.end() ? 0 : it->second;
+}
+
+std::string boxed_type(char t) {
+  switch (t) {
+    case 'Z': return "Ljava/lang/Boolean;";
+    case 'B': return "Ljava/lang/Byte;";
+    case 'C': return "Ljava/lang/Character;";
+    case 'S': return "Ljava/lang/Short;";
+    case 'I': return "Ljava/lang/Integer;";
+    case 'J': return "Ljava/lang/Long;";
+    case 'F': return "Ljava/lang/Float;";
+    default: return "Ljava/lang/Double;";
+  }
+}
+
+// IsParameterTypeConvertible (method_handles.cc).
+bool parameter_type_convertible(Runtime& rt, const std::string& from, const std::string& to) {
+  if (from == to) return true;
+  char f = kind_of(from), t = kind_of(to);
+  if (f == 'L' && t == 'L') return true;  // checked when the handle converts the value
+  if (widenable(f, t)) return true;
+  if (t == 'L' && f != 'L') return rt.is_assignable(rt.find_class(boxed_type(f)), rt.find_class(to));
+  if (t != 'L' && f == 'L') {
+    if (from == "Ljava/lang/Object;") return true;
+    if (numeric_rank(t) >= 0 && from == "Ljava/lang/Number;") return true;
+    char unboxed = unboxed_type(from);
+    if (unboxed) return unboxed == t || widenable(unboxed, t);
+  }
+  return false;
+}
+
+// IsReturnTypeConvertible.
+bool return_type_convertible(Runtime& rt, const std::string& from, const std::string& to) {
+  return to == "V" || from == "V" || parameter_type_convertible(rt, from, to);
+}
+
+// GetArgumentForBootstrapMethod: a static argument as argument words.
+void push_bootstrap_argument(Runtime& rt, rt::Method* referrer, const dex::EncodedValue& v,
+                             std::vector<uint32_t>& words, std::vector<rt::GlobalRef>& keep) {
+  using V = dex::EncodedValue;
+  rt::DexCache& cache = *referrer->owner->dex_cache;
+  Handle ref = kNull;
+  switch (v.type) {
+    case V::kLong:
+    case V::kDouble:
+      words.push_back(uint32_t(v.bits));
+      words.push_back(uint32_t(v.bits >> 32));
+      return;
+    case V::kMethodType: ref = rt.resolve_method_type(referrer, uint32_t(v.bits)); break;
+    case V::kMethodHandle: ref = rt.resolve_method_handle(referrer, uint32_t(v.bits)); break;
+    case V::kString: ref = rt.resolve_string(cache, uint32_t(v.bits)); break;
+    case V::kType: ref = rt.class_mirror(rt.resolve_type(cache, uint32_t(v.bits))); break;
+    default:  // int and float (and the narrow types, which ART does not expect)
+      words.push_back(uint32_t(v.bits));
+      return;
+  }
+  keep.emplace_back(rt, ref);
+  words.push_back(ref);
+}
+
+// PackCollectorArrayForBootstrapMethod: the trailing static arguments of a
+// variable arity bootstrap method, in an array of `array_type`.
+Handle collect_bootstrap_arguments(Runtime& rt, rt::Method* referrer, const std::string& array_type,
+                                   const std::vector<dex::EncodedValue>& values, size_t first) {
+  int32_t length = int32_t(values.size() - first);
+  Handle array = rt.new_array(array_type, length);
+  rt::GlobalRef keep(rt, array);
+  char component = kind_of(array_type.substr(1));
+  size_t width = is_wide(component) ? 8 : 4;
+  for (int32_t i = 0; i < length; ++i) {
+    std::vector<uint32_t> words;
+    std::vector<rt::GlobalRef> refs;
+    push_bootstrap_argument(rt, referrer, values[first + size_t(i)], words, refs);
+    std::memcpy(&rt.array(array, "bootstrap").data[size_t(i) * width], words.data(), width);
+  }
+  return array;
+}
+
+// InvokeBootstrapMethod: the CallSite that the call site's bootstrap method returns.
+Handle invoke_bootstrap_method(Runtime& rt, rt::Method* referrer, uint32_t call_site_idx) {
+  using V = dex::EncodedValue;
+  constexpr size_t kMandatoryArgumentsCount = 3;
+  std::vector<V> values = referrer->owner->dex_cache->dex->call_site(call_site_idx);
+  if (values.size() < kMandatoryArgumentsCount) {
+    throw_bootstrap_error(rt, "Truncated bootstrap arguments (" + std::to_string(values.size()) + " < " +
+                                  std::to_string(kMandatoryArgumentsCount) + ")");
+  }
+  if (values[0].type != V::kMethodHandle) throw_bootstrap_error(rt, "First bootstrap argument is not a method handle");
+  Handle bsm = rt.resolve_method_handle(referrer, uint32_t(values[0].bits));
+  rt::GlobalRef keep_bsm(rt, bsm);
+  if (handle_kind(rt, bsm) != kInvokeStatic) throw_bootstrap_error(rt, "Unsupported bootstrap method invocation kind");
+
+  // BuildCallSiteForBootstrapMethod: (Lookup, name, type, static arguments...)CallSite.
+  TypeDesc call_site_type;
+  call_site_type.params.push_back("Ljava/lang/invoke/MethodHandles$Lookup;");
+  for (size_t i = 1; i < values.size(); ++i) {
+    std::string type = bootstrap_argument_type(values[i]);
+    if (type.empty()) rt.throw_new("Ljava/lang/ClassCastException;", "Unsupported bootstrap argument type");
+    call_site_type.params.push_back(type);
+  }
+  call_site_type.ret = "Ljava/lang/invoke/CallSite;";
+
+  TypeDesc bsm_type = handle_type(rt, bsm);
+  size_t collector_length = 0;
+  const bool varargs = rt.method_from_cookie(art_field_or_method(rt, bsm))->access & dex::kAccVarargs;
+  if (varargs) {
+    size_t count = bsm_type.params.size();
+    if (count == 0) throw_bootstrap_error(rt, "Variable arity BSM does not have any arguments");
+    const std::string& collector = bsm_type.params.back();
+    if (collector[0] != '[') throw_bootstrap_error(rt, "Variable arity BSM does not have array as final argument");
+    if (call_site_type.params.size() < count - 1) throw_wrong_method_type(rt, bsm_type, call_site_type);
+    std::string component = collector.substr(1);
+    for (size_t i = count - 1; i < call_site_type.params.size(); ++i) {
+      if (call_site_type.params[i] != component) throw_cast(rt, component, call_site_type.params[i]);
+    }
+    collector_length = call_site_type.params.size() - count + 1;
+    // MethodType::CollectTrailingArguments.
+    call_site_type.params.resize(count - 1);
+    call_site_type.params.push_back(collector);
+  }
+  if (call_site_type.params.size() != bsm_type.params.size()) throw_wrong_method_type(rt, bsm_type, call_site_type);
+  for (size_t i = 0; i < call_site_type.params.size(); ++i) {
+    // ThrowClassCastException(from, to), the argument order of ART.
+    if (!parameter_type_convertible(rt, call_site_type.params[i], bsm_type.params[i])) {
+      throw_cast(rt, call_site_type.params[i], bsm_type.params[i]);
+    }
+  }
+  if (!return_type_convertible(rt, call_site_type.ret, bsm_type.ret)) throw_cast(rt, bsm_type.ret, call_site_type.ret);
+
+  // The arguments: MethodHandlesLookup::Create(referrer's class) with every
+  // mode, then the static arguments (the trailing ones collected).
+  rt::Class* lookup_class = rt.find_class("Ljava/lang/invoke/MethodHandles$Lookup;");
+  Handle lookup = rt.alloc(lookup_class);
+  rt::GlobalRef keep_lookup(rt, lookup);
+  rt::Object& l = *rt.object(lookup);
+  l.fields.at(find_field(lookup_class, "lookupClass", "Ljava/lang/Class;")->slot) = rt.class_mirror(referrer->owner);
+  l.fields.at(find_field(lookup_class, "allowedModes", "I")->slot) =
+      dex::kAccPublic | dex::kAccPrivate | dex::kAccProtected | dex::kAccStatic;
+  std::vector<uint32_t> words = {lookup};
+  std::vector<rt::GlobalRef> keep;
+  size_t value = 1;
+  for (size_t p = 1; p < call_site_type.params.size(); ++p) {
+    if (p == call_site_type.params.size() - 1 && call_site_type.params[p][0] == '[') {
+      Handle array = collect_bootstrap_arguments(rt, referrer, call_site_type.params[p], values, value);
+      keep.emplace_back(rt, array);
+      words.push_back(array);
+      value += collector_length;
+    } else {
+      push_bootstrap_argument(rt, referrer, values[value++], words, keep);
+    }
+  }
+
+  Handle result = Handle(invoke_converting(rt, bsm, call_site_type, words.data(), uint32_t(words.size())));
+  if (result == kNull) rt.throw_new("Ljava/lang/ClassCastException;", "Bootstrap method returned null");
+  rt::Class* call_site_class = rt.find_class("Ljava/lang/invoke/CallSite;");
+  if (!rt.instance_of(result, call_site_class)) throw_cast(rt, rt.class_of(result)->descriptor, call_site_class->descriptor);
+  rt::Field* target = find_field(call_site_class, "target", "Ljava/lang/invoke/MethodHandle;");
+  if (!target || rt.object(result)->fields.at(target->slot) == kNull) {
+    rt.throw_new("Ljava/lang/ClassCastException;", "Bootstrap method returned a CallSite with a null target");
+  }
+  return result;
+}
+
+// DoResolveCallSite: the call site's CallSite, bound once; an exception that
+// is not an Error becomes the cause of a BootstrapMethodError.
+Handle resolve_call_site(Runtime& rt, rt::Method* referrer, uint32_t call_site_idx) {
+  rt::DexCache& cache = *referrer->owner->dex_cache;
+  if (cache.call_sites.empty()) cache.call_sites.resize(cache.dex->num_call_sites());
+  if (Handle site = cache.call_sites.at(call_site_idx); site != kNull) return site;
+  Handle site = kNull;
+  try {
+    site = invoke_bootstrap_method(rt, referrer, call_site_idx);
+  } catch (const rt::JavaThrow& thrown) {
+    if (rt.instance_of(thrown.exception, rt.find_class("Ljava/lang/Error;"))) throw;
+    rt::GlobalRef keep(rt, thrown.exception);
+    throw rt::JavaThrow{construct(rt, "Ljava/lang/BootstrapMethodError;", "(Ljava/lang/String;Ljava/lang/Throwable;)V",
+                                  {rt.new_string_utf8("Exception from call site #" + std::to_string(call_site_idx) +
+                                                      " bootstrap method"),
+                                   thrown.exception})};
+  }
+  // The first CallSite bound wins (SetResolvedCallSite).
+  Handle& slot = cache.call_sites.at(call_site_idx);
+  if (slot == kNull) slot = site;
+  return slot;
+}
+
+// DoInvokeCustom: the CallSite's target, invoked exactly with its own type.
+uint64_t invoke_custom(Runtime& rt, rt::Method* referrer, uint32_t call_site_idx, const uint32_t* args, uint32_t n) {
+  Handle site = resolve_call_site(rt, referrer, call_site_idx);
+  rt::Field* f = find_field(rt.class_of(site), "target", "Ljava/lang/invoke/MethodHandle;");
+  Handle target = Handle(rt.object(site)->fields.at(f->slot));
+  rt::GlobalRef keep(rt, target);
+  return invoke_exact(rt, target, handle_type(rt, target), args, n);
+}
+
 void register_invoke(rt::NativeRegistry& r) {
   // java_lang_invoke_MethodHandleImpl.cc: the Field, Method or Constructor of a direct handle.
   r.bind("Ljava/lang/invoke/MethodHandleImpl;", "getMemberInternal", "()Ljava/lang/reflect/Member;",
@@ -2072,6 +2478,12 @@ void register_invoke(rt::NativeRegistry& r) {
     rt.throw_unsupported(declared->descriptor + "->" + name + callsite,
                          "invoke-polymorphic non pris en charge sur " + declared->java_name());
   });
+  r.set_invoke_dynamic_handlers({
+      [](Runtime& rt, rt::Method* referrer, uint32_t proto_idx) -> uint32_t {
+        return create_method_type(rt, resolve_proto(rt, *referrer->owner->dex_cache, proto_idx));
+      },
+      [](Runtime& rt, rt::Method* referrer, uint32_t idx) -> uint32_t { return resolve_method_handle(rt, referrer, idx); },
+      invoke_custom});
 }
 
 }  // namespace

@@ -1193,6 +1193,30 @@ uint64_t Runtime::invoke_polymorphic(Class* declared, const std::string& name, c
   return fn(*this, declared, name, callsite, args, count);
 }
 
+Handle Runtime::resolve_method_type(Method* m, uint32_t proto_idx) {
+  DexCache& cache = *m->owner->dex_cache;
+  if (cache.method_types.empty()) cache.method_types.resize(cache.dex->num_protos());
+  Handle& slot = cache.method_types.at(proto_idx);
+  if (slot != kNull) return slot;
+  const auto& fn = registry_.invoke_dynamic_handlers().method_type;
+  if (!fn) throw_unsupported("const-method-type", "java.lang.invoke indisponible sans libcore");
+  Handle type = Handle(fn(*this, m, proto_idx));
+  return cache.method_types.at(proto_idx) = type;
+}
+
+Handle Runtime::resolve_method_handle(Method* m, uint32_t method_handle_idx) {
+  const auto& fn = registry_.invoke_dynamic_handlers().method_handle;
+  if (!fn) throw_unsupported("const-method-handle", "java.lang.invoke indisponible sans libcore");
+  return Handle(fn(*this, m, method_handle_idx));
+}
+
+uint64_t Runtime::invoke_custom(Method* m, uint32_t call_site_idx, const uint32_t* args, uint32_t count) {
+  const auto& fn = registry_.invoke_dynamic_handlers().invoke_custom;
+  if (!fn) throw_unsupported("invoke-custom", "java.lang.invoke indisponible sans libcore");
+  stats_.native_calls++;
+  return fn(*this, m, call_site_idx, args, count);
+}
+
 uint64_t Runtime::field_cookie(Field* f) {
   auto it = field_cookie_of_.find(f);
   if (it != field_cookie_of_.end()) return it->second;

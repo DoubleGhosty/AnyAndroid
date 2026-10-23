@@ -9,6 +9,10 @@ du vrai `framework.jar` d'AOSP : les services système locaux de l'[ADR-006](../
 - `stubs/` : des **déclarations minimales** des classes du framework utilisées, pour `javac`
   seulement. Elles ne sont jamais incluses dans le DEX : à l'exécution, les classes viennent du
   `framework.jar` de l'image.
+- `gen/IndySitesGen.java` : un petit générateur, lancé avant `javac`, qui écrit
+  `aa/host/IndySites.class` avec des `invokedynamic` à amorce personnalisée et des `ldc` de
+  `MethodHandle` et de `MethodType`, que `javac` n'écrit jamais. D8 en fait des `invoke-custom`,
+  `const-method-handle` et `const-method-type`, essayés par `LibcoreProbe` (e2e `host-libcore`).
 
 Règles des déclarations :
 
