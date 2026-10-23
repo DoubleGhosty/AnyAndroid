@@ -272,9 +272,9 @@ Fait et vérifié (voir STATUS.md pour le détail) :
    `startActivityForResult`), puis une vraie application de la GSI (`Music`) affichée et
    utilisable. Les motifs de césure `.hyb` et le pilotage déterministe des tests sont à concevoir
    sur l'horloge commune (`common/clock.h`).
-2. **Fin de G2** (les ajouts du 17 octobre sont vérifiés par `e2e-host-libcore`) : les 166
-   liaisons orphelines (`libcore natives --orphans`, surtout d'anciennes liaisons d'`Unsafe`), le
-   contrôle d'accès de la classe appelante dans la réflexion (`VerifyAccess`), `invoke-custom` ;
+2. **Fin de G2** (les ajouts du 17 octobre sont vérifiés par `e2e-host-libcore` ; liaisons
+   orphelines à 0 ; `VerifyAccess` porté) : `invoke-custom`, `const-method-handle`,
+   `const-method-type`, puis les natives de libcore encore absentes (`libcore natives --all`) ;
    relancer la CI Windows dès que le compte GitHub Actions fonctionne.
 3. **G4 : code natif** : chargeur ELF et bionic. L'[évaluation d'ANDROWIN](evaluations/ANDROWIN.md)
    décrit ntdroid (ART réel dans un processus Windows par interception d'appels système) : c'est

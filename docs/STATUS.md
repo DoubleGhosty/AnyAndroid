@@ -47,7 +47,7 @@ le nombre de fichiers, et ne montent qu'avec une preuve sur le vrai framework ou
 |-------|------------------------------------------------------------|-----------:|------|
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
-| G2    | Vraie libcore d'AOSP (Android 17)                           | 96 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART ([ADR-004](adr/ADR-004-libcore-aosp.md)). Ajouts du 17 octobre vérifiés et corrigés sur la vraie libcore (e2e `host-libcore`) : E/S scatter-gather, POSIX résiduel, `MethodHandle` porté d'ART, réflexion par les vraies classes de libcore, annotations par `AnnotationFactory`, `Proxy`, fuseaux horaires. Reste : 166 liaisons orphelines (surtout `Unsafe`), contrôle d'accès de la réflexion, `invoke-custom` |
+| G2    | Vraie libcore d'AOSP (Android 17)                           | 96 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART ([ADR-004](adr/ADR-004-libcore-aosp.md)). Ajouts du 17 octobre vérifiés et corrigés sur la vraie libcore (e2e `host-libcore`) : E/S scatter-gather, POSIX résiduel, `MethodHandle` porté d'ART, réflexion par les vraies classes de libcore, annotations par `AnnotationFactory`, `Proxy`, fuseaux horaires, contrôle d'accès de la réflexion (`VerifyAccess`) ; plus aucune liaison orpheline, `Unsafe` et `OsConstantsHolder` fidèles à ART et bionic. Reste : `invoke-custom`, natives de libcore manquantes (sockets, ICU, `NativeBN`…) |
 | G3    | Vrai `framework.jar` et une application AOSP affichée       | 87 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md). J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, à 420 dpi depuis le 23 octobre) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK comme Android 12+, prouvés par des tests e2e) ; J9 fait (navigation entre activités, toasts et dialogues prouvés par des e2e) ; J10 à faire ; J3 en cours |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire : architecture proposée dans l'[ADR-009](adr/ADR-009-couche-native-elf.md) (chargeur ELF x86_64, bionic, JNI) |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
@@ -85,8 +85,10 @@ G5 ░░░░░░░░░░   0 %
     `invokeExact` exige le type exact, `invoke` passe par `asType` et les transformateurs Java de
     libcore (`EmulatedStackFrame`). Les annotations sont créées par `AnnotationFactory`
     (valeurs par défaut, `toString`, `equals`), dans l'ordre du fichier DEX. Les classes proxy
-    suivent `ClassLinker::CreateProxyClass`. Limites : le contrôle d'accès de la classe appelante
-    n'est pas appliqué, le chargeur de classes d'un proxy est ignoré (un seul espace de classes).
+    suivent `ClassLinker::CreateProxyClass`. Le contrôle d'accès de la classe appelante suit
+    `VerifyAccess` d'ART (membre privé, protégé ou de paquet, classe d'un autre paquet pour
+    `Constructor.newInstance`, messages d'ART). Limite : le chargeur de classes d'un proxy est
+    ignoré (un seul espace de classes).
   - **POSIX résiduel** : `dup` et `dup2` partagent la description ouverte (position commune),
     `ioctlInt(FIONREAD)`, `fcntlInt`, `umask` ; `readv`/`writev` et les E/S groupées de
     `FileChannel`.
@@ -441,10 +443,10 @@ vrais gestionnaires d'`ActivityThread`.
 1. **J10** : une vraie application AOSP affichée et utilisable (d'abord un exemple en Java sur les
    widgets du framework : listes, `PopupWindow`, `startActivityForResult`, puis `Music` de la
    GSI).
-2. **Fin de G2** : retirer ou corriger les 166 liaisons orphelines (`libcore natives --orphans`,
-   surtout d'anciennes liaisons de `sun.misc.Unsafe` et `jdk.internal.misc.Unsafe`), appliquer
-   le contrôle d'accès de la classe appelante dans la réflexion (`VerifyAccess`), prendre en
-   charge `invoke-custom` ; relancer la CI Windows dès que le compte GitHub Actions fonctionne.
+2. **Fin de G2** (liaisons orphelines à 0 et `VerifyAccess` faits) : prendre en charge
+   `invoke-custom`, `const-method-handle` et `const-method-type`, puis les natives de libcore
+   encore absentes (`libcore natives --all`) ; relancer la CI Windows dès que le compte GitHub
+   Actions fonctionne.
 3. **G4** : chargeur ELF et bionic, pour les applications avec du code natif (`.so` x86_64), selon l'[ADR-009](adr/ADR-009-couche-native-elf.md).
 4. **G5** : microG (démarrage de GmsCore avec les mêmes services), puis les GApps.
 
