@@ -313,7 +313,10 @@ TEST(native_memory_budget) {
 TEST(native_memory_unsafe_never_forges_references) {
   Vm vm;
   rt::Runtime& rt = *vm.rt;
+  // Android 17's natives: sun.misc.Unsafe has getObject/putObject, jdk.internal.misc.Unsafe
+  // putReferenceVolatile and copyMemory0 (sun_misc_Unsafe.cc, jdk_internal_misc_Unsafe.cc).
   const char* u = "Lsun/misc/Unsafe;";
+  const char* ju = "Ljdk/internal/misc/Unsafe;";
   const char* get_object = "(Ljava/lang/Object;J)Ljava/lang/Object;";
   const char* put_object = "(Ljava/lang/Object;JLjava/lang/Object;)V";
   const char* get_int = "(Ljava/lang/Object;J)I";
@@ -325,7 +328,7 @@ TEST(native_memory_unsafe_never_forges_references) {
   std::memcpy(bridge::native_span(rt, addr, 4, true).data(), &s, 4);
   // No reference through native memory (null object + address).
   CHECK_EQ(failure(rt, u, "getObject", get_object, {unsafe, 0, lo(addr), hi(addr)}), kIllegalArgument);
-  CHECK_EQ(failure(rt, u, "putReferenceVolatile", put_object, {unsafe, 0, lo(addr), hi(addr), s}), kIllegalArgument);
+  CHECK_EQ(failure(rt, ju, "putReferenceVolatile", put_object, {unsafe, 0, lo(addr), hi(addr), s}), kIllegalArgument);
   CHECK_EQ(failure(rt, u, "compareAndSwapObject", "(Ljava/lang/Object;JLjava/lang/Object;Ljava/lang/Object;)Z",
                    {unsafe, 0, lo(addr), hi(addr), s, s}),
            kIllegalArgument);
@@ -335,7 +338,7 @@ TEST(native_memory_unsafe_never_forges_references) {
   CHECK_EQ(failure(rt, u, "getObject", get_object, {unsafe, ints, 16, 0}), kIllegalArgument);
   rt::Handle objects = rt.new_array("[Ljava/lang/Object;", 2);
   CHECK_EQ(failure(rt, u, "putInt", put_int, {unsafe, objects, 16, 0, s}), kIllegalArgument);
-  CHECK_EQ(failure(rt, u, "copyMemory", copy, {unsafe, ints, 16, 0, objects, 16, 0, 4, 0}), kIllegalArgument);
+  CHECK_EQ(failure(rt, ju, "copyMemory0", copy, {unsafe, ints, 16, 0, objects, 16, 0, 4, 0}), kIllegalArgument);
   rt::Class* app = rt.find_class("LApp;");
   rt::Handle obj = rt.alloc(app);
   int64_t ref_off = bridge::unsafe_field_offset(app->declared_field("ref", "Ljava/lang/Object;")->slot);
@@ -358,16 +361,17 @@ TEST(native_memory_unsafe_reads_read_only_mappings) {
   Vm vm;
   rt::Runtime& rt = *vm.rt;
   const char* u = "Lsun/misc/Unsafe;";
+  const char* ju = "Ljdk/internal/misc/Unsafe;";
   const char* copy = "(Ljava/lang/Object;JLjava/lang/Object;JJ)V";
   rt::Handle unsafe = rt.alloc(rt.find_class("Ljava/lang/Object;"));
   int64_t ro = bridge::native_wrap(rt, {1, 2, 3, 4, 5, 6, 7, 8}, false);
   CHECK_EQ(call(rt, u, "getByte", "(J)B", {unsafe, lo(ro + 1), hi(ro + 1)}), uint64_t(2));
   CHECK_EQ(call(rt, u, "getInt", "(Ljava/lang/Object;J)I", {unsafe, 0, lo(ro), hi(ro)}), uint64_t(0x04030201));
   rt::Handle bytes = rt.new_array("[B", 8);
-  call(rt, u, "copyMemory", copy, {unsafe, 0, lo(ro), hi(ro), bytes, 16, 0, 8, 0});
+  call(rt, ju, "copyMemory0", copy, {unsafe, 0, lo(ro), hi(ro), bytes, 16, 0, 8, 0});
   CHECK_EQ(rt.array(bytes, "byte[]").data[7], uint8_t(8));
   CHECK_EQ(failure(rt, u, "putByte", "(JB)V", {unsafe, lo(ro), hi(ro), 9}), kReadOnly);
-  CHECK_EQ(failure(rt, u, "copyMemory", copy, {unsafe, bytes, 16, 0, 0, lo(ro), hi(ro), 8, 0}), kReadOnly);
+  CHECK_EQ(failure(rt, ju, "copyMemory0", copy, {unsafe, bytes, 16, 0, 0, lo(ro), hi(ro), 8, 0}), kReadOnly);
   bridge::native_free(rt, ro);
 }
 

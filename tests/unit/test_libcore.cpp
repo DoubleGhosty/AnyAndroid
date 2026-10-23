@@ -143,6 +143,21 @@ const char* kBootClasses[] = {
 .end method
 )",
     R"(
+.class final Landroid/system/OsConstantsHolder;
+.super Ljava/lang/Object;
+.field static EINTR:I
+.field static O_CREAT:I
+.field static FOO_UNKNOWN:I
+.field static BAR_UNKNOWN:I
+.method static constructor <clinit>()V
+    .registers 0
+    invoke-static {}, Landroid/system/OsConstantsHolder;->initConstants()V
+    return-void
+.end method
+.method private static native initConstants()V
+.end method
+)",
+    R"(
 .class public final Landroid/system/OsConstants;
 .super Ljava/lang/Object;
 .field public static final EINTR:I
@@ -150,11 +165,16 @@ const char* kBootClasses[] = {
 .field public static final FOO_UNKNOWN:I
 .field public static final BAR_UNKNOWN:I
 .method static constructor <clinit>()V
-    .registers 0
-    invoke-static {}, Landroid/system/OsConstants;->initConstants()V
+    .registers 1
+    sget v0, Landroid/system/OsConstantsHolder;->EINTR:I
+    sput v0, Landroid/system/OsConstants;->EINTR:I
+    sget v0, Landroid/system/OsConstantsHolder;->O_CREAT:I
+    sput v0, Landroid/system/OsConstants;->O_CREAT:I
+    sget v0, Landroid/system/OsConstantsHolder;->FOO_UNKNOWN:I
+    sput v0, Landroid/system/OsConstants;->FOO_UNKNOWN:I
+    sget v0, Landroid/system/OsConstantsHolder;->BAR_UNKNOWN:I
+    sput v0, Landroid/system/OsConstants;->BAR_UNKNOWN:I
     return-void
-.end method
-.method private static native initConstants()V
 .end method
 )",
     R"(

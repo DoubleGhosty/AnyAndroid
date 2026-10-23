@@ -289,5 +289,10 @@ public final class LibcoreProbe {
       int back = Os.umask(old);
       return "groupe " + group + ", umask rendu " + Integer.toOctalString(back);
     });
+    // Android 17: OsConstantsHolder.initConstants fills these from bionic's headers.
+    check("OsConstantsHolder et sysconf", () -> "AI_ADDRCONFIG 0x" + Integer.toHexString(OsConstants.AI_ADDRCONFIG)
+        + ", EAI_NONAME " + OsConstants.EAI_NONAME + ", SIGRTMIN " + OsConstants.SIGRTMIN
+        + ", O_NOFOLLOW 0" + Integer.toOctalString(OsConstants.O_NOFOLLOW)
+        + ", sysconf(_SC_PAGESIZE = 0x" + Integer.toHexString(OsConstants._SC_PAGESIZE) + ") " + Os.sysconf(OsConstants._SC_PAGESIZE));
   }
 }

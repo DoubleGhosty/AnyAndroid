@@ -901,10 +901,10 @@ void register_framework_surface(rt::NativeRegistry& r) {
   r.bind(ic, "nativeGetToken", "(J)Landroid/os/IBinder;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     return channel_token(rt, *channel(rt, a.i64(1)));
   });
-  r.bind(ic, "nativeWriteToParcel", "(Landroid/os/Parcel;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    Handle channel_obj = a.h(0);
+  // writeToParcel passes mPtr; readFromParcel installs the pointer returned (0: none).
+  r.bind(ic, "nativeWriteToParcel", "(Landroid/os/Parcel;J)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     Handle parcel_obj = a.h(1);
-    int64_t channel_h = long_field(rt, channel_obj, "mPtr");
+    int64_t channel_h = a.i64(2);
     if (channel_h == 0 || !channels().get(channel_h)) {
       parcel_write_i32(rt, parcel_obj, 0);
       return 0;
@@ -913,17 +913,14 @@ void register_framework_surface(rt::NativeRegistry& r) {
     parcel_write_i64(rt, parcel_obj, channel_h);
     return 0;
   });
-  r.bind(ic, "nativeReadFromParcel", "(Landroid/os/Parcel;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    Handle channel_obj = a.h(0);
+  r.bind(ic, "nativeReadFromParcel", "(Landroid/os/Parcel;)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     Handle parcel_obj = a.h(1);
     bool ok = true;
     int32_t init = parcel_read_i32(rt, parcel_obj, &ok);
     if (!ok || !init) return 0;
     int64_t h = parcel_read_i64(rt, parcel_obj, &ok);
     if (!ok) return 0;
-    auto c = channel(rt, h);
-    set_long(rt.nonnull(channel_obj, "InputChannel"), "mPtr", channels().add(c));
-    return 0;
+    return rt::ret_long(channels().add(channel(rt, h)));
   });
 
   // InputEventReceiver (android_view_InputEventReceiver.cpp): bound to a

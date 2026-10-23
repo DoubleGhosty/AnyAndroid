@@ -15,8 +15,12 @@
 #include <cwctype>
 #include <fcntl.h>
 #include <io.h>
+#include <map>
 #include <thread>
+#include <string>
+#include <string_view>
 #include <tuple>
+#include <vector>
 
 #include "common/clock.h"
 #include "common/log.h"
@@ -281,10 +285,6 @@ void register_system(rt::NativeRegistry& r) {
   r.bind(run, "nativeLoad", "(Ljava/lang/String;Ljava/lang/ClassLoader;Ljava/lang/Class;)Ljava/lang/String;",
          [](Runtime&, NativeArgs&) -> uint64_t { return kNull; }, S::kStub,
          "chargement de bibliothèques natives .so simulé (G4)");
-  r.bind(run, "gc", "()V", [](Runtime& rt, NativeArgs&) -> uint64_t {
-    rt.request_gc();
-    return 0;
-  }, S::kPartial, "collecte au prochain point de sûreté");
   r.bind(run, "freeMemory", "()J", [](Runtime& rt, NativeArgs&) -> uint64_t {
     return rt::ret_long(int64_t(rt.options().max_objects - std::min(rt.options().max_objects, rt.object_count())) * 64);
   }, S::kPartial, "estimation à partir du plafond d'objets");
@@ -319,6 +319,10 @@ void register_system(rt::NativeRegistry& r) {
   };
   for (const char* cls : {"Ljava/lang/Math;", "Ljava/lang/StrictMath;"}) {
     for (const auto& [name, fn] : unary) {
+      // StrictMath's ceil, floor and rint are Java code in Android 17.
+      bool java = std::string_view(cls) == "Ljava/lang/StrictMath;" &&
+                  (std::string_view(name) == "ceil" || std::string_view(name) == "floor" || std::string_view(name) == "rint");
+      if (java) continue;
       r.bind(cls, name, "(D)D", [fn](Runtime&, NativeArgs& a) -> uint64_t { return rt::ret_double(fn(a.f64(0))); });
     }
     for (const auto& [name, fn] : binary) {
@@ -579,15 +583,13 @@ void register_vm(rt::NativeRegistry& r) {
   r.bind(vm, "isCheckJniEnabled", "()Z", boolean(false));
   r.bind(vm, "isNativeDebuggable", "()Z", boolean(false));
   r.bind(vm, "isJavaDebuggable", "()Z", boolean(false));
-  r.bind(vm, "hasBootImageSpaces", "()Z", boolean(false));
   r.bind(vm, "getTargetHeapUtilization", "()F", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_float(0.75f); });
   auto noop = [](Runtime&, NativeArgs&) -> uint64_t { return 0; };
   for (const auto& [name, sig] : std::initializer_list<std::pair<const char*, const char*>>{
            {"nativeSetTargetHeapUtilization", "(F)V"}, {"setTargetSdkVersionNative", "(I)V"},
            {"clearGrowthLimit", "()V"}, {"clampGrowthLimit", "()V"}, {"trimHeap", "()V"},
-           {"registerNativeAllocation", "(J)V"}, {"registerNativeAllocation", "(I)V"},
-           {"registerNativeFree", "(J)V"}, {"registerNativeFree", "(I)V"}, {"requestHeapTrim", "()V"},
-           {"startJitCompilation", "()V"}, {"disableJitCompilation", "()V"}, {"setHiddenApiExemptions", "([Ljava/lang/String;)V"},
+           {"registerNativeAllocation", "(J)V"}, {"registerNativeFree", "(J)V"}, {"requestHeapTrim", "()V"},
+           {"setHiddenApiExemptions", "([Ljava/lang/String;)V"},
            {"setHiddenApiAccessLogSamplingRate", "(I)V"}, {"registerSensitiveThread", "()V"}}) {
     r.bind(vm, name, sig, noop, S::kStub, "sans objet pour AnyAndroid");
   }
@@ -734,7 +736,6 @@ void register_vm(rt::NativeRegistry& r) {
       return rt.class_mirror(frames[frames.size() - 1 - depth].method->owner);
     };
   };
-  r.bind(st, "getStackClass1", "()Ljava/lang/Class;", stack_class(2));
   r.bind(st, "getStackClass2", "()Ljava/lang/Class;", stack_class(3));
   // Loaders as ART sees them internally: null for the boot space.
   r.bind(st, "getCallingClassLoader", "()Ljava/lang/ClassLoader;", [](Runtime& rt, NativeArgs&) -> uint64_t {
@@ -779,9 +780,9 @@ const OsConstant kOsConstants[] = {
     {"EOWNERDEAD", 130}, {"ENOTRECOVERABLE", 131},
     {"O_RDONLY", 0}, {"O_WRONLY", 1}, {"O_RDWR", 2}, {"O_ACCMODE", 3}, {"O_CREAT", 0100}, {"O_EXCL", 0200},
     {"O_NOCTTY", 0400}, {"O_TRUNC", 01000}, {"O_APPEND", 02000}, {"O_NONBLOCK", 04000}, {"O_DSYNC", 010000},
-    {"O_SYNC", 04010000}, {"O_DIRECTORY", 0200000}, {"O_NOFOLLOW", 0400000}, {"O_CLOEXEC", 02000000},
-    {"F_DUPFD", 0}, {"F_GETFD", 1}, {"F_SETFD", 2}, {"F_GETFL", 3}, {"F_SETFL", 4}, {"F_GETLK", 5},
-    {"F_SETLK", 6}, {"F_SETLKW", 7}, {"F_SETOWN", 8}, {"F_GETOWN", 9}, {"F_DUPFD_CLOEXEC", 1030},
+    {"O_SYNC", 04010000}, {"O_DIRECTORY", 0200000}, {"O_CLOEXEC", 02000000},
+    {"F_DUPFD", 0}, {"F_GETFD", 1}, {"F_SETFD", 2}, {"F_GETFL", 3}, {"F_SETFL", 4},
+    {"F_SETOWN", 8}, {"F_GETOWN", 9}, {"F_DUPFD_CLOEXEC", 1030},
     {"FD_CLOEXEC", 1}, {"F_RDLCK", 0}, {"F_WRLCK", 1}, {"F_UNLCK", 2}, {"F_OK", 0}, {"X_OK", 1}, {"W_OK", 2},
     {"R_OK", 4}, {"SEEK_SET", 0}, {"SEEK_CUR", 1}, {"SEEK_END", 2}, {"STDIN_FILENO", 0}, {"STDOUT_FILENO", 1},
     {"STDERR_FILENO", 2},
@@ -790,9 +791,6 @@ const OsConstant kOsConstants[] = {
     {"S_ISVTX", 01000}, {"S_IRWXU", 0700}, {"S_IRUSR", 0400}, {"S_IWUSR", 0200}, {"S_IXUSR", 0100},
     {"S_IRWXG", 070}, {"S_IRGRP", 040}, {"S_IWGRP", 020}, {"S_IXGRP", 010}, {"S_IRWXO", 07}, {"S_IROTH", 04},
     {"S_IWOTH", 02}, {"S_IXOTH", 01},
-    {"_SC_ARG_MAX", 0}, {"_SC_CHILD_MAX", 1}, {"_SC_CLK_TCK", 2}, {"_SC_NGROUPS_MAX", 3}, {"_SC_OPEN_MAX", 4},
-    {"_SC_PAGESIZE", 30}, {"_SC_PAGE_SIZE", 30}, {"_SC_NPROCESSORS_CONF", 83}, {"_SC_NPROCESSORS_ONLN", 84},
-    {"_SC_PHYS_PAGES", 85}, {"_SC_AVPHYS_PAGES", 86},
     {"AF_UNSPEC", 0}, {"AF_UNIX", 1}, {"AF_INET", 2}, {"AF_INET6", 10}, {"AF_NETLINK", 16}, {"AF_PACKET", 17},
     {"SOCK_STREAM", 1}, {"SOCK_DGRAM", 2}, {"SOCK_RAW", 3}, {"SOCK_SEQPACKET", 5}, {"SOCK_NONBLOCK", 04000},
     {"SOCK_CLOEXEC", 02000000}, {"IPPROTO_IP", 0}, {"IPPROTO_ICMP", 1}, {"IPPROTO_TCP", 6}, {"IPPROTO_UDP", 17},
@@ -803,16 +801,123 @@ const OsConstant kOsConstants[] = {
     {"MAP_SHARED", 1}, {"MAP_PRIVATE", 2}, {"MAP_FIXED", 0x10}, {"MAP_ANONYMOUS", 0x20}, {"PROT_NONE", 0},
     {"PROT_READ", 1}, {"PROT_WRITE", 2}, {"PROT_EXEC", 4}, {"POLLIN", 1}, {"POLLPRI", 2}, {"POLLOUT", 4},
     {"POLLERR", 8}, {"POLLHUP", 16}, {"POLLNVAL", 32},
+    // The values that differ between platforms, which OsConstantsHolder holds in
+    // Android 17: bionic x86_64 (netdb.h, bits/sysconf.h, fcntl.h; SIGRTMIN is
+    // __SIGRTMIN + __SIGRT_RESERVED, 32 + 10), android-17.0.0_r1.
+    {"AI_ADDRCONFIG", 1024}, {"AI_ALL", 256}, {"AI_CANONNAME", 2}, {"AI_NUMERICHOST", 4},
+    {"AI_NUMERICSERV", 8}, {"AI_PASSIVE", 1}, {"AI_V4MAPPED", 2048}, {"EAI_AGAIN", 2}, {"EAI_BADFLAGS", 3},
+    {"EAI_FAIL", 4}, {"EAI_FAMILY", 5}, {"EAI_MEMORY", 6}, {"EAI_NODATA", 7}, {"EAI_NONAME", 8},
+    {"EAI_OVERFLOW", 14}, {"EAI_SERVICE", 9}, {"EAI_SOCKTYPE", 10}, {"EAI_SYSTEM", 11}, {"F_GETLK", 5},
+    {"F_GETLK64", 5}, {"F_SETLK", 6}, {"F_SETLK64", 6}, {"F_SETLKW", 7}, {"F_SETLKW64", 7},
+    {"NI_NAMEREQD", 4}, {"NI_NOFQDN", 1}, {"NI_NUMERICHOST", 2}, {"NI_NUMERICSERV", 8}, {"O_DIRECT", 16384},
+    {"O_NOFOLLOW", 131072}, {"SIGRTMIN", 42}, {"_SC_2_CHAR_TERM", 16}, {"_SC_2_C_BIND", 13},
+    {"_SC_2_C_DEV", 14}, {"_SC_2_C_VERSION", 15}, {"_SC_2_FORT_DEV", 17}, {"_SC_2_FORT_RUN", 18},
+    {"_SC_2_LOCALEDEF", 19}, {"_SC_2_SW_DEV", 20}, {"_SC_2_UPE", 21}, {"_SC_2_VERSION", 22},
+    {"_SC_AIO_LISTIO_MAX", 46}, {"_SC_AIO_MAX", 47}, {"_SC_AIO_PRIO_DELTA_MAX", 48}, {"_SC_ARG_MAX", 0},
+    {"_SC_ASYNCHRONOUS_IO", 57}, {"_SC_ATEXIT_MAX", 37}, {"_SC_AVPHYS_PAGES", 99}, {"_SC_BC_BASE_MAX", 1},
+    {"_SC_BC_DIM_MAX", 2}, {"_SC_BC_SCALE_MAX", 3}, {"_SC_BC_STRING_MAX", 4}, {"_SC_CHILD_MAX", 5},
+    {"_SC_CLK_TCK", 6}, {"_SC_COLL_WEIGHTS_MAX", 7}, {"_SC_DELAYTIMER_MAX", 49}, {"_SC_EXPR_NEST_MAX", 8},
+    {"_SC_FSYNC", 58}, {"_SC_GETGR_R_SIZE_MAX", 71}, {"_SC_GETPW_R_SIZE_MAX", 72}, {"_SC_IOV_MAX", 38},
+    {"_SC_JOB_CONTROL", 23}, {"_SC_LINE_MAX", 9}, {"_SC_LOGIN_NAME_MAX", 73}, {"_SC_MAPPED_FILES", 59},
+    {"_SC_MEMLOCK", 60}, {"_SC_MEMLOCK_RANGE", 61}, {"_SC_MEMORY_PROTECTION", 62},
+    {"_SC_MESSAGE_PASSING", 63}, {"_SC_MQ_OPEN_MAX", 50}, {"_SC_MQ_PRIO_MAX", 51}, {"_SC_NGROUPS_MAX", 10},
+    {"_SC_NPROCESSORS_CONF", 96}, {"_SC_NPROCESSORS_ONLN", 97}, {"_SC_OPEN_MAX", 11}, {"_SC_PAGESIZE", 39},
+    {"_SC_PAGE_SIZE", 40}, {"_SC_PASS_MAX", 12}, {"_SC_PHYS_PAGES", 98}, {"_SC_PRIORITIZED_IO", 64},
+    {"_SC_PRIORITY_SCHEDULING", 65}, {"_SC_REALTIME_SIGNALS", 66}, {"_SC_RE_DUP_MAX", 26},
+    {"_SC_RTSIG_MAX", 52}, {"_SC_SAVED_IDS", 24}, {"_SC_SEMAPHORES", 67}, {"_SC_SEM_NSEMS_MAX", 53},
+    {"_SC_SEM_VALUE_MAX", 54}, {"_SC_SHARED_MEMORY_OBJECTS", 68}, {"_SC_SIGQUEUE_MAX", 55},
+    {"_SC_STREAM_MAX", 27}, {"_SC_SYNCHRONIZED_IO", 69}, {"_SC_THREADS", 79},
+    {"_SC_THREAD_ATTR_STACKADDR", 80}, {"_SC_THREAD_ATTR_STACKSIZE", 81},
+    {"_SC_THREAD_DESTRUCTOR_ITERATIONS", 74}, {"_SC_THREAD_KEYS_MAX", 75},
+    {"_SC_THREAD_PRIORITY_SCHEDULING", 82}, {"_SC_THREAD_PRIO_INHERIT", 83}, {"_SC_THREAD_PRIO_PROTECT", 84},
+    {"_SC_THREAD_SAFE_FUNCTIONS", 85}, {"_SC_THREAD_STACK_MIN", 76}, {"_SC_THREAD_THREADS_MAX", 77},
+    {"_SC_TIMERS", 70}, {"_SC_TIMER_MAX", 56}, {"_SC_TTY_NAME_MAX", 78}, {"_SC_TZNAME_MAX", 28},
+    {"_SC_VERSION", 25}, {"_SC_XBS5_ILP32_OFF32", 42}, {"_SC_XBS5_ILP32_OFFBIG", 43},
+    {"_SC_XBS5_LP64_OFF64", 44}, {"_SC_XBS5_LPBIG_OFFBIG", 45}, {"_SC_XOPEN_CRYPT", 29},
+    {"_SC_XOPEN_ENH_I18N", 30}, {"_SC_XOPEN_LEGACY", 36}, {"_SC_XOPEN_REALTIME", 34},
+    {"_SC_XOPEN_REALTIME_THREADS", 35}, {"_SC_XOPEN_SHM", 31}, {"_SC_XOPEN_UNIX", 41},
+    {"_SC_XOPEN_VERSION", 32}, {"_SC_XOPEN_XCU_VERSION", 33},
 };
 
+// bionic's sysconf (libc/bionic/sysconf.cpp, android-17.0.0_r1), by the _SC_*
+// numbers of bionic (bits/sysconf.h) that OsConstantsHolder holds. The limits
+// are those of an Android application process (8 MiB stack, 32768 descriptors);
+// memory and processors describe the emulated device, not the host.
 int64_t sysconf_value(int32_t name) {
+  constexpr int64_t kPosixVersion = 200809, kMissing = -1;
+  constexpr int64_t kPageSize = 4096, kPhysPages = (int64_t(4) << 30) / kPageSize;
   switch (name) {
-    case 2: return 100;                                                       // _SC_CLK_TCK
-    case 4: return 1024;                                                      // _SC_OPEN_MAX
-    case 30: return 4096;                                                     // _SC_PAGESIZE
-    case 83: case 84: return std::max(1u, std::thread::hardware_concurrency());  // processors
-    case 85: case 86: return int64_t(1) << 20;                                // 4 GiB of pages
-    default: return -1;
+    case 0x00: return 2097152;  // _SC_ARG_MAX: MAX(MIN(RLIMIT_STACK / 4, 3 * _STK_LIM / 4), ARG_MAX)
+    case 0x01: return 99;       // _SC_BC_BASE_MAX
+    case 0x02: return 2048;     // _SC_BC_DIM_MAX
+    case 0x03: return 99;       // _SC_BC_SCALE_MAX
+    case 0x04: return 1000;     // _SC_BC_STRING_MAX
+    case 0x05: return 32768;    // _SC_CHILD_MAX: RLIMIT_NPROC
+    case 0x06: return 100;      // _SC_CLK_TCK: AT_CLKTCK
+    case 0x07: return 2;        // _SC_COLL_WEIGHTS_MAX
+    case 0x08: return 32;       // _SC_EXPR_NEST_MAX
+    case 0x09: return 2048;     // _SC_LINE_MAX
+    case 0x0a: return 65536;    // _SC_NGROUPS_MAX
+    case 0x0b: return 32768;    // _SC_OPEN_MAX: RLIMIT_NOFILE
+    case 0x0c: return 128;      // _SC_PASS_MAX
+    case 0x0d: return kPosixVersion;  // _SC_2_C_BIND
+    case 0x0e: return kMissing;       // _SC_2_C_DEV
+    case 0x0f: return kMissing;       // _SC_2_C_VERSION (not handled: EINVAL)
+    case 0x10: return kPosixVersion;  // _SC_2_CHAR_TERM
+    case 0x11: case 0x12: return -1;  // _SC_2_FORT_DEV, _SC_2_FORT_RUN
+    case 0x13: case 0x14: case 0x15: return kMissing;  // _SC_2_LOCALEDEF, _SC_2_SW_DEV, _SC_2_UPE
+    case 0x16: return kPosixVersion;  // _SC_2_VERSION
+    case 0x17: return kPosixVersion;  // _SC_JOB_CONTROL
+    case 0x18: return 1;              // _SC_SAVED_IDS
+    case 0x19: return kPosixVersion;  // _SC_VERSION
+    case 0x1a: return 255;            // _SC_RE_DUP_MAX
+    case 0x1b: return 20;             // _SC_STREAM_MAX: FOPEN_MAX
+    case 0x1c: return 6;              // _SC_TZNAME_MAX
+    case 0x1d: return kMissing;       // _SC_XOPEN_CRYPT
+    case 0x1e: return 1;              // _SC_XOPEN_ENH_I18N
+    case 0x1f: return 1;              // _SC_XOPEN_SHM
+    case 0x20: return 700;            // _SC_XOPEN_VERSION
+    case 0x21: return -1;             // _SC_XOPEN_XCU_VERSION (not handled: EINVAL)
+    case 0x22: case 0x23: return 1;   // _SC_XOPEN_REALTIME(_THREADS)
+    case 0x24: return kMissing;       // _SC_XOPEN_LEGACY
+    case 0x25: return INT64_MAX;      // _SC_ATEXIT_MAX: LONG_MAX
+    case 0x26: return 1024;           // _SC_IOV_MAX
+    case 0x27: case 0x28: return kPageSize;  // _SC_PAGESIZE, _SC_PAGE_SIZE
+    case 0x29: return 1;              // _SC_XOPEN_UNIX
+    case 0x2a: case 0x2b: case 0x2c: case 0x2d: return -1;  // _SC_XBS5_* (not handled: EINVAL)
+    case 0x2e: return 2;              // _SC_AIO_LISTIO_MAX
+    case 0x2f: return 1;              // _SC_AIO_MAX
+    case 0x30: return 0;              // _SC_AIO_PRIO_DELTA_MAX
+    case 0x31: return 32;             // _SC_DELAYTIMER_MAX
+    case 0x32: return 8;              // _SC_MQ_OPEN_MAX
+    case 0x33: return 32;             // _SC_MQ_PRIO_MAX
+    case 0x34: return 32;             // _SC_RTSIG_MAX
+    case 0x35: return 256;            // _SC_SEM_NSEMS_MAX
+    case 0x36: return 0x3fffffff;     // _SC_SEM_VALUE_MAX
+    case 0x37: return 32;             // _SC_SIGQUEUE_MAX
+    case 0x38: return 32;             // _SC_TIMER_MAX
+    case 0x39: return kMissing;       // _SC_ASYNCHRONOUS_IO
+    case 0x3a: case 0x3b: case 0x3c: case 0x3d: case 0x3e: return kPosixVersion;  // FSYNC, MAPPED_FILES, MEMLOCK(_RANGE), MEMORY_PROTECTION
+    case 0x3f: case 0x40: return kMissing;  // _SC_MESSAGE_PASSING, _SC_PRIORITIZED_IO
+    case 0x41: case 0x42: case 0x43: return kPosixVersion;  // PRIORITY_SCHEDULING, REALTIME_SIGNALS, SEMAPHORES
+    case 0x44: return kMissing;       // _SC_SHARED_MEMORY_OBJECTS
+    case 0x45: case 0x46: return kPosixVersion;  // _SC_SYNCHRONIZED_IO, _SC_TIMERS
+    case 0x47: case 0x48: return 1024;  // _SC_GETGR_R_SIZE_MAX, _SC_GETPW_R_SIZE_MAX
+    case 0x49: return 256;            // _SC_LOGIN_NAME_MAX
+    case 0x4a: return 4;              // _SC_THREAD_DESTRUCTOR_ITERATIONS
+    case 0x4b: return 128;            // _SC_THREAD_KEYS_MAX
+    case 0x4c: return 16384;          // _SC_THREAD_STACK_MIN
+    case 0x4d: return -1;             // _SC_THREAD_THREADS_MAX
+    case 0x4e: return 32;             // _SC_TTY_NAME_MAX
+    case 0x4f: case 0x50: case 0x51: case 0x52: return kPosixVersion;  // THREADS, ATTR_STACKADDR/SIZE, PRIORITY_SCHEDULING
+    case 0x53: case 0x54: return kMissing;  // _SC_THREAD_PRIO_INHERIT, _SC_THREAD_PRIO_PROTECT
+    case 0x55: return kPosixVersion;  // _SC_THREAD_SAFE_FUNCTIONS
+    case 0x60: case 0x61: return std::max(1u, std::thread::hardware_concurrency());  // _SC_NPROCESSORS_CONF/ONLN
+    case 0x62: return kPhysPages;     // _SC_PHYS_PAGES
+    case 0x63: return kPhysPages / 2;  // _SC_AVPHYS_PAGES
+    case 0x64: return kPosixVersion;  // _SC_MONOTONIC_CLOCK
+    case 0x9e: return 65;             // _SC_NSIG
+    default: return -1;               // EINVAL
   }
 }
 
@@ -854,9 +959,11 @@ std::string strerror_text(int32_t err) {
 namespace {
 
 void register_os(rt::NativeRegistry& r) {
-  // Android 17 moved the native part to OsConstantsHolder; both fill OsConstants.
+  // android_system_OsConstants.cpp: in Android 17, OsConstantsHolder.initConstants fills the
+  // holder's own fields, and OsConstants.<clinit> copies them (the values that differ
+  // between platforms; the others are constants of OsConstants itself).
   auto init_constants = [](Runtime& rt, NativeArgs&) -> uint64_t {
-    rt::Class* cls = rt.find_class("Landroid/system/OsConstants;");
+    rt::Class* cls = rt.find_class("Landroid/system/OsConstantsHolder;");
     int32_t sentinel = 0x7E000000;
     size_t unknown = 0;
     for (auto& f : cls->fields) {
@@ -873,13 +980,11 @@ void register_os(rt::NativeRegistry& r) {
       unknown += !known;
       cls->statics.at(f->slot) = uint32_t(v);
     }
-    if (unknown) log::debug("libcore", "OsConstants : " + std::to_string(unknown) + " constantes sans valeur Linux connue");
+    if (unknown) log::debug("libcore", "OsConstantsHolder : " + std::to_string(unknown) + " constantes sans valeur Linux connue");
     return 0;
   };
-  for (const char* cls : {"Landroid/system/OsConstants;", "Landroid/system/OsConstantsHolder;"}) {
-    r.bind(cls, "initConstants", "()V", init_constants, S::kPartial,
-           "constantes Linux x86_64 usuelles ; les autres reçoivent des valeurs distinctes");
-  }
+  r.bind("Landroid/system/OsConstantsHolder;", "initConstants", "()V", init_constants, S::kPartial,
+         "constantes Linux x86_64 usuelles ; les autres reçoivent des valeurs distinctes");
 
   const char* lx = "Llibcore/io/Linux;";
   // Instance methods: argument 0 is the Linux object. Descriptor and file
@@ -925,13 +1030,7 @@ void register_os(rt::NativeRegistry& r) {
     return 0;
   });
   auto ident = [](int32_t v) { return [v](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_int(v); }; };
-  r.bind(lx, "getpid", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_int(int32_t(GetCurrentProcessId())); });
-  r.bind(lx, "gettid", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_int(int32_t(GetCurrentThreadId())); });
-  r.bind(lx, "getppid", "()I", ident(1));
-  for (const char* name : {"getuid", "geteuid", "getgid", "getegid"}) {
-    r.bind(lx, name, "()I", ident(10000), S::kPartial, "identité d'application Android fixe (u0_a0)");
-  }
-  // Android 17 names (static natives behind the Os methods).
+  // The static natives behind the Os methods (Android 17).
   for (const char* name : {"nativeGetuid", "nativeGeteuid", "nativeGetgid", "nativeGetegid"}) {
     r.bind(lx, name, "()I", ident(10000), S::kPartial, "identité d'application Android fixe (u0_a0)");
   }
@@ -1050,177 +1149,281 @@ void store(Runtime& rt, Handle obj, int64_t off, T v, bool reference = false) {
   std::memcpy(locate(rt, obj, off, sizeof(T), Access{true, reference}), &v, sizeof(T));
 }
 
-void register_unsafe(rt::NativeRegistry& r) {
-  for (const char* u : {"Lsun/misc/Unsafe;", "Ljdk/internal/misc/Unsafe;"}) {
-    auto scale = [](Runtime& rt, NativeArgs& a) -> uint64_t {
-      rt::Class* c = rt.mirror_class(a.h(0));
-      if (!c) rt.throw_npe("componentType");
-      switch (c->primitive) {
-        case 'Z': case 'B': return 1;
-        case 'C': case 'S': return 2;
-        case 'J': case 'D': return 8;
-        default: return 4;
-      }
-    };
-    r.bind(u, "getArrayBaseOffsetForComponentType", "(Ljava/lang/Class;)I",
-           [](Runtime&, NativeArgs&) -> uint64_t { return uint64_t(kArrayBase); });
-    r.bind(u, "getArrayIndexScaleForComponentType", "(Ljava/lang/Class;)I", scale);
-    // Accessors: (Object, long offset[, value]) on instance methods (arg 0 = Unsafe).
-    struct Kind {
-      const char* name;  // Int, Long, Object/Reference...
-      char type;
-    };
-    for (Kind k : {Kind{"Int", 'I'}, Kind{"Long", 'J'}, Kind{"Object", 'L'}, Kind{"Reference", 'L'}, Kind{"Boolean", 'Z'},
-                   Kind{"Byte", 'B'}, Kind{"Short", 'S'}, Kind{"Char", 'C'}, Kind{"Float", 'F'}, Kind{"Double", 'D'}}) {
-      std::string jt = k.type == 'L' ? "Ljava/lang/Object;" : std::string(1, k.type);
-      bool wide = k.type == 'J' || k.type == 'D';
-      auto get = [type = k.type](Runtime& rt, NativeArgs& a) -> uint64_t {
-        Handle o = a.h(1);
-        int64_t off = a.i64(2);
-        switch (type) {
-          case 'J': case 'D': return load<uint64_t>(rt, o, off);
-          case 'Z': case 'B': return uint32_t(int32_t(load<int8_t>(rt, o, off)));
-          case 'S': return uint32_t(int32_t(load<int16_t>(rt, o, off)));
-          case 'C': return load<uint16_t>(rt, o, off);
-          default: return load<uint32_t>(rt, o, off, type == 'L');
-        }
-      };
-      auto put = [type = k.type](Runtime& rt, NativeArgs& a) -> uint64_t {
-        Handle o = a.h(1);
-        int64_t off = a.i64(2);
-        switch (type) {
-          case 'J': case 'D': store<uint64_t>(rt, o, off, uint64_t(a.i64(4))); break;
-          case 'Z': case 'B': store<uint8_t>(rt, o, off, uint8_t(a.raw(4))); break;
-          case 'S': case 'C': store<uint16_t>(rt, o, off, uint16_t(a.raw(4))); break;
-          default: store<uint32_t>(rt, o, off, a.raw(4), type == 'L');
-        }
-        return 0;
-      };
-      std::string getsig = "(Ljava/lang/Object;J)" + jt;
-      std::string putsig = "(Ljava/lang/Object;J" + jt + ")V";
-      // The GIL makes every access sequentially consistent.
-      for (const char* suffix : {"", "Volatile", "Acquire", "Opaque"}) {
-        r.bind(u, std::string("get") + k.name + suffix, getsig, get);
-      }
-      for (const char* suffix : {"", "Volatile", "Release", "Opaque"}) {
-        r.bind(u, std::string("put") + k.name + suffix, putsig, put);
-      }
-      if (k.type == 'I' || k.type == 'J' || k.type == 'L') {
-        r.bind(u, std::string("putOrdered") + k.name, putsig, put);
-        std::string cas_sig = "(Ljava/lang/Object;J" + jt + jt + ")Z";
-        bool ref = k.type == 'L';
-        auto cas = [wide, ref](Runtime& rt, NativeArgs& a) -> uint64_t {
-          Handle o = a.h(1);
-          int64_t off = a.i64(2);
-          if (wide) {
-            uint64_t expected = uint64_t(a.i64(4)), value = uint64_t(a.i64(6));
-            if (load<uint64_t>(rt, o, off) != expected) return 0;
-            store<uint64_t>(rt, o, off, value);
-            return 1;
-          }
-          uint32_t expected = a.raw(4), value = a.raw(5);
-          if (load<uint32_t>(rt, o, off, ref) != expected) return 0;
-          store<uint32_t>(rt, o, off, value, ref);
-          return 1;
-        };
-        for (const char* prefix : {"compareAndSwap", "compareAndSet", "weakCompareAndSet"}) {
-          r.bind(u, std::string(prefix) + k.name, cas_sig, cas);
-        }
-        // compareAndExchange: returns the previous value.
-        auto cae = [wide, ref](Runtime& rt, NativeArgs& a) -> uint64_t {
-          Handle o = a.h(1);
-          int64_t off = a.i64(2);
-          if (wide) {
-            uint64_t old = load<uint64_t>(rt, o, off);
-            if (old == uint64_t(a.i64(4))) store<uint64_t>(rt, o, off, uint64_t(a.i64(6)));
-            return old;
-          }
-          uint32_t old = load<uint32_t>(rt, o, off, ref);
-          if (old == a.raw(4)) store<uint32_t>(rt, o, off, a.raw(5), ref);
-          return old;
-        };
-        std::string cae_sig = "(Ljava/lang/Object;J" + jt + jt + ")" + jt;
-        r.bind(u, std::string("compareAndExchange") + k.name, cae_sig, cae);
-      }
-    }
-    auto fence = [](Runtime&, NativeArgs&) -> uint64_t { return 0; };
-    for (const char* f : {"loadFence", "storeFence", "fullFence"}) r.bind(u, f, "()V", fence);
-    r.bind(u, "addressSize", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return 8; });
-    r.bind(u, "pageSize", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return 4096; });
-    // LockSupport.park/unpark.
-    r.bind(u, "park", "(ZJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-      rt.park_current(a.z(1), a.i64(2));
-      return 0;
-    });
-    r.bind(u, "unpark", "(Ljava/lang/Object;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-      if (a.h(1) == kNull) rt.throw_npe("unpark(null)");
-      rt.unpark(a.h(1));
-      return 0;
-    });
-    r.bind(u, "allocateMemory", "(J)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-      int64_t bytes = a.i64(1);
-      if (bytes < 0) rt.throw_new("Ljava/lang/IllegalArgumentException;", "taille négative");
-      return uint64_t(native_alloc(rt, uint64_t(bytes)));
-    }, S::kPartial, "mémoire native émulée (native_memory.h)");
-    r.bind(u, "reallocateMemory", "(JJ)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-      int64_t bytes = a.i64(3);
-      if (bytes < 0) rt.throw_new("Ljava/lang/IllegalArgumentException;", "taille négative");
-      return uint64_t(native_realloc(rt, a.i64(1), uint64_t(bytes)));
-    });
-    r.bind(u, "freeMemory", "(J)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-      native_free(rt, a.i64(1));
-      return 0;
-    });
-    // (Object, long) pairs: an object and an offset in it, or null and an address.
-    auto do_copy = [](Runtime& rt, NativeArgs& a) -> uint64_t {
-      int64_t bytes = a.i64(7);
-      if (bytes < 0) rt.throw_new("Ljava/lang/IllegalArgumentException;", "taille négative");
-      if (bytes == 0) return 0;
-      uint8_t* src = locate(rt, a.h(1), a.i64(2), uint64_t(bytes), Access{false, false});
-      uint8_t* dst = locate(rt, a.h(4), a.i64(5), uint64_t(bytes), Access{true, false});
-      std::memmove(dst, src, size_t(bytes));
-      return 0;
-    };
-    auto do_set = [](Runtime& rt, NativeArgs& a) -> uint64_t {
-      int64_t bytes = a.i64(4);
-      if (bytes < 0) rt.throw_new("Ljava/lang/IllegalArgumentException;", "taille négative");
-      if (bytes == 0) return 0;
-      std::memset(locate(rt, a.h(1), a.i64(2), uint64_t(bytes), Access{true, false}), int(uint8_t(a.raw(6))),
-                  size_t(bytes));
-      return 0;
-    };
-    r.bind(u, "setMemory", "(Ljava/lang/Object;JJB)V", do_set);
-    r.bind(u, "setMemory0", "(Ljava/lang/Object;JJB)V", do_set);
-    r.bind(u, "copyMemory", "(Ljava/lang/Object;JLjava/lang/Object;JJ)V", do_copy);
-    r.bind(u, "copyMemory0", "(Ljava/lang/Object;JLjava/lang/Object;JJ)V", do_copy);
-    r.bind(u, "getByte", "(J)B", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-      return uint32_t(int32_t(load<int8_t>(rt, kNull, a.i64(1))));
-    });
-    r.bind(u, "putByte", "(JB)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-      store<uint8_t>(rt, kNull, a.i64(1), uint8_t(a.raw(3)));
-      return 0;
-    });
-    r.bind(u, "getInt", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-      return load<uint32_t>(rt, kNull, a.i64(1));
-    });
-    r.bind(u, "putInt", "(JI)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-      store<uint32_t>(rt, kNull, a.i64(1), a.raw(3));
-      return 0;
-    });
-    r.bind(u, "getLong", "(J)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-      return load<uint64_t>(rt, kNull, a.i64(1));
-    });
-    r.bind(u, "putLong", "(JJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-      store<uint64_t>(rt, kNull, a.i64(1), uint64_t(a.i64(3)));
-      return 0;
-    });
-    r.bind(u, "allocateInstance", "(Ljava/lang/Class;)Ljava/lang/Object;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-      rt::Class* c = rt.mirror_class(a.h(1));
-      if (!c) rt.throw_npe("Class");
-      rt.ensure_initialized(c);
-      return rt.alloc(c);
-    });
+// Register form of a narrow value (sign-extended byte and short,
+// zero-extended boolean and char).
+uint32_t canonical_narrow(char type, uint32_t v) {
+  switch (type) {
+    case 'Z': return v & 0xFF;
+    case 'B': return uint32_t(int32_t(int8_t(v)));
+    case 'C': return v & 0xFFFF;
+    case 'S': return uint32_t(int32_t(int16_t(v)));
+    default: return v;
   }
+}
+
+// A narrow value written into an object field: the field owns its whole
+// 4-byte slot, which keeps the register form the interpreter reads back
+// (sign-extended byte and short, zero-extended boolean and char).
+template <typename T>
+void store_narrow(Runtime& rt, Handle obj, int64_t off, uint32_t v, char type) {
+  rt::Object* o = obj == kNull ? nullptr : rt.object(obj);
+  if (o && !dynamic_cast<rt::ArrayObject*>(o)) {
+    store<uint32_t>(rt, obj, off, canonical_narrow(type, v));
+    return;
+  }
+  store<T>(rt, obj, off, T(v));
+}
+
+uint64_t check_unsafe_size(Runtime& rt, int64_t size, bool jdk) {
+  if (size >= 0) return uint64_t(size);
+  if (jdk) rt.throw_new("Ljava/lang/RuntimeException;", "Bad size: " + std::to_string(uint64_t(size)));
+  rt.throw_new("Ljava/lang/IllegalAccessException;", "wrong number of bytes");
+}
+
+void register_unsafe(rt::NativeRegistry& r) {
+  // The natives of Android 17's two Unsafe classes, exactly those that
+  // art/runtime/native/sun_misc_Unsafe.cc and jdk_internal_misc_Unsafe.cc
+  // register (android-17.0.0_r1); their other access modes are Java code over
+  // these. The GIL makes every access sequentially consistent, so the plain,
+  // volatile and ordered variants share one implementation.
+  using Fn = rt::NativeFn;
+  auto get = [](char type) -> Fn {  // (Object o, long offset)
+    return [type](Runtime& rt, NativeArgs& a) -> uint64_t {
+      Handle o = a.h(1);
+      int64_t off = a.i64(2);
+      switch (type) {
+        case 'J': case 'D': return load<uint64_t>(rt, o, off);
+        case 'Z': return load<uint8_t>(rt, o, off);
+        case 'B': return uint32_t(int32_t(load<int8_t>(rt, o, off)));
+        case 'S': return uint32_t(int32_t(load<int16_t>(rt, o, off)));
+        case 'C': return load<uint16_t>(rt, o, off);
+        default: return load<uint32_t>(rt, o, off, type == 'L');
+      }
+    };
+  };
+  auto put = [](char type) -> Fn {  // (Object o, long offset, T value)
+    return [type](Runtime& rt, NativeArgs& a) -> uint64_t {
+      Handle o = a.h(1);
+      int64_t off = a.i64(2);
+      switch (type) {
+        case 'J': case 'D': store<uint64_t>(rt, o, off, uint64_t(a.i64(4))); break;
+        case 'Z': case 'B': store_narrow<uint8_t>(rt, o, off, a.raw(4), type); break;
+        case 'S': case 'C': store_narrow<uint16_t>(rt, o, off, a.raw(4), type); break;
+        default: store<uint32_t>(rt, o, off, a.raw(4), type == 'L');
+      }
+      return 0;
+    };
+  };
+  auto get_address = [](char type) -> Fn {  // (long address)
+    return [type](Runtime& rt, NativeArgs& a) -> uint64_t {
+      int64_t at = a.i64(1);
+      switch (type) {
+        case 'J': case 'D': return load<uint64_t>(rt, kNull, at);
+        case 'B': return uint32_t(int32_t(load<int8_t>(rt, kNull, at)));
+        case 'S': return uint32_t(int32_t(load<int16_t>(rt, kNull, at)));
+        case 'C': return load<uint16_t>(rt, kNull, at);
+        default: return load<uint32_t>(rt, kNull, at);
+      }
+    };
+  };
+  auto put_address = [](char type) -> Fn {  // (long address, T value)
+    return [type](Runtime& rt, NativeArgs& a) -> uint64_t {
+      int64_t at = a.i64(1);
+      switch (type) {
+        case 'J': case 'D': store<uint64_t>(rt, kNull, at, uint64_t(a.i64(3))); break;
+        case 'B': store<uint8_t>(rt, kNull, at, uint8_t(a.raw(3))); break;
+        case 'S': case 'C': store<uint16_t>(rt, kNull, at, uint16_t(a.raw(3))); break;
+        default: store<uint32_t>(rt, kNull, at, a.raw(3));
+      }
+      return 0;
+    };
+  };
+  // compareAndSwap / compareAndSet (the previous value equal to `expected`)
+  // and compareAndExchange (returns the previous value).
+  auto cas = [](char type, bool exchange) -> Fn {
+    return [type, exchange](Runtime& rt, NativeArgs& a) -> uint64_t {
+      Handle o = a.h(1);
+      int64_t off = a.i64(2);
+      if (type == 'J') {
+        uint64_t old = load<uint64_t>(rt, o, off), expected = uint64_t(a.i64(4));
+        if (old == expected) store<uint64_t>(rt, o, off, uint64_t(a.i64(6)));
+        return exchange ? old : rt::ret_bool(old == expected);
+      }
+      bool ref = type == 'L';
+      uint32_t old = load<uint32_t>(rt, o, off, ref);
+      if (old == a.raw(4)) store<uint32_t>(rt, o, off, a.raw(5), ref);
+      return exchange ? old : rt::ret_bool(old == a.raw(4));
+    };
+  };
+  auto scale = [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Class* c = rt.mirror_class(a.h(0));
+    if (!c) rt.throw_npe("componentType");
+    switch (c->primitive) {
+      case 'Z': case 'B': return 1;
+      case 'C': case 'S': return 2;
+      case 'J': case 'D': return 8;
+      default: return 4;
+    }
+  };
+  auto fence = [](Runtime&, NativeArgs&) -> uint64_t { return 0; };
+  auto allocate = [](bool jdk) -> Fn {
+    return [jdk](Runtime& rt, NativeArgs& a) -> uint64_t {
+      uint64_t bytes = check_unsafe_size(rt, a.i64(1), jdk);
+      if (jdk && bytes == 0) return 0;
+      return uint64_t(native_alloc(rt, bytes));
+    };
+  };
+  // A primitive array and a byte offset in its elements (copyMemoryTo/FromPrimitiveArray).
+  auto array_bytes = [](Runtime& rt, Handle array, int64_t offset, uint64_t size) -> uint8_t* {
+    rt::ArrayObject& arr = rt.array(array, "Unsafe");
+    if (!arr.klass->component || !arr.klass->component->primitive) {
+      rt.throw_new("Ljava/lang/IllegalAccessException;", "not a primitive array");
+    }
+    if (offset < 0 || uint64_t(offset) > arr.data.size() || size > arr.data.size() - uint64_t(offset)) {
+      rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "Unsafe");
+    }
+    return arr.data.data() + offset;
+  };
+
+  struct Entry {
+    std::string name, sig;
+    Fn fn;
+  };
+  std::vector<Entry> common = {
+      {"getIntVolatile", "(Ljava/lang/Object;J)I", get('I')},
+      {"putIntVolatile", "(Ljava/lang/Object;JI)V", put('I')},
+      {"getLongVolatile", "(Ljava/lang/Object;J)J", get('J')},
+      {"putLongVolatile", "(Ljava/lang/Object;JJ)V", put('J')},
+      {"getInt", "(Ljava/lang/Object;J)I", get('I')},
+      {"putInt", "(Ljava/lang/Object;JI)V", put('I')},
+      {"getLong", "(Ljava/lang/Object;J)J", get('J')},
+      {"putLong", "(Ljava/lang/Object;JJ)V", put('J')},
+      {"getArrayBaseOffsetForComponentType", "(Ljava/lang/Class;)I",
+       [](Runtime&, NativeArgs&) -> uint64_t { return uint64_t(kArrayBase); }},
+      {"getArrayIndexScaleForComponentType", "(Ljava/lang/Class;)I", scale},
+      {"addressSize", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return 8; }},
+      {"pageSize", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return 4096; }},
+      {"freeMemory", "(J)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+         native_free(rt, a.i64(1));
+         return 0;
+       }},
+      {"setMemory", "(JJB)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+         int64_t bytes = a.i64(3);
+         if (bytes > 0) std::memset(native_span(rt, a.i64(1), uint64_t(bytes), true).data(), int(uint8_t(a.raw(5))), size_t(bytes));
+         return 0;
+       }},
+      {"getBoolean", "(Ljava/lang/Object;J)Z", get('Z')},
+      {"allocateInstance", "(Ljava/lang/Class;)Ljava/lang/Object;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+         // JNI AllocObject: InstantiationException for an interface or an abstract class.
+         rt::Class* c = rt.mirror_class(a.h(1));
+         if (!c) rt.throw_npe("Class");
+         if (c->is_interface() || c->is_abstract() || c->primitive || c->is_array()) {
+           rt.throw_new("Ljava/lang/InstantiationException;", c->java_name());
+         }
+         rt.ensure_initialized(c);
+         return rt.alloc(c);
+       }},
+      {"getByte", "(Ljava/lang/Object;J)B", get('B')},
+      {"getChar", "(Ljava/lang/Object;J)C", get('C')},
+      {"getShort", "(Ljava/lang/Object;J)S", get('S')},
+      {"getFloat", "(Ljava/lang/Object;J)F", get('F')},
+      {"getDouble", "(Ljava/lang/Object;J)D", get('D')},
+      {"putBoolean", "(Ljava/lang/Object;JZ)V", put('Z')},
+      {"putByte", "(Ljava/lang/Object;JB)V", put('B')},
+      {"putChar", "(Ljava/lang/Object;JC)V", put('C')},
+      {"putShort", "(Ljava/lang/Object;JS)V", put('S')},
+      {"putFloat", "(Ljava/lang/Object;JF)V", put('F')},
+      {"putDouble", "(Ljava/lang/Object;JD)V", put('D')},
+      {"unpark", "(Ljava/lang/Object;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+         if (a.h(1) == kNull) rt.throw_npe("unpark(null)");
+         rt.unpark(a.h(1));
+         return 0;
+       }},
+      {"park", "(ZJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+         rt.park_current(a.z(1), a.i64(2));
+         return 0;
+       }},
+      {"loadFence", "()V", fence},
+      {"storeFence", "()V", fence},
+      {"fullFence", "()V", fence},
+  };
+  for (char t : std::string("BCSIJFD")) {
+    std::string jt(1, t);
+    static const std::map<char, std::string> names = {{'B', "Byte"}, {'C', "Char"},  {'S', "Short"}, {'I', "Int"},
+                                                      {'J', "Long"}, {'F', "Float"}, {'D', "Double"}};
+    common.push_back({"get" + names.at(t), "(J)" + jt, get_address(t)});
+    common.push_back({"put" + names.at(t), "(J" + jt + ")V", put_address(t)});
+  }
+
+  const char* obj = "Ljava/lang/Object;";
+  std::vector<Entry> sun = {
+      {"compareAndSwapInt", "(Ljava/lang/Object;JII)Z", cas('I', false)},
+      {"compareAndSwapLong", "(Ljava/lang/Object;JJJ)Z", cas('J', false)},
+      {"compareAndSwapObject", "(Ljava/lang/Object;JLjava/lang/Object;Ljava/lang/Object;)Z", cas('L', false)},
+      {"getObjectVolatile", std::string("(Ljava/lang/Object;J)") + obj, get('L')},
+      {"putObjectVolatile", std::string("(Ljava/lang/Object;J") + obj + ")V", put('L')},
+      {"putOrderedInt", "(Ljava/lang/Object;JI)V", put('I')},
+      {"putOrderedLong", "(Ljava/lang/Object;JJ)V", put('J')},
+      {"getObject", std::string("(Ljava/lang/Object;J)") + obj, get('L')},
+      {"putObject", std::string("(Ljava/lang/Object;J") + obj + ")V", put('L')},
+      {"putOrderedObject", std::string("(Ljava/lang/Object;J") + obj + ")V", put('L')},
+      {"copyMemory", "(JJJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+         uint64_t bytes = check_unsafe_size(rt, a.i64(5), false);
+         if (bytes == 0) return 0;
+         uint8_t* src = native_span(rt, a.i64(1), bytes).data();
+         uint8_t* dst = native_span(rt, a.i64(3), bytes, true).data();
+         std::memmove(dst, src, size_t(bytes));
+         return 0;
+       }},
+      {"copyMemoryToPrimitiveArray", "(JLjava/lang/Object;JJ)V", [array_bytes](Runtime& rt, NativeArgs& a) -> uint64_t {
+         uint64_t bytes = check_unsafe_size(rt, a.i64(6), false);
+         if (bytes == 0) return 0;
+         uint8_t* src = native_span(rt, a.i64(1), bytes).data();
+         std::memmove(array_bytes(rt, a.h(3), a.i64(4), bytes), src, size_t(bytes));
+         return 0;
+       }},
+      {"copyMemoryFromPrimitiveArray", "(Ljava/lang/Object;JJJ)V", [array_bytes](Runtime& rt, NativeArgs& a) -> uint64_t {
+         uint64_t bytes = check_unsafe_size(rt, a.i64(6), false);
+         if (bytes == 0) return 0;
+         uint8_t* src = array_bytes(rt, a.h(1), a.i64(2), bytes);
+         std::memmove(native_span(rt, a.i64(4), bytes, true).data(), src, size_t(bytes));
+         return 0;
+       }},
+  };
+  std::vector<Entry> jdk = {
+      {"compareAndSetInt", "(Ljava/lang/Object;JII)Z", cas('I', false)},
+      {"compareAndSetLong", "(Ljava/lang/Object;JJJ)Z", cas('J', false)},
+      {"compareAndExchangeLong", "(Ljava/lang/Object;JJJ)J", cas('J', true)},
+      {"compareAndSetReference", "(Ljava/lang/Object;JLjava/lang/Object;Ljava/lang/Object;)Z", cas('L', false)},
+      {"getReferenceVolatile", std::string("(Ljava/lang/Object;J)") + obj, get('L')},
+      {"putReferenceVolatile", std::string("(Ljava/lang/Object;J") + obj + ")V", put('L')},
+      {"getReference", std::string("(Ljava/lang/Object;J)") + obj, get('L')},
+      {"putReference", std::string("(Ljava/lang/Object;J") + obj + ")V", put('L')},
+      {"copyMemory0", "(Ljava/lang/Object;JLjava/lang/Object;JJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+         // (Object, long) pairs: an object and an offset in it, or null and an address.
+         uint64_t bytes = check_unsafe_size(rt, a.i64(7), true);
+         if (bytes == 0) return 0;
+         uint8_t* src = locate(rt, a.h(1), a.i64(2), bytes, Access{false, false});
+         uint8_t* dst = locate(rt, a.h(4), a.i64(5), bytes, Access{true, false});
+         std::memmove(dst, src, size_t(bytes));
+         return 0;
+       }},
+  };
+  for (char t : std::string("ZBSCFD")) {
+    static const std::map<char, std::string> names = {{'Z', "Boolean"}, {'B', "Byte"},  {'S', "Short"},
+                                                      {'C', "Char"},    {'F', "Float"}, {'D', "Double"}};
+    std::string jt(1, t);
+    jdk.push_back({"get" + names.at(t) + "Volatile", "(Ljava/lang/Object;J)" + jt, get(t)});
+    jdk.push_back({"put" + names.at(t) + "Volatile", "(Ljava/lang/Object;J" + jt + ")V", put(t)});
+  }
+  for (const auto& e : common) {
+    r.bind("Lsun/misc/Unsafe;", e.name, e.sig, e.fn);
+    r.bind("Ljdk/internal/misc/Unsafe;", e.name, e.sig, e.fn);
+  }
+  for (const auto& e : sun) r.bind("Lsun/misc/Unsafe;", e.name, e.sig, e.fn);
+  for (const auto& e : jdk) r.bind("Ljdk/internal/misc/Unsafe;", e.name, e.sig, e.fn);
+  r.bind("Lsun/misc/Unsafe;", "allocateMemory", "(J)J", allocate(false), S::kPartial, "mémoire native émulée (native_memory.h)");
+  r.bind("Ljdk/internal/misc/Unsafe;", "allocateMemory", "(J)J", allocate(true), S::kPartial, "mémoire native émulée (native_memory.h)");
 }
 
 // --- java.lang.invoke.VarHandle (invoke-polymorphic) --------------------------------------

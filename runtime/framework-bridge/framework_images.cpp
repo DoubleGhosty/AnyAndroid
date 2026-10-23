@@ -960,15 +960,6 @@ void register_image_decoder(rt::NativeRegistry& r) {
     return construct(rt, "Landroid/util/Size;", "(II)V",
                      {uint32_t(dec->decoded.width / sample), uint32_t(dec->decoded.height / sample)});
   });
-
-  r.bind(id, "nHasFP16Support", "()Z", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_bool(false); });
-  r.bind(id, "nIsHardwareConfigAllowed", "(IIZ)Z",
-         [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_bool(false); });
-  r.bind(id, "nIsP010SupportedForAV1", "()Z", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_bool(false); });
-  r.bind(id, "nSeal", "(I)V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
-  r.bind(id, "nSerializeColorSpace", "(J)[B", [](Runtime&, NativeArgs&) -> uint64_t { return kNull; });
-  r.bind(id, "nCreateColorSpace", "([BI)Landroid/graphics/ColorSpace;",
-         [](Runtime&, NativeArgs&) -> uint64_t { return kNull; });
 }
 
 }  // namespace

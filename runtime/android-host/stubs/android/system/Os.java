@@ -54,4 +54,8 @@ public final class Os {
   public static int umask(int mask) {
     throw new RuntimeException("stub");
   }
+
+  public static long sysconf(int name) {
+    throw new RuntimeException("stub");
+  }
 }
