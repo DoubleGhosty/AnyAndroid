@@ -239,6 +239,11 @@ void register_system(rt::NativeRegistry& r) {
          [](Runtime& rt, NativeArgs&) -> uint64_t { return rt.current_thread_peer(); });
   r.bind(th, "currentCarrierThread", "()Ljava/lang/Thread;",
          [](Runtime& rt, NativeArgs&) -> uint64_t { return rt.current_thread_peer(); });
+  // Thread_nativeGetStatus (Thread.getState): the Thread.State of the thread
+  // as its blocking waits record it.
+  r.bind(th, "nativeGetStatus", "(Z)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_int(rt.thread_state(a.h(0), a.z(1)));
+  });
   // ART applies the niceness with setpriority and returns 0 (errno on
   // failure); the Java side keeps it in Thread.niceness. The host scheduler
   // is left alone: the value is remembered, not applied.
@@ -1000,6 +1005,21 @@ void register_os(rt::NativeRegistry& r) {
     std::vector<std::string> items;
     for (const auto& [k, v] : android_environment()) items.push_back(k + "=" + v);
     return string_array(rt, items);
+  }, S::kPartial, "environnement Android, jamais celui de l'hôte");
+  // ProcessEnvironment_md.c: the names and values of environ, alternately, as bytes.
+  r.bind("Ljava/lang/ProcessEnvironment;", "environ", "()[[B", [](Runtime& rt, NativeArgs&) -> uint64_t {
+    auto vars = android_environment();
+    Handle result = rt.new_array("[[B", int32_t(2 * vars.size()));
+    rt::GlobalRef keep(rt, result);
+    for (size_t i = 0; i < vars.size(); ++i) {
+      for (size_t k = 0; k < 2; ++k) {
+        const std::string& s = k == 0 ? vars[i].first : vars[i].second;
+        Handle bytes = rt.new_array("[B", int32_t(s.size()));
+        if (!s.empty()) std::memcpy(rt.array(bytes, "byte[]").data.data(), s.data(), s.size());
+        std::memcpy(&rt.array(result, "byte[][]").data[(2 * i + k) * 4], &bytes, 4);
+      }
+    }
+    return result;
   }, S::kPartial, "environnement Android, jamais celui de l'hôte");
   // setenv(3) and unsetenv(3): EINVAL for an empty name or one with '='.
   auto env_name = [](Runtime& rt, Handle h, const char* function) {
@@ -2449,6 +2469,56 @@ uint64_t invoke_custom(Runtime& rt, rt::Method* referrer, uint32_t call_site_idx
 }
 
 void register_invoke(rt::NativeRegistry& r) {
+  // java_lang_invoke_VarHandle.cpp and java_lang_invoke_MethodHandle.cpp
+  // (libcore): the signature-polymorphic methods run through invoke-polymorphic;
+  // their JNI natives are only reachable by reflection, and refuse.
+  struct Reflective {
+    const char* cls;
+    const char* name;
+    const char* ret;
+  };
+  static const Reflective kReflective[] = {
+      {"VarHandle", "compareAndExchange", "Ljava/lang/Object;"},
+      {"VarHandle", "compareAndExchangeAcquire", "Ljava/lang/Object;"},
+      {"VarHandle", "compareAndExchangeRelease", "Ljava/lang/Object;"},
+      {"VarHandle", "compareAndSet", "Z"},
+      {"VarHandle", "get", "Ljava/lang/Object;"},
+      {"VarHandle", "getAcquire", "Ljava/lang/Object;"},
+      {"VarHandle", "getAndAdd", "Ljava/lang/Object;"},
+      {"VarHandle", "getAndAddAcquire", "Ljava/lang/Object;"},
+      {"VarHandle", "getAndAddRelease", "Ljava/lang/Object;"},
+      {"VarHandle", "getAndBitwiseAnd", "Ljava/lang/Object;"},
+      {"VarHandle", "getAndBitwiseAndAcquire", "Ljava/lang/Object;"},
+      {"VarHandle", "getAndBitwiseAndRelease", "Ljava/lang/Object;"},
+      {"VarHandle", "getAndBitwiseOr", "Ljava/lang/Object;"},
+      {"VarHandle", "getAndBitwiseOrAcquire", "Ljava/lang/Object;"},
+      {"VarHandle", "getAndBitwiseOrRelease", "Ljava/lang/Object;"},
+      {"VarHandle", "getAndBitwiseXor", "Ljava/lang/Object;"},
+      {"VarHandle", "getAndBitwiseXorAcquire", "Ljava/lang/Object;"},
+      {"VarHandle", "getAndBitwiseXorRelease", "Ljava/lang/Object;"},
+      {"VarHandle", "getAndSet", "Ljava/lang/Object;"},
+      {"VarHandle", "getAndSetAcquire", "Ljava/lang/Object;"},
+      {"VarHandle", "getAndSetRelease", "Ljava/lang/Object;"},
+      {"VarHandle", "getOpaque", "Ljava/lang/Object;"},
+      {"VarHandle", "getVolatile", "Ljava/lang/Object;"},
+      {"VarHandle", "set", "V"},
+      {"VarHandle", "setOpaque", "V"},
+      {"VarHandle", "setRelease", "V"},
+      {"VarHandle", "setVolatile", "V"},
+      {"VarHandle", "weakCompareAndSet", "Z"},
+      {"VarHandle", "weakCompareAndSetAcquire", "Z"},
+      {"VarHandle", "weakCompareAndSetPlain", "Z"},
+      {"VarHandle", "weakCompareAndSetRelease", "Z"},
+      {"MethodHandle", "invokeExact", "Ljava/lang/Object;"},
+      {"MethodHandle", "invoke", "Ljava/lang/Object;"},
+  };
+  for (const Reflective& m : kReflective) {
+    std::string message = std::string(m.cls) + "." + m.name + " cannot be invoked reflectively.";
+    r.bind(std::string("Ljava/lang/invoke/") + m.cls + ";", m.name, std::string("([Ljava/lang/Object;)") + m.ret,
+           [message](Runtime& rt, NativeArgs&) -> uint64_t {
+             rt.throw_new("Ljava/lang/UnsupportedOperationException;", message);
+           });
+  }
   // java_lang_invoke_MethodHandleImpl.cc: the Field, Method or Constructor of a direct handle.
   r.bind("Ljava/lang/invoke/MethodHandleImpl;", "getMemberInternal", "()Ljava/lang/reflect/Member;",
          [](Runtime& rt, NativeArgs& a) -> uint64_t {
@@ -2561,6 +2631,7 @@ void register_libcore_natives(rt::NativeRegistry& r) {
   register_libcore_crypto(r);
   register_libcore_dex(r);
   register_libcore_regex(r);
+  register_libcore_lang(r);
   register_framework_natives(r);
   register_appmem_natives(r);
 }

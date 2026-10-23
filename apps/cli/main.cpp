@@ -932,6 +932,23 @@ int cmd_image(const Args& a) {
   }
 }
 
+// Native methods that Android 17 declares but does not implement: no JNI
+// function in libcore (ojluni/src/main/native, luni/src/main/native) nor in
+// ART (runtime/native) at android-17.0.0_r1, so calling them fails on a
+// device too (UnsatisfiedLinkError).
+bool absent_on_android(std::string_view cls, std::string_view method) {
+  static const std::set<std::string, std::less<>> absent = {
+      "Ldalvik/system/NativeStart;->main([Ljava/lang/String;)V",
+      "Ldalvik/system/NativeStart;->run()V",
+      "Ljava/lang/Package;->getSystemPackage0(Ljava/lang/String;)Ljava/lang/String;",
+      "Ljava/lang/Package;->getSystemPackages0()[Ljava/lang/String;",
+      "Ljava/util/TimeZone;->getSystemTimeZoneID(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+      "Ljava/util/TimeZone;->getSystemGMTOffsetID()Ljava/lang/String;",
+      "Ljava/util/jar/JarFile;->getMetaInfEntryNames()[Ljava/lang/String;",
+  };
+  return absent.count(std::string(cls) + "->" + std::string(method)) != 0;
+}
+
 // Coverage of the native methods of a boot class path by AnyAndroid.
 int cmd_libcore(const Args& a) {
   if (a.positional.empty() || a.positional[0] != "natives" || !a.has("--bootclasspath")) {
@@ -948,6 +965,7 @@ int cmd_libcore(const Args& a) {
   StaticRegistry reg;
   size_t total = 0, bound = 0, core = 0;
   std::map<std::string, std::vector<std::string>> missing;  // class -> methods
+  std::vector<std::string> absent;
   for (const auto& d : boot.dex) {
     size_t file_total = 0, file_bound = 0;
     for (uint32_t c = 0; c < d->num_class_defs(); ++c) {
@@ -967,6 +985,8 @@ int cmd_libcore(const Args& a) {
           } else if (reg.registry.binding(desc, name, sig)) {
             ++bound;
             ++file_bound;
+          } else if (absent_on_android(desc, name + sig)) {
+            absent.push_back(text::descriptor_to_java(desc) + "." + name + sig);
           } else {
             missing[desc].push_back(name + sig + ((m.access_flags & dex::kAccStatic) ? "  [static]" : ""));
           }
@@ -977,7 +997,8 @@ int cmd_libcore(const Args& a) {
   }
   out("\nTotal : " + std::to_string(total) + " méthodes natives ; " + std::to_string(bound) + " liées par AnyAndroid, " +
       std::to_string(core) + " remplacées par le cœur de la VM (Object, String, Class, Thread, Throwable, réflexion), " +
-      std::to_string(total - bound - core) + " manquantes.\n");
+      std::to_string(absent.size()) + " sans implémentation dans Android 17 lui-même, " +
+      std::to_string(total - bound - core - absent.size()) + " manquantes.\n");
   // Members of the VM core classes (kept native in libcore mode) that the
   // boot class path references but AnyAndroid does not provide.
   std::set<std::string> core_missing;
@@ -1052,6 +1073,10 @@ int cmd_libcore(const Args& a) {
     if (a.has("--all")) {
       for (const auto& m : methods) out("      " + m + "\n");
     }
+  }
+  if (a.has("--all") && !absent.empty()) {
+    out("\nNatives sans implémentation dans Android 17 (ni libcore ni ART) :\n");
+    for (const auto& m : absent) out("  " + m + "\n");
   }
   return kOk;
 }

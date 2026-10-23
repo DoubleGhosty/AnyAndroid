@@ -33,6 +33,7 @@ add_library(aa_bridge STATIC
   libcore_crypto.cpp
   libcore_dex.cpp
   libcore_files.cpp
+  libcore_lang.cpp
   libcore_natives.cpp
   libcore_nio.cpp
   libcore_regex.cpp

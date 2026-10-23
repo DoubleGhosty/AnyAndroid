@@ -3,17 +3,26 @@ package aa.host;
 import aa.host.probe.Hidden;
 import android.system.Os;
 import android.system.OsConstants;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileDescriptor;
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.ObjectStreamClass;
+import java.io.Serializable;
 import java.lang.annotation.Annotation;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.lang.invoke.VarHandle;
 import java.lang.invoke.WrongMethodTypeException;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.lang.reflect.TypeVariable;
@@ -33,8 +42,8 @@ import java.util.TimeZone;
 /**
  * Self-test of the libcore paths added to AnyAndroid on 17 October (G2), on AOSP's real libcore:
  * scatter-gather I/O, MethodHandle invocation, annotations and generic signatures, reflection
- * access checks, invoke-custom and method handle constants, time zones and the remaining POSIX
- * calls. Each line is what Android prints; a
+ * access checks, invoke-custom and method handle constants, serialization, environment and
+ * processes, time zones and the remaining POSIX calls. Each line is what Android prints; a
  * failure prints its class.
  */
 public final class LibcoreProbe {
@@ -61,6 +70,7 @@ public final class LibcoreProbe {
     proxies();
     access();
     invokeDynamic();
+    smallNatives();
     timeZones();
     posix();
   }
@@ -331,6 +341,105 @@ public final class LibcoreProbe {
     check("const-method-handle, constructeur", () -> {
       MethodHandle c = IndySites.constructorHandle();
       return c.type() + " : " + (StringBuilder) c.invokeExact("abc");
+    });
+  }
+
+  // --- Smaller natives: serialization, environment, processes, reflective refusals -------
+
+  /** Serializable without serialVersionUID: the default one covers its static initializer. */
+  static final class SerialPoint implements Serializable {
+    static final List<String> NAMES = new java.util.ArrayList<>();
+    float x = Float.NaN;
+    double[] ys = {1.5, Double.NEGATIVE_INFINITY};
+  }
+
+  /** The state of `t` once it reaches `want` (at most two seconds later). */
+  static String stateOf(Thread t, Thread.State want) throws InterruptedException {
+    for (int i = 0; i < 2000 && t.getState() != want; i++) Thread.sleep(1);
+    return t.getState().toString();
+  }
+
+  static void smallNatives() {
+    check("sérialisation de float[] et double[]", () -> {
+      ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+      try (ObjectOutputStream out = new ObjectOutputStream(bytes)) {
+        out.writeObject(new float[] {1.25f, Float.intBitsToFloat(0x7fc00001)});
+        out.writeObject(new double[] {-0.0, Math.PI});
+      }
+      try (ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
+        float[] f = (float[]) in.readObject();
+        double[] d = (double[]) in.readObject();
+        return f[0] + ", NaN 0x" + Integer.toHexString(Float.floatToRawIntBits(f[1])) + ", " + d[0] + ", " + d[1]
+            + " ; " + bytes.size() + " octets";
+      }
+    });
+    check("serialVersionUID par défaut", () -> String.valueOf(ObjectStreamClass.lookup(SerialPoint.class).getSerialVersionUID()));
+    check("System.getenv", () -> System.getenv("ANDROID_ROOT") + ", " + System.getenv().get("ANDROID_DATA")
+        + ", PATH présent " + System.getenv().containsKey("PATH"));
+    check("ProcessBuilder.start", () -> {
+      try {
+        new ProcessBuilder("sh", "-c", "true").start();
+        return "processus lancé";
+      } catch (IOException e) {
+        return e.getMessage();
+      }
+    });
+    check("annotation d'un paramètre", () -> {
+      Method m = Annotated.class.getDeclaredMethod("pick", Number.class, int.class);
+      return m.getParameters()[0].getAnnotation(Note.class).value() + ", second " + m.getParameters()[1].getAnnotation(Note.class);
+    });
+    check("Thread.getState", () -> {
+      Object lock = new Object();
+      Thread waiter = new Thread(() -> {
+        synchronized (lock) {
+          try {
+            lock.wait();
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+        }
+      });
+      String created = waiter.getState().toString();
+      waiter.start();
+      String waiting = stateOf(waiter, Thread.State.WAITING);
+      Thread sleeper = new Thread(() -> {
+        try {
+          Thread.sleep(60_000);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      });
+      sleeper.start();
+      String timed = stateOf(sleeper, Thread.State.TIMED_WAITING);
+      Thread blocked = new Thread(() -> {
+        synchronized (lock) {
+          lock.notifyAll();
+        }
+      });
+      String entering;
+      synchronized (lock) {
+        blocked.start();
+        entering = stateOf(blocked, Thread.State.BLOCKED);
+      }
+      sleeper.interrupt();
+      blocked.join();
+      waiter.join();
+      sleeper.join();
+      return created + " " + waiting + " " + timed + " " + entering + " " + waiter.getState();
+    });
+    check("ThreadGroup", () -> {
+      ThreadGroup g = Thread.currentThread().getThreadGroup();
+      return g.getName() + " (parent " + g.getParent().getName() + "), nouveau fil dans "
+          + new Thread(() -> {}).getThreadGroup().getName();
+    });
+    check("VarHandle.get par réflexion", () -> {
+      VarHandle vh = MethodHandles.arrayElementVarHandle(int[].class);
+      try {
+        VarHandle.class.getMethod("get", Object[].class).invoke(vh, (Object) new Object[] {new int[1], 0});
+        return "appelé";
+      } catch (InvocationTargetException e) {
+        return String.valueOf(e.getCause());
+      }
     });
   }
 

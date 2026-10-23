@@ -360,6 +360,9 @@ struct VmThread {
   // Blocking state.
   bool interrupted = false;
   bool park_permit = false;  // LockSupport.unpark() permit
+  // java.lang.Thread.State ordinal (RUNNABLE 1, BLOCKED 2, WAITING 3,
+  // TIMED_WAITING 4), set by the owner around its blocking waits.
+  int32_t java_state = 1;
   bool alive = true;
   std::condition_variable sleep_cv;
   Monitor* waiting_on = nullptr;
@@ -598,6 +601,9 @@ class Runtime {
   // relative nanoseconds (0 = no timeout) or, when absolute, epoch milliseconds.
   void park_current(bool absolute, int64_t time);
   void unpark(Handle thread_peer);
+  // Thread.getState()'s ordinal for a java.lang.Thread (nativeGetStatus):
+  // NEW or TERMINATED without a live thread, depending on `started`.
+  int32_t thread_state(Handle thread_peer, bool started);
   void yield_thread();
   void interrupt(VmThread* t);
   bool join(VmThread* t, int64_t millis);  // false on timeout

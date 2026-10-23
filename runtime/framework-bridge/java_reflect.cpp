@@ -1936,6 +1936,35 @@ void register_libcore_members(rt::NativeRegistry& r) {
     if (is_proxy_class(m->owner)) return rt.new_array("[Ljava/lang/annotation/Annotation;", 0);
     return process_annotation_set(rt, m->annotations().annotations);
   });
+  // java_lang_reflect_Parameter.cc: one annotation of one parameter, with the
+  // same allowance as getParameterAnnotationsNative for the implicit
+  // parameters of constructors that dexers leave unannotated (b/68033708).
+  r.bind("Ljava/lang/reflect/Parameter;", "getAnnotationNative",
+         "(Ljava/lang/reflect/Executable;ILjava/lang/Class;)Ljava/lang/annotation/Annotation;",
+         [](Runtime& rt, NativeArgs& a) -> uint64_t {
+           if (a.h(0) == kNull) rt.throw_npe("javaMethod == null");
+           rt::Method* m = executable_arg(rt, a.h(0));
+           if (is_proxy_class(m->owner)) return kNull;
+           int64_t index = a.i32(1);
+           const int64_t count = int64_t(params_of(m).size());
+           if (index < 0 || index >= count) {
+             throw_iae(rt, "Illegal parameterIndex " + std::to_string(index) + " for " + pretty_method(m, true) +
+                               ", parameter_count is " + std::to_string(count));
+           }
+           const auto& lists = m->annotations().parameter_annotations;
+           const int64_t annotated = int64_t(lists.size());
+           if (annotated == 0) return kNull;
+           if (m->name == "<init>" && !m->owner->annotations().enclosing_method && !(m->owner->access & dex::kAccEnum)) {
+             if (annotated <= count) {
+               if (index < count - annotated) return kNull;
+               index -= count - annotated;
+             } else {
+               index += annotated - count;
+             }
+           }
+           if (index >= annotated) return kNull;
+           return annotation_from_set(rt, lists[size_t(index)], class_arg(rt, a.h(2), "annotationType"));
+         });
   r.bind(ex, "getParameterAnnotationsNative", "()[[Ljava/lang/annotation/Annotation;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     rt::Method* m = executable_arg(rt, a.h(0));
     if (m->interface_method) return kNull;

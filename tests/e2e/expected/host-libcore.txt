@@ -27,6 +27,14 @@ const-method-type : (int,String)long, interné true
 const-method-handle, champ statique : ()int : 5
 const-method-handle, méthodes d'instance et d'interface : (String)int : 5 ; (CharSequence)int : 3
 const-method-handle, constructeur : (String)StringBuilder : abc
+sérialisation de float[] et double[] : 1.25, NaN 0x7fc00000, -0.0, 3.141592653589793 ; 74 octets
+serialVersionUID par défaut : -6120085034705743016
+System.getenv : /system, /data, PATH présent true
+ProcessBuilder.start : Cannot run program "sh": error=13, Permission denied
+annotation d'un paramètre : paramètre, second null
+Thread.getState : NEW WAITING TIMED_WAITING BLOCKED TERMINATED
+ThreadGroup : main (parent system), nouveau fil dans main
+VarHandle.get par réflexion : java.lang.UnsupportedOperationException: VarHandle.get cannot be invoked reflectively.
 TimeZone Europe/Paris : hiver 1 h, été 2 h, heure d'été true
 java.time America/New_York : 2026-03-08 01:30 -05:00 puis 2026-03-08 03:30 -04:00
 zone inconnue : GMT

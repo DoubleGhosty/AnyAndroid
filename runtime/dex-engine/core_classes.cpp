@@ -815,7 +815,7 @@ void register_thread(NativeRegistry& r) {
   auto init_in_group = [init](Runtime& rt, NativeArgs& a, Handle target, std::u16string name) -> uint64_t {
     init(rt, a, target, std::move(name));
     Field* group = rt.find_class("Ljava/lang/Thread;")->declared_field("group", "Ljava/lang/ThreadGroup;");
-    a.self().fields.at(group->slot) = a.h(1);
+    if (a.h(1) != kNull) a.self().fields.at(group->slot) = a.h(1);  // null: the creator's group
     return 0;
   };
   t.ctor("(Ljava/lang/ThreadGroup;Ljava/lang/Runnable;)V",
@@ -1018,11 +1018,23 @@ void init_thread_object(Runtime& rt, Handle thread) {
     if (f && o.fields.at(f->slot) == kNull) o.fields.at(f->slot) = rt.alloc(rt.find_class("Ljava/lang/Object;"));
   }
   // As in ART, a new thread inherits its creator's context class loader (the
-  // main thread gets the system class loader from start_libcore).
+  // main thread gets the system class loader from start_libcore) and, as
+  // Thread.init does, its thread group; an attached thread (the creator of
+  // itself) joins ThreadGroup.mainThreadGroup (Runtime::GetMainThreadGroup).
   Field* ccl = cls->declared_field("contextClassLoader", "Ljava/lang/ClassLoader;");
+  Field* group = cls->declared_field("group", "Ljava/lang/ThreadGroup;");
   Handle creator = rt.current_thread_peer();  // the new main thread's peer is itself
-  if (ccl && creator != kNull && creator != thread) {
-    o.fields.at(ccl->slot) = rt.nonnull(creator, "Thread").fields.at(ccl->slot);
+  if (creator != kNull && creator != thread) {
+    Object& parent = rt.nonnull(creator, "Thread");
+    if (ccl) o.fields.at(ccl->slot) = parent.fields.at(ccl->slot);
+    if (group && o.fields.at(group->slot) == kNull) o.fields.at(group->slot) = parent.fields.at(group->slot);
+  } else if (group && o.fields.at(group->slot) == kNull) {
+    Class* tg = rt.lookup_class("Ljava/lang/ThreadGroup;");
+    Field* main = tg ? tg->declared_field("mainThreadGroup", "Ljava/lang/ThreadGroup;") : nullptr;
+    if (main && main->is_static()) {
+      rt.ensure_initialized(tg);
+      o.fields.at(group->slot) = tg->statics.at(main->slot);
+    }
   }
 }
 

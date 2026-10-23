@@ -277,6 +277,28 @@ void Runtime::detach_current_thread() {
   }
 }
 
+namespace {
+
+// The Thread.State a thread reports while it blocks (ART's ThreadState as
+// Thread_nativeGetStatus maps it).
+constexpr int32_t kJavaBlocked = 2, kJavaWaiting = 3, kJavaTimedWaiting = 4;
+
+struct StateScope {
+  VmThread* t;
+  int32_t saved;
+  StateScope(VmThread* thread, int32_t state) : t(thread), saved(thread->java_state) { t->java_state = state; }
+  ~StateScope() { t->java_state = saved; }
+};
+
+}  // namespace
+
+int32_t Runtime::thread_state(Handle thread_peer, bool started) {
+  constexpr int32_t kJavaNew = 0, kJavaTerminated = 5;
+  VmThread* t = thread_of_peer(thread_peer);
+  if (!t || !t->alive) return started ? kJavaTerminated : kJavaNew;
+  return t->java_state;
+}
+
 VmThread* Runtime::thread_of_peer(Handle peer) {
   for (const auto& t : threads_) {
     if (t->peer == peer) return t.get();
@@ -301,6 +323,7 @@ void Runtime::sleep(int64_t millis) {
   }
   const int64_t start = clock::monotonic_nanos();
   const int64_t deadline = millis >= (INT64_MAX - start) / 1000000 ? INT64_MAX : start + millis * 1000000;
+  StateScope state(t, kJavaTimedWaiting);  // kSleeping
   while (!t->interrupted) {
     int64_t left = deadline - clock::monotonic_nanos();
     if (left <= 0) break;
@@ -325,7 +348,10 @@ void Runtime::park_current(bool absolute, int64_t time) {
   } else if (time > 0) {
     ms = std::max<int64_t>(1, time / 1000000 + (time % 1000000 != 0));
   }
-  park(t, t->sleep_cv, [t] { return t->park_permit || t->interrupted; }, ms);
+  {
+    StateScope state(t, ms > 0 ? kJavaTimedWaiting : kJavaWaiting);
+    park(t, t->sleep_cv, [t] { return t->park_permit || t->interrupted; }, ms);
+  }
   t->park_permit = false;
 }
 
@@ -352,6 +378,7 @@ bool Runtime::join(VmThread* target, int64_t millis) {
     throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] un thread ne peut pas attendre sa propre fin");
   }
   check_interrupted(t);
+  StateScope state(t, millis > 0 ? kJavaTimedWaiting : kJavaWaiting);
   bool done = park(t, threads_cv_, [&] { return !target->alive || t->interrupted; }, millis);
   check_interrupted(t);
   return done && !target->alive;
@@ -406,6 +433,7 @@ void Runtime::monitor_enter(Handle h) {
   Monitor& m = monitor_of(nonnull(h, "synchronized sur une référence null"));
   if (m.owner && m.owner != t) {
     t->waiting_on = &m;
+    StateScope state(t, kJavaBlocked);
     try {
       park(t, m.entry, [&] { return m.owner == nullptr; }, 0);
     } catch (...) {
@@ -461,9 +489,15 @@ void Runtime::monitor_wait(Handle h, int64_t millis) {
       t->waiting_on = nullptr;
     }
   } cleanup{m, &w, t};
-  park(t, m.waitset, [&] { return w.notified || t->interrupted; }, millis);
+  {
+    StateScope state(t, millis > 0 ? kJavaTimedWaiting : kJavaWaiting);
+    park(t, m.waitset, [&] { return w.notified || t->interrupted; }, millis);
+  }
   std::erase(m.waiters, &w);
-  park(t, m.entry, [&] { return m.owner == nullptr; }, 0);
+  {
+    StateScope state(t, kJavaBlocked);  // reacquiring the monitor
+    park(t, m.entry, [&] { return m.owner == nullptr; }, 0);
+  }
   m.owner = t;
   m.count = saved;
   check_interrupted(t);
