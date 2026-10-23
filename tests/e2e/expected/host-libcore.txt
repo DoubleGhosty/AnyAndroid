@@ -12,6 +12,12 @@ toString, equals, hashCode : @aa.host.LibcoreProbe$Note(level=3, tags=[a, b], va
 champ et méthode : champ, méthode niveau 7, paramètres paramètre / 0
 signatures génériques : java.util.List<java.lang.String> ; java.util.Map<java.lang.String, T> ; T étend [class java.lang.Number] ; paramètre T
 Proxy.newProxyInstance : compareTo(« seize ») = 5, classe mandataire true
+méthode privée d'une autre classe : Class java.lang.Class<aa.host.LibcoreProbe> cannot access private static  method java.lang.String aa.host.probe.Hidden.secret() of class java.lang.Class<aa.host.probe.Hidden> ; après setAccessible : secret
+méthode privée de la même classe : permis : privée
+champ de paquet d'une autre classe : Class java.lang.Class<aa.host.LibcoreProbe> cannot access  field int aa.host.probe.Hidden.packageCount of class java.lang.Class<aa.host.probe.Hidden>
+champs protégés depuis une sous-classe : depth permis : 5 ; level Class java.lang.Class<aa.host.LibcoreProbe$Sub> cannot access protected static  field int aa.host.probe.Hidden.level of class java.lang.Class<aa.host.probe.Hidden>
+classe de paquet d'un autre paquet : java.lang.Class<aa.host.probe.PackagePrivate> is not accessible from java.lang.Class<aa.host.LibcoreProbe>
+constructeur protégé d'une classe publique : permis : aa.host.probe.Hidden
 TimeZone Europe/Paris : hiver 1 h, été 2 h, heure d'été true
 java.time America/New_York : 2026-03-08 01:30 -05:00 puis 2026-03-08 03:30 -04:00
 zone inconnue : GMT

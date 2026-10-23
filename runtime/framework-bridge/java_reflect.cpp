@@ -1620,8 +1620,88 @@ rt::Method* string_factory_for(Runtime& rt, const rt::Method* ctor) {
   rt.throw_unsupported(ctor->pretty(), "aucune méthode StringFactory équivalente");
 }
 
-// InvokeMethod (reflection.cc), behind Method.invoke.
-uint64_t invoke_method(Runtime& rt, Handle method_obj, Handle receiver, Handle args_array) {
+// GetCallingClass (NthCallerVisitor): frame 0 is the native method itself,
+// frame 1 its caller. Null when the stack is not that deep (an attached
+// native thread).
+rt::Class* calling_class(Runtime& rt, size_t num_frames) {
+  const auto& frames = rt.current_thread()->frames;
+  if (frames.size() <= num_frames) return nullptr;
+  return frames[frames.size() - 1 - num_frames].method->owner;
+}
+
+// Class::IsInSamePackage: the same defining loader and the same package part
+// of the descriptor (arrays by their element classes).
+bool in_same_package(Runtime& rt, rt::Class* a, rt::Class* b) {
+  if (a == b) return true;
+  if (class_loader_of(rt, a, true) != class_loader_of(rt, b, true)) return false;
+  while (a->component) a = a->component;
+  while (b->component) b = b->component;
+  if (a == b) return true;
+  const std::string& d1 = a->descriptor;
+  const std::string& d2 = b->descriptor;
+  size_t i = 0;
+  while (i < std::min(d1.size(), d2.size()) && d1[i] == d2[i]) ++i;
+  return d1.find('/', i) == std::string::npos && d2.find('/', i) == std::string::npos;
+}
+
+// VerifyAccess (reflection.cc): may `calling` reach a member of `declaring`
+// with `access_flags` through `obj` (the receiver, or for a static field the
+// declaring class's mirror)?
+bool verify_access(Runtime& rt, Handle obj, rt::Class* declaring, uint32_t access_flags, rt::Class* calling) {
+  if (calling == declaring) return true;
+  if (access_flags & dex::kAccPrivate) return false;
+  if (access_flags & dex::kAccProtected) {
+    if (obj != kNull && !rt.instance_of(obj, calling) && !in_same_package(rt, declaring, calling)) return false;
+    if (rt.is_assignable(calling, declaring)) return true;
+  }
+  return in_same_package(rt, declaring, calling);
+}
+
+// VerifyAccess with the calling class found `num_frames` up the stack; the
+// class is returned through `calling` for the message.
+bool verify_caller_access(Runtime& rt, Handle obj, rt::Class* declaring, uint32_t access_flags, rt::Class** calling,
+                          size_t num_frames) {
+  if (access_flags & dex::kAccPublic) return true;
+  *calling = calling_class(rt, num_frames);
+  return *calling && verify_access(rt, obj, declaring, access_flags, *calling);
+}
+
+std::string pretty_class_or_null(const rt::Class* c) { return c ? pretty_class(c) : "null"; }
+
+// VerifyFieldAccess<kIsSet> (java_lang_reflect_Field.cc), for a field that
+// setAccessible(true) did not open: a final field is read-only, and the
+// caller must see the field. `obj` is what CheckReceiver produced.
+void verify_field_access(Runtime& rt, Handle field_obj, const rt::Field* f, Handle receiver, bool set) {
+  if (is_accessible(rt, field_obj)) return;
+  if (set && (f->access & dex::kAccFinal)) {
+    rt.throw_new("Ljava/lang/IllegalAccessException;", "Cannot set " + pretty_java_access_flags(f->access) +
+                                                            " field " + pretty_field(f) + " of class " +
+                                                            pretty_class(f->owner));
+  }
+  Handle obj = f->is_static() ? rt.class_mirror(f->owner) : receiver;
+  rt::Class* calling = nullptr;
+  if (verify_caller_access(rt, obj, f->owner, f->access, &calling, 1)) return;
+  rt.throw_new("Ljava/lang/IllegalAccessException;", "Class " + pretty_class_or_null(calling) + " cannot access " +
+                                                          pretty_java_access_flags(f->access) + " field " +
+                                                          pretty_field(f) + " of class " + pretty_class(f->owner));
+}
+
+// The access check of InvokeMethod for `m` (the implementation found for the
+// receiver) declared by `declaring`, `num_frames` above the native.
+void verify_method_access(Runtime& rt, Handle executable, const rt::Method* m, rt::Class* declaring, Handle receiver,
+                          size_t num_frames) {
+  if (is_accessible(rt, executable)) return;
+  rt::Class* calling = nullptr;
+  if (verify_caller_access(rt, receiver, declaring, m->access, &calling, num_frames)) return;
+  rt.throw_new("Ljava/lang/IllegalAccessException;", "Class " + pretty_class_or_null(calling) + " cannot access " +
+                                                          pretty_java_access_flags(m->access) + " method " +
+                                                          pretty_method(m, true) + " of class " +
+                                                          pretty_class(m->owner));
+}
+
+// InvokeMethod (reflection.cc), behind Method.invoke: the caller whose access
+// is checked is `num_frames` above the native.
+uint64_t invoke_method(Runtime& rt, Handle method_obj, Handle receiver, Handle args_array, size_t num_frames = 1) {
   rt::Method* m = executable_arg(rt, method_obj);
   rt::Class* declaring = m->owner;
   rt.ensure_initialized(declaring);
@@ -1636,6 +1716,7 @@ uint64_t invoke_method(Runtime& rt, Handle method_obj, Handle receiver, Handle a
   }
   rt::Method* np = interface_method_if_proxy(m);
   std::vector<Handle> args = checked_args(rt, np, args_array);
+  verify_method_access(rt, method_obj, m, declaring, receiver, num_frames);
   std::vector<uint32_t> words = build_arg_array(rt, np, receiver, args);
   uint64_t result = invoke_wrapped(rt, m, words);
   return box_result(rt, np->return_type(), result);
@@ -1699,13 +1780,6 @@ bool is_unmodifiable(Runtime& rt, const rt::Field* f) {
 // ThrowIAEIfFieldIsNotOverwritable.
 void check_overwritable(Runtime& rt, const rt::Field* f) {
   if (is_write_protected(f) ? app_target_sdk(rt) <= kSdkBaklava : !is_unmodifiable(rt, f)) return;
-  rt.throw_new("Ljava/lang/IllegalAccessException;", "Cannot set " + pretty_java_access_flags(f->access) + " field " +
-                                                          pretty_field(f) + " of class " + pretty_class(f->owner));
-}
-
-// VerifyFieldAccess<true>: without setAccessible(true), a final field is read-only.
-void check_set_access(Runtime& rt, Handle field_obj, const rt::Field* f) {
-  if (is_accessible(rt, field_obj) || !(f->access & dex::kAccFinal)) return;
   rt.throw_new("Ljava/lang/IllegalAccessException;", "Cannot set " + pretty_java_access_flags(f->access) + " field " +
                                                           pretty_field(f) + " of class " + pretty_class(f->owner));
 }
@@ -1998,7 +2072,7 @@ void register_libcore_members(rt::NativeRegistry& r) {
   });
   r.bind(method, "invoke", "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     return invoke_method(rt, a.h(0), a.h(1), a.h(2));
-  }, S::kPartial, "contrôle d'accès de l'appelant non appliqué");
+  });
 
   const char* ctor = "Ljava/lang/reflect/Constructor;";
   r.bind(ctor, "getExceptionTypes", "()[Ljava/lang/Class;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
@@ -2012,10 +2086,27 @@ void register_libcore_members(rt::NativeRegistry& r) {
                                                              (c->is_interface() ? "interface " : "abstract class ") +
                                                              pretty_descriptor(c->descriptor));
     }
+    // Only the class is checked, against the caller of Constructor.newInstance
+    // (2 frames up); a caller-less (JNI) call skips the check.
+    if (!is_accessible(rt, a.h(0)) && !(c->access & dex::kAccPublic)) {
+      rt::Class* caller = calling_class(rt, 2);
+      if (caller && !in_same_package(rt, caller, c)) {  // Class::CanAccess
+        if (pretty_descriptor(c->descriptor) == "dalvik.system.DexPathList$Element") {
+          log::warn("reflect", "The dalvik.system.DexPathList$Element constructor is not accessible by default. "
+                               "This is a temporary workaround for backwards compatibility with class-loader hacks. "
+                               "Please update your application.");
+        } else {
+          rt.throw_new("Ljava/lang/IllegalAccessException;",
+                       pretty_class(c) + " is not accessible from " + pretty_class(caller));
+        }
+      }
+    }
     rt.ensure_initialized(c);
     std::vector<Handle> args = checked_args(rt, m, a.h(1));
     if (c->descriptor == "Ljava/lang/String;") {
+      // InvokeMethod(..., 2) on the StringFactory method that replaces the constructor.
       rt::Method* factory = string_factory_for(rt, m);
+      verify_method_access(rt, a.h(0), factory, c, kNull, 2);
       std::vector<uint32_t> words = build_arg_array(rt, m, kNull, args);
       return invoke_wrapped(rt, factory, words);
     }
@@ -2023,7 +2114,7 @@ void register_libcore_members(rt::NativeRegistry& r) {
     std::vector<uint32_t> words = build_arg_array(rt, m, receiver, args);
     invoke_wrapped(rt, m, words);
     return receiver;
-  }, S::kPartial, "contrôle d'accès de l'appelant non appliqué");
+  });
   r.bind(ctor, "newInstanceFromSerialization", "(Ljava/lang/Class;Ljava/lang/Class;)Ljava/lang/Object;",
          [](Runtime& rt, NativeArgs& a) -> uint64_t {
            rt::Class* ctor_class = class_arg(rt, a.h(0), "ctorClass");
@@ -2069,7 +2160,9 @@ void register_libcore_members(rt::NativeRegistry& r) {
   });
   r.bind(field, "get", "(Ljava/lang/Object;)Ljava/lang/Object;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     rt::Field* f = field_arg(rt, a.h(0));
-    uint64_t v = read_storage(f, checked_field_storage(rt, f, a.h(1)));
+    uint32_t* s = checked_field_storage(rt, f, a.h(1));
+    verify_field_access(rt, a.h(0), f, a.h(1), false);
+    uint64_t v = read_storage(f, s);
     return f->is_reference() ? v : box_result(rt, f->type[0], v);
   });
   for (char t : std::string("ZBCSIJFD")) {
@@ -2078,8 +2171,10 @@ void register_libcore_members(rt::NativeRegistry& r) {
     std::string type(1, t);
     r.bind(field, "get" + names.at(t), "(Ljava/lang/Object;)" + type, [t](Runtime& rt, NativeArgs& a) -> uint64_t {
       rt::Field* f = field_arg(rt, a.h(0));
-      uint64_t v = read_storage(f, checked_field_storage(rt, f, a.h(1)));
+      uint32_t* s = checked_field_storage(rt, f, a.h(1));
+      verify_field_access(rt, a.h(0), f, a.h(1), false);
       if (f->is_reference()) throw_iae(rt, "Not a primitive field: " + pretty_field(f));
+      uint64_t v = read_storage(f, s);
       return convert_primitive_value(rt, false, f->type[0], t, v);
     });
     r.bind(field, "set" + names.at(t), "(Ljava/lang/Object;" + type + ")V", [t](Runtime& rt, NativeArgs& a) -> uint64_t {
@@ -2089,7 +2184,7 @@ void register_libcore_members(rt::NativeRegistry& r) {
       if (f->is_reference()) throw_iae(rt, "Not a primitive field: " + pretty_field(f));
       uint64_t in = (t == 'J' || t == 'D') ? a.i64(2) : a.raw(2);
       uint64_t v = convert_primitive_value(rt, false, t, f->type[0], in);
-      check_set_access(rt, a.h(0), f);
+      verify_field_access(rt, a.h(0), f, a.h(1), true);
       write_storage(f, s, v);
       return 0;
     });
@@ -2099,7 +2194,7 @@ void register_libcore_members(rt::NativeRegistry& r) {
     uint32_t* s = checked_field_storage(rt, f, a.h(1));
     check_overwritable(rt, f);
     uint64_t v = unbox_primitive(rt, a.h(2), f->type, f);
-    check_set_access(rt, a.h(0), f);
+    verify_field_access(rt, a.h(0), f, a.h(1), true);
     if (!f->is_static()) s = &rt.object(a.h(1))->fields.at(f->slot);  // unboxing may have run Java code
     write_storage(f, s, v);
     return 0;

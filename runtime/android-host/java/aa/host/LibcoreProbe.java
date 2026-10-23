@@ -1,5 +1,6 @@
 package aa.host;
 
+import aa.host.probe.Hidden;
 import android.system.Os;
 import android.system.OsConstants;
 import java.io.File;
@@ -31,8 +32,9 @@ import java.util.TimeZone;
 
 /**
  * Self-test of the libcore paths added to AnyAndroid on 17 October (G2), on AOSP's real libcore:
- * scatter-gather I/O, MethodHandle invocation, annotations and generic signatures, time zones
- * and the remaining POSIX calls. Each line is what Android prints; a failure prints its class.
+ * scatter-gather I/O, MethodHandle invocation, annotations and generic signatures, reflection
+ * access checks, time zones and the remaining POSIX calls. Each line is what Android prints; a
+ * failure prints its class.
  */
 public final class LibcoreProbe {
   private LibcoreProbe() {}
@@ -56,6 +58,7 @@ public final class LibcoreProbe {
     methodHandles();
     annotations();
     proxies();
+    access();
     timeZones();
     posix();
   }
@@ -244,6 +247,50 @@ public final class LibcoreProbe {
       return "compareTo(« seize ») = " + c.compareTo("seize") + ", classe mandataire "
           + Proxy.isProxyClass(c.getClass());
     });
+  }
+
+  // --- Reflection access checks (ART's VerifyAccess, for members not opened by
+  // setAccessible) ---------------------------------------------------------------------------
+
+  /** The message of the IllegalAccessException that `c` throws, which is ART's. */
+  static String denied(Check c) throws Throwable {
+    try {
+      return "permis : " + c.run();
+    } catch (IllegalAccessException e) {
+      return e.getMessage();
+    }
+  }
+
+  private static String own() {
+    return "privée";
+  }
+
+  /** A subclass of Hidden in another package: protected members, as ART checks them. */
+  static final class Sub extends Hidden {
+    static String probe() throws Throwable {
+      Field depth = Hidden.class.getDeclaredField("depth");
+      Field level = Hidden.class.getDeclaredField("level");
+      return "depth " + denied(() -> String.valueOf(depth.getInt(new Sub()))) + " ; level "
+          + denied(() -> String.valueOf(level.getInt(null)));
+    }
+  }
+
+  static void access() {
+    check("méthode privée d'une autre classe", () -> {
+      Method m = Hidden.class.getDeclaredMethod("secret");
+      String before = denied(() -> (String) m.invoke(null));
+      m.setAccessible(true);
+      return before + " ; après setAccessible : " + m.invoke(null);
+    });
+    check("méthode privée de la même classe", () ->
+        denied(() -> (String) LibcoreProbe.class.getDeclaredMethod("own").invoke(null)));
+    check("champ de paquet d'une autre classe", () ->
+        denied(() -> String.valueOf(Hidden.class.getDeclaredField("packageCount").getInt(new Sub()))));
+    check("champs protégés depuis une sous-classe", Sub::probe);
+    check("classe de paquet d'un autre paquet", () -> denied(() ->
+        String.valueOf(Class.forName("aa.host.probe.PackagePrivate").getDeclaredConstructor().newInstance())));
+    check("constructeur protégé d'une classe publique", () -> denied(() ->
+        Hidden.class.getDeclaredConstructor().newInstance().getClass().getName()));
   }
 
   // --- Time zones (tzdata of the image, read by the i18n module's Memory) -----------------
