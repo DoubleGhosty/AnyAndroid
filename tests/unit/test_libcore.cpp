@@ -86,9 +86,26 @@ const char* kBootClasses[] = {
 .super Ljava/lang/invoke/VarHandle;
 )",
     R"(
-.class public Ljava/lang/invoke/MethodHandle;
+.class public abstract Ljava/lang/invoke/MethodHandle;
 .super Ljava/lang/Object;
-.field public artFieldOrMethod:J
+.field asTypeCache:Ljava/lang/invoke/MethodHandle;
+.field private cachedSpreadInvoker:Ljava/lang/invoke/MethodHandle;
+.field private final type:Ljava/lang/invoke/MethodType;
+.field protected final handleKind:I
+.field protected final artFieldOrMethod:J
+)",
+    R"(
+.class public Ljava/lang/invoke/MethodHandleImpl;
+.super Ljava/lang/invoke/MethodHandle;
+.field private field:Ljava/lang/reflect/Field;
+.field private targetClassOrMethodHandleInfo:Ljava/lang/Object;
+.field private final target:J
+)",
+    R"(
+.class public final Ljava/lang/invoke/MethodType;
+.super Ljava/lang/Object;
+.field private final rtype:Ljava/lang/Class;
+.field private final ptypes:[Ljava/lang/Class;
 )",
     R"(
 .class public final Ljava/lang/Integer;
@@ -797,50 +814,63 @@ TEST(libcore_scatter_gather_readv_writev) {
   std::filesystem::remove_all(temp_dir);
 }
 
+// A direct MethodHandle as libcore's MethodHandleImpl lays it out in Android 17:
+// handleKind, artFieldOrMethod and type (a MethodType of Class objects).
+rt::Handle direct_handle(rt::Runtime& rt, rt::Method* m, int32_t kind, const char* rtype,
+                         std::vector<const char*> ptypes) {
+  rt::Class* mtc = rt.find_class("Ljava/lang/invoke/MethodType;");
+  rt::Handle mt = rt.alloc(mtc);
+  rt::Handle classes = rt.new_array("[Ljava/lang/Class;", int32_t(ptypes.size()));
+  for (size_t i = 0; i < ptypes.size(); ++i) {
+    rt::Handle c = rt.class_mirror(rt.find_class(ptypes[i]));
+    std::memcpy(&rt.array(classes, "ptypes").data[i * 4], &c, 4);
+  }
+  rt.object(mt)->fields.at(mtc->declared_field("rtype", "Ljava/lang/Class;")->slot) = rt.class_mirror(rt.find_class(rtype));
+  rt.object(mt)->fields.at(mtc->declared_field("ptypes", "[Ljava/lang/Class;")->slot) = classes;
+  rt::Class* mhc = rt.find_class("Ljava/lang/invoke/MethodHandle;");
+  rt::Handle mh = rt.alloc(rt.find_class("Ljava/lang/invoke/MethodHandleImpl;"));
+  rt::Object& o = *rt.object(mh);
+  uint64_t cookie = rt.method_cookie(m);
+  o.fields.at(mhc->declared_field("artFieldOrMethod", "J")->slot) = uint32_t(cookie);
+  o.fields.at(mhc->declared_field("artFieldOrMethod", "J")->slot + 1) = uint32_t(cookie >> 32);
+  o.fields.at(mhc->declared_field("handleKind", "I")->slot) = uint32_t(kind);
+  o.fields.at(mhc->declared_field("type", "Ljava/lang/invoke/MethodType;")->slot) = mt;
+  return mh;
+}
+
+// The bridge side of invoke-polymorphic on a MethodHandle (art/runtime/method_handles.cc):
+// invokeExact's exact type check and invoke()'s in-place conversions. The
+// conversions through asType (libcore's transformers) run on the real libcore:
+// e2e host-libcore.
 TEST(libcore_methodhandle_invoke_and_invoke_exact) {
   LibcoreVm vm;
   rt::Runtime& rt = *vm.rt;
   rt::Class* app = rt.find_class("LApp;");
-  rt::Class* mhc = rt.find_class("Ljava/lang/invoke/MethodHandle;");
-  rt::Field* afom = mhc->declared_field("artFieldOrMethod", "J");
-  CHECK(afom != nullptr);
 
-  // 1. Static method: App.addNumbers(II)I
+  // 1. Static method: App.addNumbers(II)I, kind INVOKE_STATIC (3).
   rt::Method* add_m = app->declared_method("addNumbers", "(II)I");
   CHECK(add_m != nullptr);
-  rt::Handle mh_add = rt.alloc(mhc);
-  uint64_t add_cookie = rt.method_cookie(add_m);
-  rt.object(mh_add)->fields.at(afom->slot) = uint32_t(add_cookie);
-  rt.object(mh_add)->fields.at(afom->slot + 1) = uint32_t(add_cookie >> 32);
+  rt::Handle mh_add = direct_handle(rt, add_m, 3, "I", {"I", "I"});
+  CHECK_EQ(mh_call(rt, mh_add, "invokeExact", "(II)I", {15, 27}), 42u);
 
-  // invokeExact matching callsite
-  uint64_t res = mh_call(rt, mh_add, "invokeExact", "(II)I", {15, 27});
-  CHECK_EQ(res, 42u);
-
-  // invokeExact mismatching callsite -> WrongMethodTypeException (JavaThrow)
+  // invokeExact needs the exact type, return type included.
   CHECK_THROWS(mh_call(rt, mh_add, "invokeExact", "(I)I", {15}), rt::JavaThrow);
   CHECK_THROWS(mh_call(rt, mh_add, "invokeExact", "(II)V", {15, 27}), rt::JavaThrow);
+  CHECK_THROWS(mh_call(rt, mh_add, "invokeExact", "(SS)I", {10, 20}), rt::JavaThrow);
 
-  // invoke with primitive widening conversion (short -> int)
-  uint64_t res_conv = mh_call(rt, mh_add, "invoke", "(SS)I", {10, 20});
-  CHECK_EQ(res_conv, 30u);
+  // invoke: short to int and an ignored result convert in place (IsInPlaceConvertible).
+  CHECK_EQ(mh_call(rt, mh_add, "invoke", "(SS)I", {10, 20}), 30u);
+  mh_call(rt, mh_add, "invoke", "(II)V", {1, 2});
 
-  // 2. Virtual method: App.multiply(I)I
+  // 2. Virtual method: App.multiply(I)I, kind INVOKE_VIRTUAL (0), the receiver first.
   rt::Method* mul_m = app->declared_method("multiply", "(I)I");
   CHECK(mul_m != nullptr);
-  rt::Handle mh_mul = rt.alloc(mhc);
-  uint64_t mul_cookie = rt.method_cookie(mul_m);
-  rt.object(mh_mul)->fields.at(afom->slot) = uint32_t(mul_cookie);
-  rt.object(mh_mul)->fields.at(afom->slot + 1) = uint32_t(mul_cookie >> 32);
-
+  rt::Handle mh_mul = direct_handle(rt, mul_m, 0, "I", {"LApp;", "I"});
   rt::Handle obj = rt.alloc(app);
   rt.object(obj)->fields.at(app->declared_field("count", "I")->slot) = 7;
+  CHECK_EQ(mh_call(rt, mh_mul, "invokeExact", "(LApp;I)I", {obj, 6}), 42u);
 
-  // invokeExact with receiver as first argument
-  uint64_t mul_res = mh_call(rt, mh_mul, "invokeExact", "(LApp;I)I", {obj, 6});
-  CHECK_EQ(mul_res, 42u);
-
-  // invokeExact with null receiver -> NullPointerException
+  // A null receiver: NullPointerException.
   CHECK_THROWS(mh_call(rt, mh_mul, "invokeExact", "(LApp;I)I", {rt::kNull, 6}), rt::JavaThrow);
 }
 
