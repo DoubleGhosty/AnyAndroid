@@ -121,8 +121,9 @@ void register_libcore_natives(rt::NativeRegistry& registry);
 // libcore expects to be ready first (java.lang.System before anything that
 // reaches dalvik.system.VMRuntime). Call inside a Runtime::Scope.
 void start_libcore(rt::Runtime& rt);
-// The display, as the host's DisplayService reports it (1080 x 1920 pixels).
-constexpr int32_t kDisplayWidth = 1080, kDisplayHeight = 1920;
+// The display, as the host's DisplayService reports it (1080 x 1920 pixels at
+// 420 dpi).
+constexpr int32_t kDisplayWidth = 1080, kDisplayHeight = 1920, kDisplayDensityDpi = 420;
 // A frame of the display: the windows' layers composed as SurfaceFlinger
 // does, presented when a buffer is posted (Surface.unlockCanvasAndPost) or a
 // transaction changes what shows. width x height pixels, RGBA bytes

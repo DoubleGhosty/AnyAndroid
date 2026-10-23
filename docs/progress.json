@@ -2,7 +2,7 @@
   "metadata": {
     "project": "AnyAndroid for Windows",
     "version": "0.1.0",
-    "generated_at": "2026-10-23T13:32:26.902684+00:00",
+    "generated_at": "2026-10-23T13:53:27.382326+00:00",
     "target": "Android natif sur Windows (sans VM ni hyperviseur)"
   },
   "summary": {
@@ -50,10 +50,10 @@
       {
         "id": "G3",
         "name": "Vrai `framework.jar` et une application AOSP affichée",
-        "description": "**En cours** : plan de l'ADR-006. J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, mais à la densité 160 dpi au lieu de 420 : voir « Problèmes connus ») ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK jusqu'à `onDestroy`, prouvés par des tests e2e) ; J9 en cours (toasts et composition des fenêtres prouvés par des e2e ; dialogues et pile d'activités du 17 octobre encore à vérifier) ; J10 à faire ; J3 en cours",
+        "description": "**En cours** : plan de l'ADR-006. J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, à 420 dpi depuis le 23 octobre) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK jusqu'à `onDestroy`, prouvés par des tests e2e) ; J9 en cours (toasts et composition des fenêtres prouvés par des e2e ; dialogues et pile d'activités du 17 octobre encore à vérifier) ; J10 à faire ; J3 en cours",
         "progress": 83,
         "weight": 30,
-        "status": "**En cours** : plan de l'ADR-006. J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, mais à la densité 160 dpi au lieu de 420 : voir « Problèmes connus ») ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK jusqu'à `onDestroy`, prouvés par des tests e2e) ; J9 en cours (toasts et composition des fenêtres prouvés par des e2e ; dialogues et pile d'activités du 17 octobre encore à vérifier) ; J10 à faire ; J3 en cours",
+        "status": "**En cours** : plan de l'ADR-006. J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, à 420 dpi depuis le 23 octobre) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK jusqu'à `onDestroy`, prouvés par des tests e2e) ; J9 en cours (toasts et composition des fenêtres prouvés par des e2e ; dialogues et pile d'activités du 17 octobre encore à vérifier) ; J10 à faire ; J3 en cours",
         "adr": "ADR-006",
         "state": "in_progress"
       },

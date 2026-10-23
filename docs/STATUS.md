@@ -48,7 +48,7 @@ le nombre de fichiers, et ne montent qu'avec une preuve sur le vrai framework ou
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
 | G2    | Vraie libcore d'AOSP (Android 17)                           | 93 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART ([ADR-004](adr/ADR-004-libcore-aosp.md)). Ajouts du 17 octobre encore **à vérifier** sur la vraie libcore : E/S scatter-gather, `MethodHandle` polymorphique, annotations, fuseaux horaires |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 83 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md). J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, mais à la densité 160 dpi au lieu de 420 : voir « Problèmes connus ») ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK jusqu'à `onDestroy`, prouvés par des tests e2e) ; J9 en cours (toasts et composition des fenêtres prouvés par des e2e ; dialogues et pile d'activités du 17 octobre encore à vérifier) ; J10 à faire ; J3 en cours |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 83 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md). J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, à 420 dpi depuis le 23 octobre) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK jusqu'à `onDestroy`, prouvés par des tests e2e) ; J9 en cours (toasts et composition des fenêtres prouvés par des e2e ; dialogues et pile d'activités du 17 octobre encore à vérifier) ; J10 à faire ; J3 en cours |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire : architecture proposée dans l'[ADR-009](adr/ADR-009-couche-native-elf.md) (chargeur ELF x86_64, bionic, JNI) |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
 | **Total** | **Android natif sur Windows**                          | **≈ 49 %** | Pondéré par l'effort : G0 5 %, G1 10 %, G2 10 %, G3 30 %, G4 25 %, G5 20 % |
@@ -265,8 +265,9 @@ compris (`BoringLayout` et `StaticLayout`). `relayoutWindow` crée la surface c�
 (Android 17 la crée hors de l'arbre des couches, `NOT_ADD_TO_ROOT`, et la confie au gestionnaire
 de fenêtres, qui la rattache sous la couche de la fenêtre : voir J9), `IWindowSession.relayout`
 renvoie les cadres avec une `WindowConfiguration` plein écran, puis `BLASTBufferQueue` fournit la
-`Surface`. La mise en page se fait à la taille de l'écran (mais à 160 dpi, voir « Problèmes
-connus ») et `drawSoftware` verrouille la surface : **la fenêtre est dessinée**
+`Surface`. La mise en page se fait à la taille et à la densité de l'écran (420 dpi : la
+configuration globale est calculée comme `DisplayContent.computeScreenConfiguration`, avec
+`ro.sf.lcd_density`) et `drawSoftware` verrouille la surface : **la fenêtre est dessinée**
 par le Skia d'AOSP dans le tampon de la `Surface` (fond de `DecorView`, barre d'action avec son
 titre, les deux `TextView` de l'activité, bouton Material avec son ombre et son texte), l'image
 est publiée (`unlockCanvasAndPost`), la synchronisation de `SurfaceSyncGroup` se termine et
@@ -385,12 +386,10 @@ dialogues (`FLAG_DIM_BEHIND` n'a pas d'e2e), les fenêtres popup et la pile d'ac
 
 ## Problèmes connus
 
-- **Densité** : l'écran annonce 420 dpi (`DisplayInfo`), mais la configuration donnée à
-  l'application reprend celle de `Resources.getSystem()`, sans `densityDpi` (ni
-  `ro.sf.lcd_density`) : l'application est mise en page et dessinée à 160 dpi (densité 1 ; la
-  barre d'action fait 56 pixels au lieu de 147). Les images vérifiées au pixel de J5 à J9 le sont
-  à cette densité. Découvert le 23 octobre en mesurant le toast (48 dp = 48 pixels) ; prochaine
-  correction.
+- **Densité (corrigé le 23 octobre)** : jusque-là, la configuration donnée à l'application
+  n'avait pas de `densityDpi` : tout était mis en page à 160 dpi (barre d'action de 56 pixels au
+  lieu de 147) alors que l'écran annonce 420 dpi. Les images vérifiées au pixel avant cette date
+  l'étaient à cette densité ; les sondes des e2e ont été refaites à 420 dpi.
 - **CI Windows** : depuis le 23 octobre, toutes les exécutions GitHub Actions du dépôt échouent en
   quelques secondes sans journal (problème du compte, pas du code) ; les vérifications sont faites
   sous wine avec les entrées Android en attendant.
@@ -401,14 +400,12 @@ Le plan de G3 est fixé par [ADR-006](adr/ADR-006-demarrage-applications.md) : p
 `system_server`, des services système locaux en Java (javac + D8) appelés sans `Parcel`, et les
 vrais gestionnaires d'`ActivityThread`.
 
-1. **Densité de l'écran** : donner à la configuration globale `densityDpi` 420 (et
-   `ro.sf.lcd_density`), puis régénérer les sondes de pixels des e2e.
-2. **J9 : dialogues et navigation**, vérifiés sur le vrai framework : un dialogue (`FLAG_DIM_BEHIND`,
+1. **J9 : dialogues et navigation**, vérifiés sur le vrai framework : un dialogue (`FLAG_DIM_BEHIND`,
    retour du focus) et la pile d'activités du code poussé le 17 octobre, chacun avec un e2e.
-3. **Vérifier les ajouts G2 du 17 octobre** sur la vraie libcore et réparer la CI Windows.
-4. **J10** : une vraie application AOSP affichée et utilisable.
-5. **G4** : chargeur ELF et bionic, pour les applications avec du code natif (`.so` x86_64), selon l'[ADR-009](adr/ADR-009-couche-native-elf.md).
-6. **G5** : microG (démarrage de GmsCore avec les mêmes services), puis les GApps.
+2. **Vérifier les ajouts G2 du 17 octobre** sur la vraie libcore et réparer la CI Windows.
+3. **J10** : une vraie application AOSP affichée et utilisable.
+4. **G4** : chargeur ELF et bionic, pour les applications avec du code natif (`.so` x86_64), selon l'[ADR-009](adr/ADR-009-couche-native-elf.md).
+5. **G5** : microG (démarrage de GmsCore avec les mêmes services), puis les GApps.
 
 ## Règles que le projet s'impose
 

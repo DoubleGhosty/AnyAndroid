@@ -405,6 +405,8 @@ PropertyStore& properties() {
         {"ro.debuggable", "0"}, {"ro.secure", "1"}, {"ro.boot.hardware", "anyandroid"},
         {"ro.serialno", "unknown"}, {"ro.build.characteristics", "default"}};
     for (const auto& [k, v] : device) store.values[k] = v;  // the device is AnyAndroid, whatever the image says
+    // The display's density, as a device's vendor properties give it (DisplayMetrics.DENSITY_DEVICE).
+    store.values["ro.sf.lcd_density"] = std::to_string(kDisplayDensityDpi);
     // Generic values from the system partition when the global ones are absent.
     for (const char* k : {"version.sdk", "version.release", "version.codename", "version.incremental", "id",
                           "type", "tags", "fingerprint", "display.id", "version.security_patch"}) {

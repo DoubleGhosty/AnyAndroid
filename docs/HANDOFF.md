@@ -231,8 +231,10 @@ Fait et vérifié (voir STATUS.md pour le détail) :
   l'arbre des couches comme SurfaceFlinger (`framework_surface.cpp`, `layers_to_draw`) ;
   `--log-level debug` écrit chaque composition (« compositeur »). Pas encore vérifiés : pile
   d'activités (`ActivityTaskService`) et dialogues, poussés le 17 octobre.
-- **Défaut connu** : l'application est dessinée à 160 dpi au lieu de 420 (la configuration
-  globale n'a pas de `densityDpi`) ; voir STATUS « Problèmes connus ».
+- **Densité** : la configuration globale est calculée comme
+  `DisplayContent.computeScreenConfiguration` (`DisplayService.computeScreenConfiguration` :
+  420 dpi, 411 × 731 dp, écran tactile, sans clavier physique) et `ro.sf.lcd_density` vaut 420.
+  Avant le 23 octobre tout était dessiné à 160 dpi ; les sondes des e2e ont été refaites.
 - Natives graphiques fidèles à HWUI/Skia : `Paint`, `RenderNode` (magasins de propriétés),
   `Path` (modèle `SkPath`, `approximate`), `PathParser` (SVG, arcs en coniques), `Matrix`
   (`SkMatrix`), `Canvas` (Skia AOSP), `Region` (`SkRegion`),
@@ -254,21 +256,19 @@ Fait et vérifié (voir STATUS.md pour le détail) :
 
 ## 9. Prochaines étapes, dans l'ordre
 
-1. **Densité** : `densityDpi` 420 dans la configuration globale (et `ro.sf.lcd_density`),
-   sondes de pixels des e2e régénérées en lançant les commandes.
-2. **J9 : dialogues, navigation**, vérifiés sur le vrai framework par des e2e (un dialogue avec
+1. **J9 : dialogues, navigation**, vérifiés sur le vrai framework par des e2e (un dialogue avec
    `FLAG_DIM_BEHIND` et le retour du focus, `startActivity` puis BACK vers l'activité précédente).
-3. **Vérifier les ajouts G2 du 17 octobre** sur la vraie libcore (E/S scatter-gather,
+2. **Vérifier les ajouts G2 du 17 octobre** sur la vraie libcore (E/S scatter-gather,
    `MethodHandle`, annotations, fuseaux horaires) ; relancer la CI Windows dès que le compte
    GitHub Actions fonctionne.
-4. **J10** : une vraie application AOSP (comme `Music`) affichée et utilisable. Les motifs de
+3. **J10** : une vraie application AOSP (comme `Music`) affichée et utilisable. Les motifs de
    césure `.hyb` et le pilotage déterministe des tests sont à concevoir sur l'horloge commune
    (`common/clock.h`).
-5. **G4 : code natif** : chargeur ELF et bionic. L'[évaluation d'ANDROWIN](evaluations/ANDROWIN.md)
+4. **G4 : code natif** : chargeur ELF et bionic. L'[évaluation d'ANDROWIN](evaluations/ANDROWIN.md)
    décrit ntdroid (ART réel dans un processus Windows par interception d'appels système) : c'est
    la référence pour un **processus hôte isolé** dédié au code natif ; l'option « ART réel à la
    place de notre interpréteur » est archivée.
-6. **G5 : microG** (démarrer GmsCore avec nos services : comptes, `GoogleApiAvailability`), puis
+5. **G5 : microG** (démarrer GmsCore avec nos services : comptes, `GoogleApiAvailability`), puis
    les GApps dans les limites du §2.1.
 
 ## 10. Savoir-faire technique

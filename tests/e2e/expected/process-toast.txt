@@ -5,10 +5,10 @@ cycle : MainActivity.onCreate
 cycle : MainActivity.onStart
 cycle : MainActivity.onResume
 activité au premier plan
-entrée : appui 540,127 → traité
-entrée : relâchement 540,127 → traité
-entrée : appui 540,127 → traité
-entrée : relâchement 540,127 → traité
-entrée : appui 540,127 → traité
-entrée : relâchement 540,127 → traité
+entrée : appui 540,332 → traité
+entrée : relâchement 540,332 → traité
+entrée : appui 540,332 → traité
+entrée : relâchement 540,332 → traité
+entrée : appui 540,332 → traité
+entrée : relâchement 540,332 → traité
 toast : « Trois clics ! » montré

@@ -147,19 +147,19 @@ if(AA_LIBCORE_DIR)
       # bar and its title, then, below it, the stems of a letter of each
       # TextView, the button and its text, and the window's background.
       aa_e2e(process-launch CODE 0 GOLDEN process-launch.txt
-        FRAME 1080x1920 "540,28,#1A1B20" "18,30,#E1E1E2" "2,70,#787A84" "600,70,#EDEDF6" "67,94,#787A84"
-              "300,127,#D6D7D7" "544,125,#30323A" "540,1000,#EDEDF6"
+        FRAME 1080x1920 "540,28,#1A1B20" "48,75,#E1E1E2" "6,184,#787A84" "1000,185,#EDEDF6" "135,244,#787A84"
+              "300,300,#D6D7D7" "495,332,#30323A" "540,1000,#EDEDF6"
         ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
              ${S}/basic-activity.apk aa.host.ProcessLauncher com.anyandroid.samples.basic --until-resumed)
       # J8 (input scripts: steps on separate lines, ';' being CMake's list
       # separator): two taps on the button reach View.onClick through the input
-      # dispatcher; the label reads "Clics : 2" (the "2": ink at 40,98 and
-      # 43,98, background at 42,92 where a "1" has ink).
+      # dispatcher; the label reads "Clics : 2" (the "2": ink on its base at
+      # 115,256, background at 124,248 where a "3" has ink).
       aa_e2e(process-input CODE 0 GOLDEN process-input.txt
-        FRAME 1080x1920 "540,28,#1A1B20" "40,98,#787A84" "43,98,#787A84" "42,92,#EDEDF6" "300,127,#D6D7D7"
+        FRAME 1080x1920 "540,28,#1A1B20" "28,244,#787A84" "115,256,#787A84" "124,248,#EDEDF6" "300,300,#D6D7D7"
         ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
              --trace-input
-             --input "after-frames 1\nsettle 1500\ntap 540 127\nsettle 1500\ntap 540 127\nsettle 1500\nquit"
+             --input "after-frames 1\nsettle 1500\ntap 540 332\nsettle 1500\ntap 540 332\nsettle 1500\nquit"
              ${S}/basic-activity.apk aa.host.ProcessLauncher com.anyandroid.samples.basic)
       # J8: BACK finishes the only activity (onPause, onStop, onDestroy), then
       # the process ends, no home screen to return to.
@@ -170,20 +170,21 @@ if(AA_LIBCORE_DIR)
       # J9: the third click shows a text toast (the queue of NotificationManagerService, the
       # framework's ToastPresenter and transient_notification): its window, laid out by the
       # framework's WindowLayout, sits centered 48dp above the bottom, over the activity, in the
-      # layer tree the compositor walks. Probes: the action bar, the "T" of "Trois clics !".
+      # layer tree the compositor walks. Probes: the action bar, the "3" of "Clics : 3", two
+      # letters of "Trois clics !".
       aa_e2e(process-toast CODE 0 GOLDEN process-toast.txt
-        FRAME 1080x1920 "540,28,#1A1B20" "509,1846,#30323A" "514,1852,#30323A"
+        FRAME 1080x1920 "540,28,#1A1B20" "124,248,#7B7D86" "505,1741,#30323A" "561,1737,#30323A"
         ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
              --trace-input
-             --input "after-frames 1\nsettle 1500\ntap 540 127\nsettle 1000\ntap 540 127\nsettle 1000\ntap 540 127\nsettle 600\nquit"
+             --input "after-frames 1\nsettle 1500\ntap 540 332\nsettle 1000\ntap 540 332\nsettle 1000\ntap 540 332\nsettle 600\nquit"
              ${S}/basic-activity.apk aa.host.ProcessLauncher com.anyandroid.samples.basic)
       # ... and goes away after LENGTH_SHORT (2 s, 333 ms more for a text toast): its window and
       # layer are removed, the display shows the activity alone again.
       aa_e2e(process-toast-end CODE 0 GOLDEN process-toast-end.txt
-        FRAME 1080x1920 "540,28,#1A1B20" "509,1846,#EDEDF6" "514,1852,#EDEDF6"
+        FRAME 1080x1920 "540,28,#1A1B20" "124,248,#7B7D86" "505,1741,#EDEDF6" "561,1737,#EDEDF6"
         ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
              --trace-input
-             --input "after-frames 1\nsettle 1500\ntap 540 127\nsettle 1000\ntap 540 127\nsettle 1000\ntap 540 127\nsettle 4000\nquit"
+             --input "after-frames 1\nsettle 1500\ntap 540 332\nsettle 1000\ntap 540 332\nsettle 1000\ntap 540 332\nsettle 4000\nquit"
              ${S}/basic-activity.apk aa.host.ProcessLauncher com.anyandroid.samples.basic)
     endif()
     # G3 entry point: utility classes of the real framework.jar.
