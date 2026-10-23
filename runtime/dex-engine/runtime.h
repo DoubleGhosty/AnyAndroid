@@ -123,7 +123,6 @@ struct AnnotationPeer final : NativePeer {
 
 // java.lang.ref.Reference state. Soft references are kept strong.
 struct ReferencePeer final : NativePeer {
-  Handle self = kNull;
   Handle referent = kNull;
   bool weak = true;
   void trace(std::vector<Handle>& out) const override {
@@ -131,13 +130,6 @@ struct ReferencePeer final : NativePeer {
   }
   void sweep_weak(const std::function<bool(Handle)>& is_live) override {
     if (weak && referent && !is_live(referent)) referent = kNull;
-  }
-};
-
-struct ReferenceQueuePeer final : NativePeer {
-  std::vector<Handle> queued;
-  void trace(std::vector<Handle>& out) const override {
-    for (Handle h : queued) out.push_back(h);
   }
 };
 
@@ -684,6 +676,13 @@ class Runtime {
   std::atomic<bool> gc_requested_{false};
   bool in_gc_ = false;
   GcStats gc_stats_;
+  // References cleared by a collection that have a queue, waiting for the next
+  // safepoint to be handed to libcore (deliver_cleared_references, gc.cpp).
+  std::vector<Handle> cleared_references_;
+  bool delivering_references_ = false;
+  bool reference_daemon_started_ = false;
+  void deliver_cleared_references();
+  void start_reference_daemon();
   std::unordered_map<Handle, uint32_t> globals_;
   std::map<size_t, std::function<void(std::vector<Handle>&)>> root_providers_;
   size_t next_root_provider_ = 1;

@@ -307,8 +307,9 @@ Fait et vérifié (voir STATUS.md pour le détail) :
   réellement simulé pendant une exécution et l'exiger dans un test.
 - Le stockage aconfig des APEX (`/metadata/aconfig`) n'est pas servi (message
   `ERROR_PACKAGE_NOT_FOUND: com.android.scheduling.flags`, sans conséquence aujourd'hui).
-- Le GC n'exécute pas les `Cleaner` de `NativeAllocationRegistry` : les objets natifs vivent
-  jusqu'à leur destruction explicite.
+- Seul le `ReferenceQueueDaemon` de la libcore est lancé (`gc.cpp`,
+  `start_reference_daemon`) : pas de `finalize()` (pas de `FinalizerDaemon`), pas de tâches du
+  tas. Les `Cleaner` (dont ceux de `NativeAllocationRegistry`) s'exécutent sur ce démon.
 
 ## 12. Pour chaque tâche, avant de dire « fait »
 
@@ -352,7 +353,9 @@ mal passé, pour que cela ne se reproduise pas (les règles correspondantes sont
    n'y a ni `View.onClick`, ni `Activity`, ni vrai retour arrière. Le clic dans la vraie
    application n'avait jamais été essayé.
 6. **CI Windows ignorée.** Elle est rouge depuis le lot G2 (`gc_cleaners_and_reference_queue`
-   échoue sous Windows, pas sous wine) et personne ne l'a relue après le push.
+   échoue sous Windows, pas sous wine) et personne ne l'a relue après le push. La cause était une
+   aide de test (`scrub_stack`) que GCC supprimait entièrement : avec GCC 15, une copie périmée
+   d'une poignée sur la pile retenait l'objet.
 7. **Approximations à la place d'Android.** Focus et entrées donnés au dernier récepteur créé
    (une fenêtre de toast volerait les clics) au lieu du routage d'InputDispatcher par cadre et
    par drapeaux ; assombrissement `FLAG_DIM_BEHIND` fixé à 60 % au lieu de `dimAmount`.
@@ -362,3 +365,10 @@ mal passé, pour que cela ne se reproduise pas (les règles correspondantes sont
 9. **Pas de coordination.** La session a poussé sur la branche d'une autre session et a
    réécrit en parallèle les mêmes sujets (entrées, compositeur), ce qui a obligé à arrêter et
    relancer du travail.
+10. **Remplacer la libcore au lieu de l'alimenter.** `9970c81` ajoutait `ReferenceQueue`,
+    `PhantomReference` et `sun.misc.Cleaner` aux classes « cœur de VM » réécrites en C++ : la
+    vraie libcore était remplacée par une version incomplète (`remove()` qui ne bloque pas, ni
+    `add` ni `enqueuePending`), et du code Java tournait à la fin du ramasse-miettes, parfois au
+    milieu d'une allocation. La règle du projet est l'inverse : exécuter le code d'AOSP et ne
+    fournir que la frontière (ici, ce que fait le GC d'ART : vider les référents et appeler
+    `ReferenceQueue.add`).

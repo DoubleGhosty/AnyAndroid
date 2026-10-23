@@ -365,24 +365,6 @@ const char* kMain = R"SMALI(
 .end method
 )SMALI";
 
-const char* kCleanThunk = R"SMALI(
-.class public LCleanThunk;
-.super Ljava/lang/Object;
-.implements Ljava/lang/Runnable;
-.field public static cleaned:I
-.method public constructor <init>()V
-    .registers 1
-    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
-    return-void
-.end method
-.method public run()V
-    .registers 2
-    const/4 v0, 1
-    sput v0, LCleanThunk;->cleaned:I
-    return-void
-.end method
-)SMALI";
-
 struct ThreadVm {
   std::unique_ptr<dex::DexFile> dex;
   std::unique_ptr<rt::Runtime> rt;
@@ -390,7 +372,7 @@ struct ThreadVm {
 
   explicit ThreadVm(rt::RuntimeOptions opts = {}) {
     std::vector<tool::ClassDef> classes;
-    for (const char* s : {kShared, kIncrementer, kBox, kProducer, kSleeper, kThrower, kSpinner, kMain, kCleanThunk}) {
+    for (const char* s : {kShared, kIncrementer, kBox, kProducer, kSleeper, kThrower, kSpinner, kMain}) {
       classes.push_back(tool::assemble_smali(s, "threads.smali"));
     }
     dex = dex::DexFile::open(tool::write_dex(classes), "threads.dex");
@@ -417,9 +399,13 @@ struct ThreadVm {
 
 // Overwrites dead stack memory so that stale handles left by finished calls
 // are not picked up by the conservative stack scan.
+// Zeroes the stack below the caller, so that the conservative scan does not
+// find handles left there by earlier calls. The asm statement makes the buffer
+// observable: without it, GCC removes the stores and then the whole function.
 [[gnu::noinline]] void scrub_stack() {
-  volatile char buf[128 * 1024];
-  std::memset(const_cast<char*>(buf), 0, sizeof buf);
+  char buf[128 * 1024];
+  std::memset(buf, 0, sizeof buf);
+  asm volatile("" : : "r"(buf) : "memory");
 }
 
 // Allocates a string whose handle never appears in clear in the caller's frame.
@@ -531,64 +517,148 @@ TEST(gc_detects_stale_handles) {
   CHECK(still_stale >= stale);
 }
 
-[[gnu::noinline]] void setup_weak_ref(rt::Runtime& rt, rt::Handle rq, rt::Handle& out_wr) {
-  rt::Class* weak_cls = rt.find_class("Ljava/lang/ref/WeakReference;");
-  rt::Handle target = rt.alloc(rt.find_class("Ljava/lang/Object;"));
-  out_wr = rt.alloc(weak_cls);
-  rt.call_virtual(out_wr, "<init>", "(Ljava/lang/Object;Ljava/lang/ref/ReferenceQueue;)V", {target, rq});
-}
+namespace {
 
-[[gnu::noinline]] void setup_cleaner(rt::Runtime& rt, rt::Handle thunk, rt::Handle& out_cleaner) {
-  rt::Handle target = rt.alloc(rt.find_class("Ljava/lang/Object;"));
-  out_cleaner = rt::Handle(rt.call_static("Lsun/misc/Cleaner;", "create",
-                                          "(Ljava/lang/Object;Ljava/lang/Runnable;)Lsun/misc/Cleaner;",
-                                          {target, thunk}));
-}
+// Libcore's side of reference processing, reduced to what the collector calls:
+// ReferenceQueue.add receives the circular list (linked by pendingNext) of the
+// references a collection cleared. The real one appends it to unenqueued for
+// the ReferenceQueueDaemon.
+const char* kRefBoot = R"SMALI(
+.class public Ljava/lang/ref/ReferenceQueue;
+.super Ljava/lang/Object;
+.field public static unenqueued:Ljava/lang/ref/Reference;
+.field public static adds:I
+.method public constructor <init>()V
+    .registers 1
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+    return-void
+.end method
+.method static add(Ljava/lang/ref/Reference;)V
+    .registers 2
+    sput-object p0, Ljava/lang/ref/ReferenceQueue;->unenqueued:Ljava/lang/ref/Reference;
+    sget v0, Ljava/lang/ref/ReferenceQueue;->adds:I
+    add-int/lit8 v0, v0, 0x1
+    sput v0, Ljava/lang/ref/ReferenceQueue;->adds:I
+    return-void
+.end method
+)SMALI";
 
-TEST(gc_cleaners_and_reference_queue) {
-  ThreadVm vm;
-  rt::Runtime& rt = *vm.rt;
+// makeRefs(queue, refs, kept): refs[i] = new WeakReference(new Object(), queue)
+// for i < refs.length - 3, then a reference without queue, one whose referent
+// stays reachable (kept[0]) and one already enqueued (queueNext set): these
+// three must not be delivered.
+const char* kRefApp = R"SMALI(
+.class public LRefs;
+.super Ljava/lang/Object;
+.method public static makeRefs(Ljava/lang/ref/ReferenceQueue;[Ljava/lang/ref/WeakReference;[Ljava/lang/Object;)V
+    .registers 8
+    array-length v0, p1
+    add-int/lit8 v0, v0, -0x3
+    const/4 v1, 0x0
+    :loop
+    if-ge v1, v0, :tail
+    new-instance v2, Ljava/lang/Object;
+    invoke-direct {v2}, Ljava/lang/Object;-><init>()V
+    new-instance v3, Ljava/lang/ref/WeakReference;
+    invoke-direct {v3, v2, p0}, Ljava/lang/ref/WeakReference;-><init>(Ljava/lang/Object;Ljava/lang/ref/ReferenceQueue;)V
+    aput-object v3, p1, v1
+    add-int/lit8 v1, v1, 0x1
+    goto :loop
+    :tail
+    new-instance v2, Ljava/lang/Object;
+    invoke-direct {v2}, Ljava/lang/Object;-><init>()V
+    new-instance v3, Ljava/lang/ref/WeakReference;
+    invoke-direct {v3, v2}, Ljava/lang/ref/WeakReference;-><init>(Ljava/lang/Object;)V
+    aput-object v3, p1, v0
+    add-int/lit8 v0, v0, 0x1
+    new-instance v2, Ljava/lang/Object;
+    invoke-direct {v2}, Ljava/lang/Object;-><init>()V
+    const/4 v4, 0x0
+    aput-object v2, p2, v4
+    new-instance v3, Ljava/lang/ref/WeakReference;
+    invoke-direct {v3, v2, p0}, Ljava/lang/ref/WeakReference;-><init>(Ljava/lang/Object;Ljava/lang/ref/ReferenceQueue;)V
+    aput-object v3, p1, v0
+    add-int/lit8 v0, v0, 0x1
+    new-instance v2, Ljava/lang/Object;
+    invoke-direct {v2}, Ljava/lang/Object;-><init>()V
+    new-instance v3, Ljava/lang/ref/WeakReference;
+    invoke-direct {v3, v2, p0}, Ljava/lang/ref/WeakReference;-><init>(Ljava/lang/Object;Ljava/lang/ref/ReferenceQueue;)V
+    iput-object v3, v3, Ljava/lang/ref/Reference;->queueNext:Ljava/lang/ref/Reference;
+    aput-object v3, p1, v0
+    const/4 v2, 0x0
+    const/4 v3, 0x0
+    return-void
+.end method
+)SMALI";
 
-  try {
-    // 1. ReferenceQueue test with WeakReference
-    rt::Class* rq_cls = rt.find_class("Ljava/lang/ref/ReferenceQueue;");
-    rt::Handle rq = rt.alloc(rq_cls);
-    rt.call_virtual(rq, "<init>", "()V");
+}  // namespace
 
-    rt::Handle wr = rt::kNull;
-    setup_weak_ref(rt, rq, wr);
-    CHECK(wr != rt::kNull);
-
-    // Verify queue is empty before collection
-    CHECK_EQ(rt.call_virtual(rq, "poll", "()Ljava/lang/ref/Reference;"), rt::kNull);
+// The collector clears the weak references to unreachable objects and hands
+// those that have a queue to libcore as ART does: not during the collection
+// (it may start inside an allocation) but at the next safepoint, as one
+// circular list through Reference.pendingNext passed to ReferenceQueue.add.
+TEST(gc_hands_cleared_references_to_libcore) {
+  std::vector<tool::ClassDef> boot_classes{tool::assemble_smali(kRefBoot, "boot.smali")};
+  std::vector<tool::ClassDef> app_classes{tool::assemble_smali(kRefApp, "refs.smali")};
+  auto boot = dex::DexFile::open(tool::write_dex(boot_classes), "core-test.jar!classes.dex");
+  auto app = dex::DexFile::open(tool::write_dex(app_classes), "refs.dex");
+  auto runtime = std::make_unique<rt::Runtime>();
+  runtime->add_dex(app.get());
+  runtime->add_boot_dex(boot.get());
+  {
+    rt::Runtime::Scope scope(*runtime, "test");
+    rt::Runtime& rt = *runtime;
+    constexpr uint32_t kRefs = 40, kQueued = kRefs - 3;
+    rt::Class* queue_cls = rt.find_class("Ljava/lang/ref/ReferenceQueue;");
+    CHECK(queue_cls->boot);  // libcore's class, not the runtime's
+    rt::GlobalRef queue(rt, rt.alloc(queue_cls));
+    rt.call_virtual(queue.get(), "<init>", "()V");
+    rt::GlobalRef refs(rt, rt.new_array("[Ljava/lang/ref/WeakReference;", int32_t(kRefs)));
+    rt::GlobalRef kept(rt, rt.new_array("[Ljava/lang/Object;", 1));
+    rt.call_static("LRefs;", "makeRefs",
+                   "(Ljava/lang/ref/ReferenceQueue;[Ljava/lang/ref/WeakReference;[Ljava/lang/Object;)V",
+                   {queue.get(), refs.get(), kept.get()});
+    auto ref_at = [&](uint32_t i) {
+      rt::Handle h;
+      std::memcpy(&h, &rt.array(refs.get(), "WeakReference[]").data[size_t(i) * 4], 4);
+      return h;
+    };
+    auto referent = [&](rt::Handle ref) { return rt::Handle(rt.call_virtual(ref, "get", "()Ljava/lang/Object;")); };
+    rt::Field* pending_f =
+        rt.find_class("Ljava/lang/ref/Reference;")->declared_field("pendingNext", "Ljava/lang/ref/Reference;");
+    rt::Field* unenqueued_f = queue_cls->declared_field("unenqueued", "Ljava/lang/ref/Reference;");
+    rt::Field* adds_f = queue_cls->declared_field("adds", "I");
 
     scrub_stack();
     rt.collect_garbage();
-
-    // After collection, wr must be queued in rq!
-    rt::Handle polled = rt::Handle(rt.call_virtual(rq, "poll", "()Ljava/lang/ref/Reference;"));
-    CHECK_EQ(polled, wr);
-    CHECK_EQ(rt.call_virtual(rq, "poll", "()Ljava/lang/ref/Reference;"), rt::kNull);
-
-    // 2. sun.misc.Cleaner test
-    rt::Class* thunk_cls = rt.find_class("LCleanThunk;");
-    rt::Handle thunk = rt.alloc(thunk_cls);
-    rt.call_virtual(thunk, "<init>", "()V");
-    rt::Field* cleaned_f = thunk_cls->declared_field("cleaned", "I");
-    thunk_cls->statics.at(cleaned_f->slot) = 0;
-
-    rt::Handle cleaner = rt::kNull;
-    setup_cleaner(rt, thunk, cleaner);
-    CHECK(cleaner != rt::kNull);
-    CHECK_EQ(thunk_cls->statics.at(cleaned_f->slot), 0u);
-
-    scrub_stack();
+    CHECK_EQ(queue_cls->statics.at(adds_f->slot), 0u);  // no Java code inside the collection
+    rt.safepoint();
+    CHECK_EQ(queue_cls->statics.at(adds_f->slot), 1u);
+    rt::Handle head = queue_cls->statics.at(unenqueued_f->slot);
+    CHECK(head != rt::kNull);
+    std::vector<rt::Handle> list;
+    for (rt::Handle r = head; list.size() <= kRefs;) {
+      list.push_back(r);
+      r = rt.object(r)->fields.at(pending_f->slot);
+      if (r == head) break;
+    }
+    CHECK(list.size() <= kQueued);
+    // The native stacks are scanned conservatively: a stray word may keep a
+    // referent alive, never more than a couple here.
+    CHECK(list.size() + 2 >= kQueued);
+    for (rt::Handle r : list) {
+      CHECK_EQ(referent(r), rt::kNull);
+      bool queued = false;
+      for (uint32_t i = 0; i < kQueued; ++i) queued |= ref_at(i) == r;
+      CHECK(queued);
+    }
+    CHECK_EQ(referent(ref_at(kQueued)), rt::kNull);      // cleared, but without a queue
+    CHECK(referent(ref_at(kQueued + 1)) != rt::kNull);  // referent still reachable
+    CHECK_EQ(referent(ref_at(kQueued + 2)), rt::kNull);  // cleared, already enqueued
+    // The references delivered are cleared: a second collection hands nothing.
     rt.collect_garbage();
-
-    // The cleaner should have been triggered automatically during sweep!
-    CHECK_EQ(thunk_cls->statics.at(cleaned_f->slot), 1u);
-  } catch (const rt::JavaThrow& t) {
-    std::fprintf(stderr, "TEST THREW: %s\n", rt.describe_throwable(t.exception).c_str());
-    throw;
+    rt.safepoint();
+    CHECK_EQ(queue_cls->statics.at(adds_f->slot), 1u);
   }
+  runtime.reset();
 }

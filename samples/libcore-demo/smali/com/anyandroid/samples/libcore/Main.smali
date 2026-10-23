@@ -25,6 +25,8 @@
 #   nio         : [alpha, bêta] true [lignes.txt, vide.txt] 12 -1 false
 #                 (java.nio.file.Files : write, readAllLines, getLastModifiedTime,
 #                  newDirectoryStream, delete ; FileChannel.read jusqu'à -1)
+#   références  : true true          (WeakReference mises en file, sun.misc.Cleaner
+#                  exécutés, par le ReferenceQueueDaemon de la libcore)
 
 .class public Lcom/anyandroid/samples/libcore/Main;
 .super Ljava/lang/Object;
@@ -38,7 +40,7 @@
 
 .method public static main([Ljava/lang/String;)V
     .registers 8
-    const/16 v5, 0xf
+    const/16 v5, 0x10
     new-array v6, v5, [Ljava/lang/String;
     const/4 v0, 0x0
     const-string v1, "collections"
@@ -84,6 +86,9 @@
     aput-object v1, v6, v0
     const/16 v0, 0xe
     const-string v1, "nio"
+    aput-object v1, v6, v0
+    const/16 v0, 0xf
+    const-string v1, "références"
     aput-object v1, v6, v0
 
     const/4 v0, 0x0
@@ -182,6 +187,10 @@
     invoke-static {}, Lcom/anyandroid/samples/libcore/Main;->nio()Ljava/lang/String;
     move-result-object v0
     return-object v0
+    :s15
+    invoke-static {}, Lcom/anyandroid/samples/libcore/Main;->references()Ljava/lang/String;
+    move-result-object v0
+    return-object v0
     :table
     .packed-switch 0x0
         :s0
@@ -199,6 +208,7 @@
         :s12
         :s13
         :s14
+        :s15
     .end packed-switch
 .end method
 
@@ -686,4 +696,99 @@
     invoke-static {v4}, Lcom/anyandroid/samples/libcore/Main;->j([Ljava/lang/Object;)Ljava/lang/String;
     move-result-object v0
     return-object v0
+.end method
+
+# The collector clears the weak references to unreachable objects and hands
+# them to libcore; its ReferenceQueueDaemon enqueues them and runs the Cleaners.
+# The native stacks are scanned conservatively, hence the margins (18 of 20,
+# 4 of 5).
+#   static String references() throws InterruptedException {
+#     ReferenceQueue<Object> q = new ReferenceQueue<>();
+#     WeakReference<?>[] refs = new WeakReference<?>[20];
+#     CountDownLatch cleaned = new CountDownLatch(4);
+#     fill(q, refs, cleaned);
+#     Runtime.getRuntime().gc();
+#     int n = 0;
+#     while (n < refs.length && q.remove(5000) != null) n++;
+#     return (n >= 18) + " " + cleaned.await(5, TimeUnit.SECONDS);
+#   }
+#   static void fill(ReferenceQueue<Object> q, WeakReference<?>[] refs, CountDownLatch cleaned) {
+#     for (int i = 0; i < refs.length; i++) refs[i] = new WeakReference<>(new Object(), q);
+#     for (int i = 0; i < 5; i++) Cleaner.create(new Object(), new Thunk(cleaned));
+#   }
+.method static references()Ljava/lang/String;
+    .registers 9
+    new-instance v0, Ljava/lang/ref/ReferenceQueue;
+    invoke-direct {v0}, Ljava/lang/ref/ReferenceQueue;-><init>()V
+    const/16 v1, 0x14
+    new-array v1, v1, [Ljava/lang/ref/WeakReference;
+    new-instance v2, Ljava/util/concurrent/CountDownLatch;
+    const/4 v3, 0x4
+    invoke-direct {v2, v3}, Ljava/util/concurrent/CountDownLatch;-><init>(I)V
+    invoke-static {v0, v1, v2}, Lcom/anyandroid/samples/libcore/Main;->fill(Ljava/lang/ref/ReferenceQueue;[Ljava/lang/ref/WeakReference;Ljava/util/concurrent/CountDownLatch;)V
+    invoke-static {}, Ljava/lang/Runtime;->getRuntime()Ljava/lang/Runtime;
+    move-result-object v3
+    invoke-virtual {v3}, Ljava/lang/Runtime;->gc()V
+    const/4 v3, 0x0
+    array-length v4, v1
+    :loop
+    if-ge v3, v4, :counted
+    const-wide/16 v5, 0x1388
+    invoke-virtual {v0, v5, v6}, Ljava/lang/ref/ReferenceQueue;->remove(J)Ljava/lang/ref/Reference;
+    move-result-object v7
+    if-eqz v7, :counted
+    add-int/lit8 v3, v3, 0x1
+    goto :loop
+    :counted
+    const/16 v4, 0x12
+    const/4 v7, 0x0
+    if-lt v3, v4, :few
+    const/4 v7, 0x1
+    :few
+    invoke-static {v7}, Ljava/lang/Boolean;->valueOf(Z)Ljava/lang/Boolean;
+    move-result-object v7
+    const-wide/16 v5, 0x5
+    sget-object v8, Ljava/util/concurrent/TimeUnit;->SECONDS:Ljava/util/concurrent/TimeUnit;
+    invoke-virtual {v2, v5, v6, v8}, Ljava/util/concurrent/CountDownLatch;->await(JLjava/util/concurrent/TimeUnit;)Z
+    move-result v5
+    invoke-static {v5}, Ljava/lang/Boolean;->valueOf(Z)Ljava/lang/Boolean;
+    move-result-object v5
+    const/4 v4, 0x2
+    new-array v4, v4, [Ljava/lang/Object;
+    const/4 v6, 0x0
+    aput-object v7, v4, v6
+    const/4 v6, 0x1
+    aput-object v5, v4, v6
+    invoke-static {v4}, Lcom/anyandroid/samples/libcore/Main;->j([Ljava/lang/Object;)Ljava/lang/String;
+    move-result-object v0
+    return-object v0
+.end method
+
+.method static fill(Ljava/lang/ref/ReferenceQueue;[Ljava/lang/ref/WeakReference;Ljava/util/concurrent/CountDownLatch;)V
+    .registers 7
+    const/4 v0, 0x0
+    array-length v1, p1
+    :refs
+    if-ge v0, v1, :cleaners
+    new-instance v2, Ljava/lang/Object;
+    invoke-direct {v2}, Ljava/lang/Object;-><init>()V
+    new-instance v3, Ljava/lang/ref/WeakReference;
+    invoke-direct {v3, v2, p0}, Ljava/lang/ref/WeakReference;-><init>(Ljava/lang/Object;Ljava/lang/ref/ReferenceQueue;)V
+    aput-object v3, p1, v0
+    add-int/lit8 v0, v0, 0x1
+    goto :refs
+    :cleaners
+    const/4 v0, 0x0
+    const/4 v1, 0x5
+    :create
+    if-ge v0, v1, :done
+    new-instance v2, Ljava/lang/Object;
+    invoke-direct {v2}, Ljava/lang/Object;-><init>()V
+    new-instance v3, Lcom/anyandroid/samples/libcore/Main$Thunk;
+    invoke-direct {v3, p2}, Lcom/anyandroid/samples/libcore/Main$Thunk;-><init>(Ljava/util/concurrent/CountDownLatch;)V
+    invoke-static {v2, v3}, Lsun/misc/Cleaner;->create(Ljava/lang/Object;Ljava/lang/Runnable;)Lsun/misc/Cleaner;
+    add-int/lit8 v0, v0, 0x1
+    goto :create
+    :done
+    return-void
 .end method

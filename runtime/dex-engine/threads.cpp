@@ -177,6 +177,7 @@ void Runtime::safepoint() {
   if (!t) return;
   if (shutting_down_ && !t->attached) throw ThreadKill{};
   if (gc_requested_ && !in_gc_) collect_garbage();
+  if (!cleared_references_.empty() && !in_gc_) deliver_cleared_references();
   if (gil_waiters_ > 0 && ++t->poll_count >= 1000) {
     t->poll_count = 0;
     yield_thread();

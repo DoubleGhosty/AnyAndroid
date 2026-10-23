@@ -60,7 +60,11 @@ cœur (exceptions de la libcore sous notre `Throwable`) ; les interfaces (`CharS
 (`Integer`…) passent par `valueOf()` et le champ `value` ; `Thread` expose `threadLocals` et
 `inheritableThreadLocals` (lus directement par `ThreadLocal`) ; `Reference` expose `queue`,
 `queueNext` et `pendingNext` (manipulés par `ReferenceQueue`), le référent restant dans l'état natif
-pour que le ramasse-miettes le traite comme faible ; `Class.getClassLoader()` renvoie
+pour que le ramasse-miettes le traite comme faible. Comme le `ReferenceProcessor` d'ART, le
+ramasse-miettes vide les références dont le référent est inaccessible et, au point de sûreté
+suivant (jamais pendant la collecte), passe celles qui ont une file à `ReferenceQueue.add` en
+liste circulaire chaînée par `pendingNext` ; le vrai `ReferenceQueueDaemon` de `java.lang.Daemons`,
+seul démon lancé, les met en file et exécute les `sun.misc.Cleaner` ; `Class.getClassLoader()` renvoie
 `BootClassLoader.getInstance()` pour les classes d'amorçage, comme Android (et non `null` comme la
 JVM de référence).
 

@@ -47,7 +47,7 @@ le nombre de fichiers, et ne montent qu'avec une preuve sur le vrai framework ou
 |-------|------------------------------------------------------------|-----------:|------|
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
-| G2    | Vraie libcore d'AOSP (Android 17)                           | 92 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée ([ADR-004](adr/ADR-004-libcore-aosp.md)). Ajouts du 17 octobre (E/S scatter-gather, `Cleaner`/`ReferenceQueue`, `MethodHandle` polymorphique, annotations, fuseaux horaires) **en vérification** : jamais exercés par la vraie libcore, et la CI Windows échoue sur `gc_cleaners_and_reference_queue` |
+| G2    | Vraie libcore d'AOSP (Android 17)                           | 93 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART ([ADR-004](adr/ADR-004-libcore-aosp.md)). Ajouts du 17 octobre encore **à vérifier** sur la vraie libcore : E/S scatter-gather, `MethodHandle` polymorphique, annotations, fuseaux horaires |
 | G3    | Vrai `framework.jar` et une application AOSP affichée       | 78 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md). J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel) ; J8 en cours (l'écran est dans une fenêtre Win32, le clic dans la vraie application reste à démontrer) ; J9 en cours (code poussé le 17 octobre, non vérifié sur le vrai framework) ; J10 à faire ; J3 en cours |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire : architecture proposée dans l'[ADR-009](adr/ADR-009-couche-native-elf.md) (chargeur ELF x86_64, bionic, JNI) |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
@@ -56,7 +56,7 @@ le nombre de fichiers, et ne montent qu'avec une preuve sur le vrai framework ou
 ```
 G0 ██████████ 100 %
 G1 ██████████ 100 %
-G2 █████████░  92 %
+G2 █████████░  93 %
 G3 ████████░░  78 %
 G4 ░░░░░░░░░░   0 %
 G5 ░░░░░░░░░░   0 %
@@ -91,9 +91,14 @@ G5 ░░░░░░░░░░   0 %
     et `FileChannel.map`. Les adresses sont des valeurs étiquetées vérifiées à chaque accès, jamais
     des pointeurs de l'hôte, dans un budget global de 1 Gio. Une projection en lecture seule n'est
     lue qu'au premier accès, comme les pages d'un vrai `mmap`, et reste valable après la fermeture
-    du descripteur. Limite : les projections
-    (`FileChannel.map`, `Os.mmap`) ne sont libérées que par `munmap` explicite, jamais par le
-    ramasse-miettes (AnyAndroid n'exécute pas les `Cleaner`).
+    du descripteur. Limite : la libération des projections (`FileChannel.map`, `Os.mmap`) par
+    leur `Cleaner`, quand le ramasse-miettes passe, n'a pas encore de test ; `munmap` explicite
+    est testé.
+  - **Références** : le ramasse-miettes vide les `WeakReference` et `PhantomReference` dont le
+    référent n'est plus accessible et les remet à la libcore comme ART (`ReferenceQueue.add`, au
+    point de sûreté suivant, jamais pendant la collecte). Le vrai `ReferenceQueueDaemon` les met
+    en file et exécute les `sun.misc.Cleaner`, donc aussi les libérations de
+    `NativeAllocationRegistry` (exemple `libcore-demo`, section « références »).
   - **Bibliothèques natives** : `System.loadLibrary` réussit sans rien charger (chargeur ELF prévu
     en G4) ; l'absence n'apparaît qu'au premier appel d'une méthode native non fournie
     (`UnsatisfiedLinkError`).
@@ -337,9 +342,10 @@ d'entrées complet est en place :
 - le message `ERROR_PACKAGE_NOT_FOUND: com.android.scheduling.flags` vient du stockage aconfig :
   seuls les conteneurs `system`, `system_ext` et `product` sont montés. Ceux des APEX restent à
   servir sous `/metadata/aconfig` ;
-- le ramasse-miettes n'exécute pas les `Cleaner` de `NativeAllocationRegistry`. Les ressources
-  natives sont donc attachées à leur objet Java (pair natif libéré à la collecte), comme pour
-  les regex et zip ;
+- parmi les démons de la libcore, seul le `ReferenceQueueDaemon` est lancé (à la première
+  collecte qui libère des références) : sans `FinalizerDaemon`, les méthodes `finalize()` ne
+  sont jamais appelées, et les `SoftReference` sont gardées tant qu'il n'y a pas de notion de
+  pression mémoire ;
 - la casse Unicode suit les tables du système ; le signe Kelvin (U+212A) ne se replie pas sur `k`.
 
 ## Prochaines étapes, dans l'ordre

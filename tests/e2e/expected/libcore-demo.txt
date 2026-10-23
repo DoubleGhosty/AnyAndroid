@@ -13,3 +13,4 @@ encapsulés : true true
 fichiers : Bonjour fichier [essai.txt] true false
 apex : 30533808 true
 nio : [alpha, bêta] true [lignes.txt, vide.txt] 12 -1 false
+références : true true

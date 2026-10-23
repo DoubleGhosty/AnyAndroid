@@ -4,7 +4,8 @@
 // (or outside the VM). Roots:
 //  - precise: class mirrors and reference-typed statics, resolved strings,
 //    interned strings, native caches, global references, host root providers,
-//    thread objects, JNI local references;
+//    thread objects, JNI local references, cleared references waiting to be
+//    handed to libcore;
 //  - conservative: interpreter register files and native frame arguments
 //    (any 32-bit value that is a live handle), and the native stacks of the
 //    threads inside the VM (32-bit handles and 64-bit Object pointers).
@@ -76,6 +77,7 @@ void Runtime::collect_garbage() {
   for (const auto& [s, h] : interned_) mark(h);
   for (const auto& [k, h] : object_cache_) mark(h);
   for (const auto& [h, n] : globals_) mark(h);
+  for (Handle h : cleared_references_) mark(h);
   std::vector<Handle> extra;
   for (const auto& [id, provider] : root_providers_) provider(extra);
   for (Handle h : extra) mark(h);
@@ -126,37 +128,34 @@ void Runtime::collect_garbage() {
   }
 
   // --- Weak references, then sweep ----------------------------------------------------
+  // As ART's ReferenceProcessor: a weak (or phantom) reference whose referent
+  // is no longer strongly reachable is cleared, and when it has a queue and is
+  // not enqueued yet (queueNext null, Reference.isEnqueuable), it waits in
+  // cleared_references_ for deliver_cleared_references(). No Java code runs
+  // here: the collection may have started inside an allocation.
   auto is_live = [&](Handle h) { return is_valid_handle(h) && marks[h & 0xFFFFFF] != 0; };
   std::vector<uint32_t> dying;
-  std::vector<Handle> pending_cleaners;
-  std::vector<std::pair<Handle, Handle>> pending_enqueues;
-
-  Class* cleaner_cls = lookup_class("Lsun/misc/Cleaner;");
-  Class* ref_cls = lookup_class("Ljava/lang/ref/Reference;");
-  Field* queue_field = ref_cls ? ref_cls->declared_field("queue", "Ljava/lang/ref/ReferenceQueue;") : nullptr;
-
+  const Class* ref_cls = loaded_class("Ljava/lang/ref/Reference;");
+  const Field* queue_f = ref_cls ? ref_cls->declared_field("queue", "Ljava/lang/ref/ReferenceQueue;") : nullptr;
+  const Field* queue_next_f = ref_cls ? ref_cls->declared_field("queueNext", "Ljava/lang/ref/Reference;") : nullptr;
   for (uint32_t i = 1; i < slots_.size(); ++i) {
     if (!slots_[i].obj) continue;
-    if (marks[i]) {
-      Object* o = slots_[i].obj.get();
-      if (auto* rp = dynamic_cast<ReferencePeer*>(o->peer.get())) {
-        if (rp->weak && rp->referent && !is_live(rp->referent)) {
-          Handle ref_h = Handle(i | (uint32_t(slots_[i].gen) << 24));
-          if (cleaner_cls && instance_of(ref_h, cleaner_cls)) {
-            pending_cleaners.push_back(ref_h);
-          } else if (queue_field && queue_field->slot < o->fields.size()) {
-            Handle q = o->fields.at(queue_field->slot);
-            if (q != kNull) {
-              pending_enqueues.push_back({q, ref_h});
-            }
-          }
-          rp->referent = kNull;
-        }
-      } else if (slots_[i].obj->peer) {
-        slots_[i].obj->peer->sweep_weak(is_live);
-      }
-    } else {
+    if (!marks[i]) {
       dying.push_back(i);
+      continue;
+    }
+    Object* o = slots_[i].obj.get();
+    if (!o->peer) continue;
+    auto* ref = dynamic_cast<ReferencePeer*>(o->peer.get());
+    if (!ref) {
+      o->peer->sweep_weak(is_live);
+      continue;
+    }
+    if (!ref->weak || ref->referent == kNull || is_live(ref->referent)) continue;
+    ref->referent = kNull;
+    if (queue_f && queue_next_f && queue_f->slot < o->fields.size() && queue_next_f->slot < o->fields.size() &&
+        o->fields[queue_f->slot] != kNull && o->fields[queue_next_f->slot] == kNull) {
+      cleared_references_.push_back(Handle(i | (uint32_t(slots_[i].gen) << 24)));
     }
   }
   for (uint32_t i : dying) {
@@ -188,17 +187,64 @@ void Runtime::collect_garbage() {
     log::write(options_.verbose_gc ? log::Level::Info : log::Level::Debug, "gc", buf);
   }
   in_gc_ = false;
+}
 
-  for (Handle cl : pending_cleaners) {
-    try {
-      call_virtual(cl, "clean", "()V");
-    } catch (...) {}
+// Hands the references the collector cleared to libcore, like ART's
+// ReferenceProcessor::ClearedReferenceTask: linked into a circular list
+// through pendingNext and passed to ReferenceQueue.add, whose
+// ReferenceQueueDaemon enqueues them and runs the sun.misc.Cleaner thunks on
+// its own thread (ReferenceQueue.enqueuePending). Called at a safepoint, with
+// the GIL, never inside the collection. Without libcore (no
+// ReferenceQueue.add), references are never enqueued.
+void Runtime::deliver_cleared_references() {
+  if (delivering_references_ || cleared_references_.empty()) return;
+  const Class* queue_cls = loaded_class("Ljava/lang/ref/ReferenceQueue;");
+  const Class* ref_cls = loaded_class("Ljava/lang/ref/Reference;");
+  const Field* pending_f = ref_cls ? ref_cls->declared_field("pendingNext", "Ljava/lang/ref/Reference;") : nullptr;
+  if (!queue_cls || !pending_f || !queue_cls->declared_method("add", "(Ljava/lang/ref/Reference;)V")) {
+    cleared_references_.clear();
+    return;
   }
-  for (const auto& [q, ref] : pending_enqueues) {
-    try {
-      call_virtual(q, "enqueue", "(Ljava/lang/ref/Reference;)Z", {ref});
-    } catch (...) {}
+  delivering_references_ = true;
+  struct Done {
+    bool& flag;
+    ~Done() { flag = false; }
+  } done{delivering_references_};
+  try {
+    start_reference_daemon();  // may allocate and collect: the references are still roots
+    std::vector<Handle> list;
+    list.swap(cleared_references_);
+    for (size_t i = 0; i < list.size(); ++i) {
+      nonnull(list[i], "référence").fields.at(pending_f->slot) = list[(i + 1) % list.size()];
+    }
+    call_static("Ljava/lang/ref/ReferenceQueue;", "add", "(Ljava/lang/ref/Reference;)V", {list.front()});
+  } catch (const JavaThrow& t) {
+    log::warn("gc", "références non remises à la libcore : " + describe_throwable(t.exception));
   }
+}
+
+// ART starts all of libcore's daemons with Daemons.start() when the runtime
+// starts. AnyAndroid starts only the ReferenceQueueDaemon, on the first
+// delivery: it has no finalizers (FinalizerDaemon, FinalizerWatchdogDaemon)
+// nor heap tasks (HeapTaskDaemon). Daemons.start() creates zygoteStartLatch
+// before starting the threads, which count it down.
+void Runtime::start_reference_daemon() {
+  if (reference_daemon_started_) return;
+  reference_daemon_started_ = true;
+  Class* daemons = lookup_class("Ljava/lang/Daemons;");
+  Class* daemon_cls = lookup_class("Ljava/lang/Daemons$ReferenceQueueDaemon;");
+  Class* latch_cls = lookup_class("Ljava/util/concurrent/CountDownLatch;");
+  const Field* latch_f =
+      daemons ? daemons->declared_field("zygoteStartLatch", "Ljava/util/concurrent/CountDownLatch;") : nullptr;
+  const Field* instance_f =
+      daemon_cls ? daemon_cls->declared_field("INSTANCE", "Ljava/lang/Daemons$ReferenceQueueDaemon;") : nullptr;
+  if (!latch_cls || !latch_f || !instance_f) return;
+  ensure_initialized(daemons);
+  ensure_initialized(daemon_cls);
+  GlobalRef latch(*this, alloc(latch_cls));
+  call_virtual(latch.get(), "<init>", "(I)V", {1});
+  daemons->statics.at(latch_f->slot) = latch.get();
+  call_virtual(daemon_cls->statics.at(instance_f->slot), "start", "()V");
 }
 
 }  // namespace aa::rt
