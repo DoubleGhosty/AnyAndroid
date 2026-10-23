@@ -7,7 +7,7 @@
 Couche de compatibilité qui exécute des applications Android (bytecode DEX) **comme des processus
 Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 
-> **Avancement : ≈ 65 % vers « Android natif sur Windows »**
+> **Avancement : ≈ 48 % vers « Android natif sur Windows »**
 > 📊 Détail des jalons et carte complète dans [docs/STATUS.md](docs/STATUS.md) · [Données brutes](docs/progress.json).
 >
 > **Statut : prototype de recherche.** La preuve de concept de l'annexe A du cadrage fonctionne :
@@ -76,11 +76,11 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 | J3 — services système v1 | en cours (chaque appel manquant est tracé) |
 | J4 — `Application` et activité jusqu'à `onResume`, en direct | fait |
 | J5 — démarrage par les vrais gestionnaires d'`ActivityThread`, fenêtre logique | atteint : jusqu'à la première image publiée (test e2e `process-launch`) |
-| J6 — texte (FreeType + HarfBuzz, logique de minikin) | terminé : mesure (`Paint`), `MeasuredText`, coupure (`LineBreaker`), `TextRunShaper` et `PositionedGlyphs` |
-| J7 — moteur 2D logiciel (dessin des vues dans la `Surface`) | terminé : `SkiaCanvas` de HWUI sur Skia d'AOSP, effets `Paint`, rotations 3D RenderNode, drawGlyphs et AGSL (`RuntimeShader`/`RuntimeColorFilter`) |
-| J8 — fenêtre Win32 et entrées | atteint : fenêtre Win32 interactive, service `input`, `KeyCharacterMap`, `InputChannel`, `InputEventReceiver` et saisie souris/clavier |
-| J9 — navigation, cycle de vie complet et compositeur multi-surfaces | terminé : backstack d'activités, transitions AOSP ClientTransaction (Pause, Resume, Stop, Destroy), pile d'InputReceiver (restauration au dismiss), compositeur logiciel Skia multi-couches avec voile d'assombrissement (FLAG_DIM_BEHIND) |
-| J10 — application AOSP complète interactive | terminé : pipeline complet d'entrées tactiles et touches de navigation (Retour), routage LIFO des fenêtres et modales, simulation et tests d'interaction |
+| J6 — texte (FreeType + HarfBuzz, logique de minikin) | fait pour l'exemple : mesure (`Paint`), `MeasuredText`, coupure (`LineBreaker`), dessin ; `TextRunShaper` et `PositionedGlyphs` ajoutés, pas encore exercés par une vraie application |
+| J7 — moteur 2D logiciel (dessin des vues dans la `Surface`) | fait pour l'exemple (image vérifiée au pixel) : `SkiaCanvas` de HWUI sur le Skia d'AOSP, effets des `Paint` ; rotations 3D de `RenderNode`, `drawGlyphs` et AGSL ajoutés, pas encore exercés par une vraie application |
+| J8 — fenêtre Win32 et entrées | en cours : `exec --window` montre l'écran ; service `input`, `KeyCharacterMap`, `MotionEvent`, `InputChannel` et `InputEventReceiver` en place ; le clic dans la vraie application reste à démontrer par un test e2e |
+| J9 — navigation, cycle de vie complet, toasts et dialogues | en cours : pile d'activités, fenêtres secondaires et compositeur poussés le 17 octobre, non vérifiés sur le vrai framework (deux signatures corrigées depuis) |
+| J10 — une vraie application AOSP affichée et utilisable | à faire |
 
 ## Limites actuelles
 

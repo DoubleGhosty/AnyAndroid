@@ -73,7 +73,8 @@ def parse_milestones():
             "name": name_content,
             "description": status_clean,
             "progress": pct,
-            "weight": 10 if gid in ("G0", "G1", "G2") else (35 if gid == "G3" else (25 if gid == "G4" else 10)),
+            # Same weights as the "Total" row of STATUS.md.
+            "weight": {"G0": 5, "G1": 10, "G2": 10, "G3": 30, "G4": 25, "G5": 20}.get(gid, 0),
             "status": status_clean,
             "adr": adr_map.get(gid, "ADR-001"),
             "state": state

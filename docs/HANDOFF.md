@@ -2,7 +2,7 @@
 
 Ce document est le prompt complet à donner à un agent IA qui poursuit le développement
 **sans supervision**. Tout ce qui suit lui est adressé. Il est tenu à jour au fil des jalons
-(dernière mise à jour : 2026-10-17, jalon J8 atteint).
+(dernière mise à jour : 2026-10-23 ; lis aussi [CLAUDE.md](../CLAUDE.md) et le §13).
 
 ---
 
@@ -112,8 +112,9 @@ Architecture (ADR-001, ADR-003) :
 G4 code natif (chargeur ELF + bionic), G5 microG puis GApps. Le plan de G3 (ADR-006) : J0-J2
 outillage et chargeurs (faits), J3 services système v1 (en cours), J4 démarrage direct jusqu'à
 `onResume` (fait), J5 démarrage par les vrais gestionnaires d'`ActivityThread` (fait),
-J6 texte (fait), J7 rendu logiciel (fait), **J8 fenêtre Win32 et entrées (fait)**,
-J9-J10 navigation et une vraie application affichée.
+J6 texte et J7 rendu logiciel (faits pour l'application d'exemple), **J8 fenêtre Win32 et
+entrées (en cours : l'écran est dans la fenêtre, le clic réel reste à prouver)**, J9 navigation,
+toasts et dialogues (en cours, non vérifié), J10 une vraie application AOSP (à faire).
 
 ## 5. Mettre en place l'environnement
 
@@ -162,7 +163,9 @@ ninja -C build
 WINEDEBUG=-all ctest --test-dir build -j8 --output-on-failure
 WINEDEBUG=-all wine build/tests/aa_unit_tests.exe [filtre]   # tests unitaires seuls, filtre par nom
 ```
-État au 2026-10-16 : **36 suites, toutes vertes** (dont `e2e-launch`), **138 tests unitaires**.
+État au 2026-10-23 : **37 suites, toutes vertes sous wine** (dont `e2e-launch` et
+`e2e-process-launch`), **194 tests unitaires** ; la CI Windows (27 suites) échoue sur
+`gc_cleaners_and_reference_queue` (§13).
 Avec `-DAA_R8_JAR` le code d'hôte Java est construit et les suites `host-probe`,
 `host-services` et `launch` s'ajoutent (elles exigent aussi `AA_SYSTEM_IMAGE`).
 
@@ -212,9 +215,13 @@ Fait et vérifié (voir STATUS.md pour le détail) :
 - **G3/J7 (fait)** : moteur 2D logiciel avec `SkiaCanvas` HWUI sur Skia AOSP et dessin dans la surface.
   Rotations 3D de `RenderNode` avec projection de caméra `Sk3DView` (`rotateX`, `rotateY`, `rotateZ`),
   tracé direct de glyphes `BaseCanvas.nDrawGlyphs`, et AGSL complet (`RuntimeShader` et `RuntimeColorFilter`).
-- **G3/J8 (fait)** : affichage dans une fenêtre Win32 (`exec --window`), service `input`,
-  natives `KeyCharacterMap`, `KeyEvent`, `MotionEvent` (portage libinput 52 natives), `InputChannel`,
-  `InputEventReceiver` et boucle d'événements Win32 réveillant le Looper Android.
+- **G3/J8 (en cours)** : affichage dans une fenêtre Win32 (`exec --window`), service `input`,
+  natives `KeyCharacterMap`, `KeyEvent`, `MotionEvent` (portage libinput, 52 natives),
+  `InputChannel`, `InputEventReceiver` ; la saisie Win32 est branchée mais aucun test ne prouve
+  encore qu'un clic atteint `View.onClick` dans la vraie application.
+- **G3/J9 (en cours, non vérifié)** : pile d'activités (`ActivityTaskService`), fenêtres
+  secondaires (`WindowService`), compositeur de plusieurs surfaces, poussés le 17 octobre sans
+  exécution du vrai framework (signatures corrigées par `c1ebbc4`).
 - Natives graphiques fidèles à HWUI/Skia : `Paint`, `RenderNode` (magasins de propriétés),
   `Path` (modèle `SkPath`, `approximate`), `PathParser` (SVG, arcs en coniques), `Matrix`
   (`SkMatrix`), `Canvas` (Skia AOSP), `Region` (`SkRegion`),
@@ -236,15 +243,20 @@ Fait et vérifié (voir STATUS.md pour le détail) :
 
 ## 9. Prochaines étapes, dans l'ordre
 
-1. **J9-J10 : navigation et vraie application AOSP affichée** : navigation entre activités, cycle
-   de vie complet, compositeur minimal pour couches multiples (dialogues, menus) et démonstration
-   avec une application AOSP (comme `Music`). Les motifs de césure `.hyb` et le pilotage déterministe
-   des tests sont à concevoir sur l'horloge commune (`common/clock.h`).
-4. **G4 : code natif** : chargeur ELF et bionic. L'[évaluation d'ANDROWIN](evaluations/ANDROWIN.md)
+1. **J8 : prouver les entrées** : un test e2e où un clic dans la vraie application change le
+   libellé (« Clics : 2 », sondes de pixels) et où Retour termine l'activité ; routage des
+   événements par fenêtre comme InputDispatcher (cadre et drapeaux), pas « au dernier récepteur ».
+2. **J9 : toasts, dialogues, navigation**, vérifiés sur le vrai framework (service
+   `notification` et `ToastPresenter`, compositeur, pile d'activités).
+3. **Réparer la CI Windows** et vérifier les ajouts G2 du 17 octobre sur la vraie libcore.
+4. **J10** : une vraie application AOSP (comme `Music`) affichée et utilisable. Les motifs de
+   césure `.hyb` et le pilotage déterministe des tests sont à concevoir sur l'horloge commune
+   (`common/clock.h`).
+5. **G4 : code natif** : chargeur ELF et bionic. L'[évaluation d'ANDROWIN](evaluations/ANDROWIN.md)
    décrit ntdroid (ART réel dans un processus Windows par interception d'appels système) : c'est
    la référence pour un **processus hôte isolé** dédié au code natif ; l'option « ART réel à la
    place de notre interpréteur » est archivée.
-5. **G5 : microG** (démarrer GmsCore avec nos services : comptes, `GoogleApiAvailability`), puis
+6. **G5 : microG** (démarrer GmsCore avec nos services : comptes, `GoogleApiAvailability`), puis
    les GApps dans les limites du §2.1.
 
 ## 10. Savoir-faire technique
@@ -310,3 +322,43 @@ Fait et vérifié (voir STATUS.md pour le détail) :
 5. STATUS.md (et l'ADR concerné) mis à jour ; matrice d'API régénérée si besoin.
 6. Commit en français, rebase sur `origin/main`, push sur `main` et sur la branche de session,
    puis vérification de la CI Windows.
+
+## 13. Leçons des sessions précédentes (à ne pas reproduire)
+
+Le 17 octobre 2026, une session travaillant en parallèle a poussé J8 à J10 et la fin de G2
+(`ff677b9` à `2d97a20`) depuis un environnement **sans R8 ni entrées Android**. Ce qui s'est
+mal passé, pour que cela ne se reproduise pas (les règles correspondantes sont dans
+[CLAUDE.md](../CLAUDE.md)) :
+
+1. **Code Java jamais compilé.** Sans `-DAA_R8_JAR`, le DEX d'hôte n'est pas construit : les
+   modifications de `runtime/android-host` (`ActivityTaskService`, `WindowService`, stubs) ne
+   compilaient pas, et `main` était cassé pour toute configuration complète (réparé par
+   `c1ebbc4`). Une déclaration `ProfilerInfo` implémentait `Parcelable` avec un `CREATOR`
+   initialisé, ce que les règles de `stubs/` interdisent.
+2. **Signatures d'Android 17 non vérifiées.** `activityStopped` (qui prend un
+   `HandoffActivityData` de plus) et `IWindowSession.remove` (qui prend un `IBinder` et non un
+   `IWindow`) ne surchargeaient rien : le vrai framework ne les appelait jamais, et la fermeture
+   des dialogues comme le retour du focus de J9 ne pouvaient pas marcher. Deux méthodes publiques
+   d'un service ne surchargeaient rien non plus. `e2e-host-services` l'affichait (« orphelines »),
+   mais il n'avait pas été lancé.
+3. **Les e2e n'ont jamais tourné.** Les messages annoncent « 27/27 suites CTest » : c'est la
+   configuration de la CI, sans le vrai framework. La suite complète en compte 37.
+4. **Des jalons et des pourcentages sans preuve.** G3 est passé de 88 à 94 puis à 100 % en une
+   heure, le total de 51 à 65 %, et G2 à 100 %. « J10 : une application AOSP affichée » a été
+   déclaré atteint alors qu'aucune application AOSP n'a été lancée : le commit J10 ne contient
+   qu'un test unitaire.
+5. **Des tests qui simulent au lieu de prouver.**
+   `input_interactive_click_and_back_navigation_pipeline` pilote un `TestReceiver` smali : il
+   n'y a ni `View.onClick`, ni `Activity`, ni vrai retour arrière. Le clic dans la vraie
+   application n'avait jamais été essayé.
+6. **CI Windows ignorée.** Elle est rouge depuis le lot G2 (`gc_cleaners_and_reference_queue`
+   échoue sous Windows, pas sous wine) et personne ne l'a relue après le push.
+7. **Approximations à la place d'Android.** Focus et entrées donnés au dernier récepteur créé
+   (une fenêtre de toast volerait les clics) au lieu du routage d'InputDispatcher par cadre et
+   par drapeaux ; assombrissement `FLAG_DIM_BEHIND` fixé à 60 % au lieu de `dimAmount`.
+8. **Commits trop gros et mal formés.** `54d8b88` mélange pile d'activités, fenêtres, focus,
+   compositeur, documentation et chiffres d'avancement. Sept messages sont sans accents, l'un
+   commence par un BOM (`ff677b9`), et treize des quatorze n'ont pas les lignes d'attribution.
+9. **Pas de coordination.** La session a poussé sur la branche d'une autre session et a
+   réécrit en parallèle les mêmes sujets (entrées, compositeur), ce qui a obligé à arrêter et
+   relancer du travail.

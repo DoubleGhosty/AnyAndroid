@@ -35,27 +35,33 @@ remplace uniquement la frontière avec le noyau et le matériel.
 ![Carte Treemap d'avancement AnyAndroid](progress.svg)
 
 Les pourcentages sont des estimations de l'effort réalisé dans chaque étape. Ils ne comptent pas
-le nombre de fichiers.
+le nombre de fichiers, et ne montent qu'avec une preuve sur le vrai framework ou la vraie libcore
+(test e2e, exécution réelle) : un test unitaire qui simule le framework ne suffit pas.
+
+> **Correction du 23 octobre 2026.** Le 17 octobre, une session parallèle avait porté G2 et G3 à
+> 100 % et le total à 65 %, sans exécuter le vrai framework (configuration sans R8 ni image
+> système). Ces chiffres ont été ramenés à ce qui est vérifié. Le détail est dans
+> [HANDOFF.md §13](HANDOFF.md#13-leçons-des-sessions-précédentes-à-ne-pas-reproduire).
 
 | Étape | Contenu                                                    | Avancement | État |
 |-------|------------------------------------------------------------|-----------:|------|
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
-| G2    | Vraie libcore d'AOSP (Android 17)                           | 100 %      | Terminé : NIO.2 et `FileChannel` sur VFS, E/S scatter-gather, cycle de vie `Cleaner`/`PhantomReference`, dispatch `MethodHandle` polymorphique, annotations DEX complètes et réflexion générique, timezones et POSIX résiduels ([ADR-004](adr/ADR-004-libcore-aosp.md)) |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 100 %      | Terminé : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md), J0 à J10 terminés (J5 démarrage par les vrais gestionnaires, J6 texte complet FreeType/HarfBuzz, J7 moteur 2D logiciel Skia/AGSL, J8 fenêtre Win32 et entrées, J9 navigation, cycle de vie et compositeur multi-surfaces, J10 application AOSP et pipeline d'entrées interactives) |
-| G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | **En cours** / Prochaine priorité : architecture chargeur ELF x86_64, bionic isolée et JNI ([ADR-009](adr/ADR-009-couche-native-elf.md)) |
+| G2    | Vraie libcore d'AOSP (Android 17)                           | 92 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée ([ADR-004](adr/ADR-004-libcore-aosp.md)). Ajouts du 17 octobre (E/S scatter-gather, `Cleaner`/`ReferenceQueue`, `MethodHandle` polymorphique, annotations, fuseaux horaires) **en vérification** : jamais exercés par la vraie libcore, et la CI Windows échoue sur `gc_cleaners_and_reference_queue` |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 78 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md). J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel) ; J8 en cours (l'écran est dans une fenêtre Win32, le clic dans la vraie application reste à démontrer) ; J9 en cours (code poussé le 17 octobre, non vérifié sur le vrai framework) ; J10 à faire ; J3 en cours |
+| G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire : architecture proposée dans l'[ADR-009](adr/ADR-009-couche-native-elf.md) (chargeur ELF x86_64, bionic, JNI) |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
-| **Total** | **Android natif sur Windows**                          | **≈ 65 %** | Pondéré par l'effort : G3 et G4 sont les plus lourdes |
+| **Total** | **Android natif sur Windows**                          | **≈ 48 %** | Pondéré par l'effort : G0 5 %, G1 10 %, G2 10 %, G3 30 %, G4 25 %, G5 20 % |
 
 ```
 G0 ██████████ 100 %
 G1 ██████████ 100 %
-G2 ██████████ 100 %
-G3 ██████████ 100 %
+G2 █████████░  92 %
+G3 ████████░░  78 %
 G4 ░░░░░░░░░░   0 %
 G5 ░░░░░░░░░░   0 %
    ───────────────
-   ██████½░░░ ≈ 65 % vers « Android natif sur Windows »
+   █████░░░░░ ≈ 48 % vers « Android natif sur Windows »
 ```
 
 ## Ce qui marche aujourd'hui (vérifié par 37 suites de tests et 194 tests unitaires)
@@ -342,9 +348,12 @@ Le plan de G3 est fixé par [ADR-006](adr/ADR-006-demarrage-applications.md) : p
 `system_server`, des services système locaux en Java (javac + D8) appelés sans `Parcel`, et les
 vrais gestionnaires d'`ActivityThread`.
 
-1. **J0-J10 (G3 terminé)** : outillage Java/D8 et DEX d'hôte, `ServiceManager` local, vrais chargeurs de classes, services système, démarrage par `handleBindApplication` … `handleResumeActivity`, moteur de texte FreeType/HarfBuzz/minikin, rendu logiciel Skia/AGSL, fenêtre Win32 et entrées, navigation/backstack/compositeur multi-surfaces, et pipeline interactif tactile/clavier.
-2. **G4 (en cours / prochaine étape)** : chargeur ELF et bionic, pour les applications avec du code natif (`.so` x86_64).
-3. **G5** : microG (démarrage de GmsCore avec les mêmes services), puis les GApps.
+1. **J8 : les entrées dans la vraie application** : un clic dans la fenêtre doit atteindre `View.onClick` de l'exemple, et Retour doit terminer l'activité ; les deux seront prouvés par un test e2e (image et trace).
+2. **J9 : toasts, dialogues et navigation**, vérifiés sur le vrai framework : service `notification` et `ToastPresenter`, compositeur de plusieurs fenêtres, pile d'activités du code poussé le 17 octobre.
+3. **Vérifier les ajouts G2 du 17 octobre** sur la vraie libcore et réparer la CI Windows.
+4. **J10** : une vraie application AOSP affichée et utilisable.
+5. **G4** : chargeur ELF et bionic, pour les applications avec du code natif (`.so` x86_64), selon l'[ADR-009](adr/ADR-009-couche-native-elf.md).
+6. **G5** : microG (démarrage de GmsCore avec les mêmes services), puis les GApps.
 
 ## Règles que le projet s'impose
 
