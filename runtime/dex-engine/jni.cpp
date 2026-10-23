@@ -532,17 +532,17 @@ JNI_ABI jclass FindClass(JNIEnv* env, const char* name) {
 
 JNI_ABI jmethodID FromReflectedMethod(JNIEnv* env, jobject method) {
   return guarded(env, jmethodID(nullptr), [&](JniEnvImpl&, Runtime& rt) {
-    auto* p = rt.peer<MethodPeer>(H(method));
-    if (!p) rt.throw_new("Ljava/lang/IllegalArgumentException;", "objet Method attendu");
-    return reinterpret_cast<jmethodID>(p->method);
+    Method* m = rt.reflected_method(H(method));
+    if (!m) rt.throw_new("Ljava/lang/IllegalArgumentException;", "objet Method attendu");
+    return reinterpret_cast<jmethodID>(m);
   });
 }
 
 JNI_ABI jfieldID FromReflectedField(JNIEnv* env, jobject field) {
   return guarded(env, jfieldID(nullptr), [&](JniEnvImpl&, Runtime& rt) {
-    auto* p = rt.peer<FieldPeer>(H(field));
-    if (!p) rt.throw_new("Ljava/lang/IllegalArgumentException;", "objet Field attendu");
-    return reinterpret_cast<jfieldID>(p->field);
+    Field* f = rt.reflected_field(H(field));
+    if (!f) rt.throw_new("Ljava/lang/IllegalArgumentException;", "objet Field attendu");
+    return reinterpret_cast<jfieldID>(f);
   });
 }
 
@@ -550,11 +550,7 @@ JNI_ABI jobject ToReflectedMethod(JNIEnv* env, jclass, jmethodID mid, jboolean) 
   return guarded(env, jobject(nullptr), [&](JniEnvImpl& e, Runtime& rt) {
     Method* m = reinterpret_cast<Method*>(mid);
     if (!m) rt.throw_npe("jmethodID null");
-    Handle h = rt.alloc(rt.find_class(m->name == "<init>" ? "Ljava/lang/reflect/Constructor;" : "Ljava/lang/reflect/Method;"));
-    auto p = std::make_unique<MethodPeer>();
-    p->method = m;
-    rt.object(h)->peer = std::move(p);
-    return local(e, h);
+    return local(e, rt.reflect_method(m));
   });
 }
 
@@ -562,11 +558,7 @@ JNI_ABI jobject ToReflectedField(JNIEnv* env, jclass, jfieldID fid, jboolean) {
   return guarded(env, jobject(nullptr), [&](JniEnvImpl& e, Runtime& rt) {
     Field* f = reinterpret_cast<Field*>(fid);
     if (!f) rt.throw_npe("jfieldID null");
-    Handle h = rt.alloc(rt.find_class("Ljava/lang/reflect/Field;"));
-    auto p = std::make_unique<FieldPeer>();
-    p->field = f;
-    rt.object(h)->peer = std::move(p);
-    return local(e, h);
+    return local(e, rt.reflect_field(f));
   });
 }
 

@@ -40,6 +40,9 @@ namespace aa::rt {
 
 using Handle = uint32_t;
 constexpr Handle kNull = 0;
+// sun.misc.Unsafe offset of an instance field: an opaque cookie,
+// kFieldOffsetBase + 4 * slot (also java.lang.reflect.Field.offset).
+constexpr int64_t kFieldOffsetBase = 8;
 
 struct Class;
 struct Method;
@@ -220,6 +223,9 @@ struct Method {
   uint64_t profile_instructions = 0;
   // JNI implementation registered with RegisterNatives (System V ABI).
   void* jni_fn = nullptr;
+  // Method of a proxy class: the interface method it implements
+  // (ArtMethod::GetInterfaceMethodIfProxy).
+  Method* interface_method = nullptr;
   std::unique_ptr<MethodAnnotations> annotations_;
 
   bool is_static() const { return access & dex::kAccStatic; }
@@ -541,6 +547,16 @@ class Runtime {
   Field* field_from_cookie(uint64_t cookie);
   uint64_t method_cookie(Method* m);
   Method* method_from_cookie(uint64_t cookie);
+  // java.lang.reflect objects of a member, as ART's
+  // Executable::InitializeFromArtMethod and Field::CreateFromArtField make
+  // them: the member as a peer and, for libcore's classes, the fields their
+  // Java code reads (declaringClass, artMethod, accessFlags, dexMethodIndex;
+  // type, artFieldIndex, offset).
+  Handle reflect_method(Method* m);
+  Handle reflect_field(Field* f);
+  // The member of such an object; nullptr for any other object.
+  Method* reflected_method(Handle h);
+  Field* reflected_field(Handle h);
 
   // --- Threads and monitors ---------------------------------------------------
   VmThread* current_thread() const { return running_; }

@@ -1,6 +1,10 @@
 // java.lang.reflect and the reflective parts of java.lang.Class.
 
+#include <cstddef>
 #include <cstring>
+#include <map>
+#include <string>
+#include <vector>
 
 #include "common/text.h"
 #include "dex-engine/jlang.h"
@@ -30,30 +34,16 @@ rt::Class* class_arg(Runtime& rt, Handle mirror, const char* what) {
   return c;
 }
 
+// ART's class flag of proxy classes, which Class.isProxy() reads.
+constexpr uint32_t kAccClassIsProxy = 0x40000;
+
+bool is_proxy_class(const rt::Class* c) { return c && (c->access & kAccClassIsProxy); }
+
 rt::Method* method_of(Runtime& rt, Handle h) { return peer_or_throw<MethodPeer>(rt, h, "Method").method; }
 rt::Field* field_of(Runtime& rt, Handle h) { return peer_or_throw<FieldPeer>(rt, h, "Field").field; }
 
-Handle make_method_object(Runtime& rt, rt::Method* m) {
-  bool ctor = m->name == "<init>";
-  Handle h = rt.alloc(rt.find_class(ctor ? "Ljava/lang/reflect/Constructor;" : "Ljava/lang/reflect/Method;"));
-  auto p = std::make_unique<MethodPeer>();
-  p->method = m;
-  rt.object(h)->peer = std::move(p);
-  if (rt::Field* f = find_field(rt.object(h)->klass, "artMethod", "J")) {
-    uint64_t cookie = rt.method_cookie(m);
-    rt.object(h)->fields.at(f->slot) = uint32_t(cookie);
-    rt.object(h)->fields.at(f->slot + 1) = uint32_t(cookie >> 32);
-  }
-  return h;
-}
-
-Handle make_field_object(Runtime& rt, rt::Field* f) {
-  Handle h = rt.alloc(rt.find_class("Ljava/lang/reflect/Field;"));
-  auto p = std::make_unique<FieldPeer>();
-  p->field = f;
-  rt.object(h)->peer = std::move(p);
-  return h;
-}
+Handle make_method_object(Runtime& rt, rt::Method* m) { return rt.reflect_method(m); }
+Handle make_field_object(Runtime& rt, rt::Field* f) { return rt.reflect_field(f); }
 
 Handle object_array(Runtime& rt, const char* desc, const std::vector<Handle>& items) {
   Handle arr = rt.new_array(desc, int32_t(items.size()));
@@ -770,6 +760,10 @@ void register_class_reflection(rt::NativeRegistry& r) {
     }
     return kNull;
   });
+  // libcore's Class.isProxy() reads ART's accessFlags, which the bridge's Class has not.
+  c.method("isProxy", "()Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_bool(is_proxy_class(class_arg(rt, a.h(0), "Class")));
+  });
   c.method("getDeclaringClass", "()Ljava/lang/Class;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     const rt::ClassAnnotations& an = class_arg(rt, a.h(0), "Class")->annotations();
     if (an.anonymous || an.enclosing_class.empty()) return kNull;
@@ -1370,12 +1364,576 @@ void register_art_reflection_natives(rt::NativeRegistry& r) {
   });
 }
 
+// --- libcore's reflection classes ----------------------------------------------------------------
+//
+// With a boot class path (ADR-004), Method, Constructor, Field and
+// AccessibleObject are libcore's own classes: their Java code (names, equals,
+// hashCode, toString, generic signatures, annotation lookups) runs unchanged
+// and calls ART's natives, ported here from art/runtime/native/
+// java_lang_reflect_{Executable,Method,Constructor,Field}.cc and
+// art/runtime/reflection.cc (android-17.0.0_r1). Not applied: the access checks
+// of the calling class (VerifyAccess); the reflected member is always reachable.
+
+// ArtMethod::GetInterfaceMethodIfProxy.
+rt::Method* interface_method_if_proxy(rt::Method* m) { return m->interface_method ? m->interface_method : m; }
+
+rt::Method* executable_arg(Runtime& rt, Handle h) {
+  if (h == kNull) rt.throw_npe("Executable");
+  rt::Method* m = rt.reflected_method(h);
+  if (!m) rt.throw_new("Ljava/lang/InternalError;", "objet Executable sans méthode");
+  return m;
+}
+
+rt::Field* field_arg(Runtime& rt, Handle h) {
+  if (h == kNull) rt.throw_npe("Field");
+  rt::Field* f = rt.reflected_field(h);
+  if (!f) rt.throw_new("Ljava/lang/InternalError;", "objet Field sans champ");
+  return f;
+}
+
+// AccessibleObject.override (setAccessible(true)).
+bool is_accessible(Runtime& rt, Handle h) {
+  rt::Object& o = rt.nonnull(h, "AccessibleObject");
+  for (rt::Class* c = o.klass; c; c = c->super) {
+    if (rt::Field* f = c->declared_field("override", "Z"); f && !f->is_static()) return o.fields.at(f->slot) != 0;
+  }
+  return false;
+}
+
+// The Pretty* helpers of ART's messages.
+std::string pretty_descriptor(const std::string& d) { return text::descriptor_to_java(d); }
+
+std::string pretty_type_of(Runtime& rt, Handle h) {
+  return h == kNull ? "null" : pretty_descriptor(rt.class_of(h)->descriptor);
+}
+
+std::string pretty_method(const rt::Method* m, bool with_signature) {
+  std::vector<std::string> params;
+  std::string ret;
+  dex::split_signature(m->signature, params, ret);
+  std::string s = with_signature ? pretty_descriptor(ret) + " " : "";
+  s += pretty_descriptor(m->owner->descriptor) + "." + m->name;
+  if (with_signature) {
+    s += "(";
+    for (size_t i = 0; i < params.size(); ++i) s += (i ? ", " : "") + pretty_descriptor(params[i]);
+    s += ")";
+  }
+  return s;
+}
+
+std::string pretty_field(const rt::Field* f) {
+  return pretty_descriptor(f->type) + " " + pretty_descriptor(f->owner->descriptor) + "." + f->name;
+}
+
+std::string pretty_class(const rt::Class* c) { return "java.lang.Class<" + pretty_descriptor(c->descriptor) + ">"; }
+
+std::string pretty_java_access_flags(uint32_t flags) {
+  std::string s;
+  if (flags & dex::kAccPublic) s += "public ";
+  if (flags & dex::kAccProtected) s += "protected ";
+  if (flags & dex::kAccPrivate) s += "private ";
+  if (flags & dex::kAccFinal) s += "final ";
+  if (flags & dex::kAccStatic) s += "static ";
+  if (flags & dex::kAccAbstract) s += "abstract ";
+  if (flags & dex::kAccInterface) s += "interface ";
+  if (flags & dex::kAccTransient) s += "transient ";
+  if (flags & dex::kAccVolatile) s += "volatile ";
+  if (flags & dex::kAccSynchronized) s += "synchronized ";
+  return s;
+}
+
+[[noreturn]] void throw_iae(Runtime& rt, const std::string& msg) { rt.throw_new("Ljava/lang/IllegalArgumentException;", msg); }
+
+// VerifyObjectIsClass.
+void verify_object_is_class(Runtime& rt, Handle o, rt::Class* c) {
+  if (o == kNull) rt.throw_npe("null receiver");
+  if (!rt.instance_of(o, c)) {
+    throw_iae(rt, "Expected receiver of type " + pretty_descriptor(c->descriptor) + ", but got " + pretty_type_of(rt, o));
+  }
+}
+
+int64_t primitive_as_long(char t, uint64_t v) {
+  switch (t) {
+    case 'B': return int8_t(v);
+    case 'S': return int16_t(v);
+    case 'C': return uint16_t(v);
+    case 'Z': return v & 1;
+    case 'J': return int64_t(v);
+    default: return int32_t(v);
+  }
+}
+
+double primitive_as_double(char t, uint64_t v) {
+  if (t == 'F') {
+    uint32_t b = uint32_t(v);
+    float f;
+    std::memcpy(&f, &b, 4);
+    return f;
+  }
+  if (t == 'D') {
+    double d;
+    std::memcpy(&d, &v, 8);
+    return d;
+  }
+  return double(primitive_as_long(t, v));
+}
+
+// ConvertPrimitiveValue (reflection-inl.h): the identity or a widening
+// primitive conversion (JLS 5.1.2), the value in a register's representation.
+uint64_t convert_primitive_value(Runtime& rt, bool for_result, char src, char dst, uint64_t v) {
+  if (src == dst) return v;
+  bool ok = false;
+  switch (src) {
+    case 'B': ok = dst == 'S' || dst == 'I' || dst == 'J' || dst == 'F' || dst == 'D'; break;
+    case 'C':
+    case 'S': ok = dst == 'I' || dst == 'J' || dst == 'F' || dst == 'D'; break;
+    case 'I': ok = dst == 'J' || dst == 'F' || dst == 'D'; break;
+    case 'J': ok = dst == 'F' || dst == 'D'; break;
+    case 'F': ok = dst == 'D'; break;
+    default: break;
+  }
+  if (!ok) {
+    std::string from = pretty_descriptor(std::string(1, src)), to = pretty_descriptor(std::string(1, dst));
+    if (for_result) {
+      rt.throw_new("Ljava/lang/ClassCastException;", "Couldn't convert result of type " + from + " to " + to);
+    }
+    throw_iae(rt, "Invalid primitive conversion from " + from + " to " + to);
+  }
+  switch (dst) {
+    case 'F': return src == 'J' ? rt::ret_float(float(int64_t(v))) : rt::ret_float(float(primitive_as_double(src, v)));
+    case 'D': return src == 'J' ? rt::ret_double(double(int64_t(v))) : rt::ret_double(primitive_as_double(src, v));
+    case 'J': return uint64_t(primitive_as_long(src, v));
+    default: return uint32_t(int32_t(primitive_as_long(src, v)));
+  }
+}
+
+// UnboxPrimitive for a field (f) or a result (f null): the raw value of `o`
+// for the type `dst`.
+uint64_t unbox_primitive(Runtime& rt, Handle o, const std::string& dst, const rt::Field* f) {
+  std::string kind = f ? "field " + pretty_descriptor(f->owner->descriptor) + "." + f->name : "result";
+  if (dst[0] == 'L' || dst[0] == '[') {
+    if (o != kNull && !rt.instance_of(o, rt.find_class(dst))) {
+      if (f) throw_iae(rt, kind + " has type " + pretty_descriptor(dst) + ", got " + pretty_type_of(rt, o));
+      rt.throw_new("Ljava/lang/ClassCastException;",
+                   "Couldn't convert result of type " + pretty_type_of(rt, o) + " to " + pretty_descriptor(dst));
+    }
+    return o;
+  }
+  if (dst == "V") throw_iae(rt, "Can't unbox " + kind + " to void");
+  if (o == kNull) {
+    if (f) throw_iae(rt, kind + " has type " + pretty_descriptor(dst) + ", got null");
+    rt.throw_npe("Expected to unbox a '" + pretty_descriptor(dst) + "' primitive type but was returned null");
+  }
+  char from = 0;
+  uint64_t bits = 0;
+  if (!unbox(rt, o, from, bits)) throw_iae(rt, kind + " has type " + pretty_descriptor(dst) + ", got " + pretty_type_of(rt, o));
+  return convert_primitive_value(rt, !f, from, dst[0], bits);
+}
+
+// ArgArray::BuildArgArrayFromObjectArray: the receiver, then each argument
+// unboxed and widened to its parameter's type.
+std::vector<uint32_t> build_arg_array(Runtime& rt, rt::Method* m, Handle receiver, const std::vector<Handle>& args) {
+  std::vector<std::string> params = params_of(m);
+  std::vector<uint32_t> words;
+  if (receiver != kNull) words.push_back(receiver);
+  for (size_t i = 0; i < params.size(); ++i) {
+    const std::string& p = params[i];
+    Handle arg = args[i];
+    auto mismatch = [&](const std::string& expected) {
+      throw_iae(rt, "method " + pretty_method(m, false) + " argument " + std::to_string(i + 1) + " has type " + expected +
+                        ", got " + pretty_type_of(rt, arg));
+    };
+    if (p[0] == 'L' || p[0] == '[') {
+      if (arg != kNull && !rt.instance_of(arg, rt.find_class(p))) mismatch(pretty_descriptor(p));
+      words.push_back(arg);
+      continue;
+    }
+    if (arg == kNull) mismatch(pretty_descriptor(p));
+    char from = 0;
+    uint64_t bits = 0;
+    // The boxes each parameter type accepts (DO_FIRST_ARG / DO_ARG).
+    static const std::pair<char, const char*> accepted[] = {
+        {'Z', "Z"}, {'B', "B"}, {'C', "C"}, {'S', "SB"}, {'I', "ICSB"}, {'J', "JICSB"}, {'F', "FJICSB"}, {'D', "DFJICSB"}};
+    const char* ok = "";
+    for (const auto& [t, list] : accepted) {
+      if (t == p[0]) ok = list;
+    }
+    if (!unbox(rt, arg, from, bits) || !std::strchr(ok, from)) mismatch(pretty_descriptor(p));
+    uint64_t v = convert_primitive_value(rt, false, from, p[0], bits);
+    words.push_back(uint32_t(v));
+    if (p == "J" || p == "D") words.push_back(uint32_t(v >> 32));
+  }
+  return words;
+}
+
+// CheckArgsForInvokeMethod.
+std::vector<Handle> checked_args(Runtime& rt, rt::Method* np, Handle args_array) {
+  std::vector<Handle> args = array_items(rt, args_array);
+  size_t expected = params_of(np).size();
+  if (args.size() != expected) {
+    throw_iae(rt, "Wrong number of arguments; expected " + std::to_string(expected) + ", got " + std::to_string(args.size()));
+  }
+  return args;
+}
+
+// WellKnownClasses::StringInitToStringFactory: the StringFactory method taking
+// the parameters of a String constructor.
+rt::Method* string_factory_for(Runtime& rt, const rt::Method* ctor) {
+  rt::Class* factory = rt.find_class("Ljava/lang/StringFactory;");
+  rt.ensure_initialized(factory);
+  std::string want = ctor->signature.substr(0, ctor->signature.find(')') + 1) + "Ljava/lang/String;";
+  for (const auto& fm : factory->methods) {
+    if (fm->is_static() && fm->signature == want && text::starts_with(fm->name, "new")) return fm.get();
+  }
+  rt.throw_unsupported(ctor->pretty(), "aucune méthode StringFactory équivalente");
+}
+
+// InvokeMethod (reflection.cc), behind Method.invoke.
+uint64_t invoke_method(Runtime& rt, Handle method_obj, Handle receiver, Handle args_array) {
+  rt::Method* m = executable_arg(rt, method_obj);
+  rt::Class* declaring = m->owner;
+  rt.ensure_initialized(declaring);
+  if (m->is_static()) {
+    receiver = kNull;
+  } else {
+    verify_object_is_class(rt, receiver, declaring);
+    // FindVirtualMethodForVirtualOrInterface: direct methods are themselves.
+    if (!(m->access & dex::kAccPrivate) && m->name != "<init>") {
+      if (rt::Method* v = rt.resolve_virtual(rt.class_of(receiver), m->name, m->signature)) m = v;
+    }
+  }
+  rt::Method* np = interface_method_if_proxy(m);
+  std::vector<Handle> args = checked_args(rt, np, args_array);
+  std::vector<uint32_t> words = build_arg_array(rt, np, receiver, args);
+  uint64_t result = invoke_wrapped(rt, m, words);
+  return box_result(rt, np->return_type(), result);
+}
+
+// annotations::GetExceptionTypesForMethod: the Throws annotation's classes,
+// an empty array without it.
+Handle exception_types(Runtime& rt, rt::Method* m) {
+  std::vector<Handle> objs;
+  for (const std::string& d : m->annotations().throws_classes) objs.push_back(rt.class_mirror(rt.find_class(d)));
+  return object_array(rt, "[Ljava/lang/Class;", objs);
+}
+
+const rt::EncodedAnnotation* runtime_annotation(const std::unordered_map<std::string, rt::EncodedAnnotation>& map,
+                                                const rt::Class* anno_cls) {
+  auto it = map.find(anno_cls->descriptor);
+  return it != map.end() && it->second.visibility == 1 ? &it->second : nullptr;
+}
+
+// Field values (GetFieldValue / SetFieldValue): the storage of the field for
+// `receiver`, after CheckReceiver (the class of a static field initialized).
+uint32_t* checked_field_storage(Runtime& rt, rt::Field* f, Handle receiver) {
+  if (f->is_static()) {
+    rt.ensure_initialized(f->owner);
+    return &f->owner->statics.at(f->slot);
+  }
+  verify_object_is_class(rt, receiver, f->owner);
+  return &rt.object(receiver)->fields.at(f->slot);
+}
+
+uint64_t read_storage(const rt::Field* f, const uint32_t* s) {
+  uint64_t raw = f->wide() ? uint64_t(s[0]) | (uint64_t(s[1]) << 32) : s[0];
+  return f->is_reference() ? raw : (f->wide() ? raw : uint32_t(int32_t(primitive_as_long(f->type[0], raw))));
+}
+
+void write_storage(const rt::Field* f, uint32_t* s, uint64_t v) {
+  s[0] = uint32_t(v);
+  if (f->wide()) s[1] = uint32_t(v >> 32);
+}
+
+int32_t app_target_sdk(Runtime& rt) {
+  Handle vm = Handle(rt.call_static("Ldalvik/system/VMRuntime;", "getRuntime", "()Ldalvik/system/VMRuntime;"));
+  return vm == kNull ? 10000 : int32_t(rt.call_virtual(vm, "getTargetSdkVersion", "()I"));
+}
+
+// Android 16 (Baklava): SdkVersion::kB.
+constexpr int32_t kSdkBaklava = 36;
+
+// ArtField::IsWriteProtected.
+bool is_write_protected(const rt::Field* f) {
+  const std::string& d = f->owner->descriptor;
+  if (d == "Ljava/lang/System;" && f->type == "Ljava/io/PrintStream;" && (f->name == "out" || f->name == "err")) return true;
+  if (d == "Ljava/lang/System;" && f->type == "Ljava/io/InputStream;" && f->name == "in") return true;
+  constexpr uint32_t kStaticFinal = dex::kAccStatic | dex::kAccFinal;
+  return (f->access & kStaticFinal) == kStaticFinal && f->owner->boot &&
+         (d == "Landroid/os/Build;" || d == "Landroid/os/Build$VERSION;");
+}
+
+// ArtField::IsUnmodifiable (kAccMonotonic is never set here). The platform
+// is Android 17, past Baklava.
+bool is_unmodifiable(Runtime& rt, const rt::Field* f) {
+  if (!(f->access & dex::kAccFinal) || is_write_protected(f)) return false;
+  if (app_target_sdk(rt) <= kSdkBaklava) return false;
+  return f->is_static();  // includes the MethodHandle, VarHandle, *FieldUpdater and Unsafe types
+}
+
+// ThrowIAEIfFieldIsNotOverwritable.
+void check_overwritable(Runtime& rt, const rt::Field* f) {
+  if (is_write_protected(f) ? app_target_sdk(rt) <= kSdkBaklava : !is_unmodifiable(rt, f)) return;
+  rt.throw_new("Ljava/lang/IllegalAccessException;", "Cannot set " + pretty_java_access_flags(f->access) + " field " +
+                                                          pretty_field(f) + " of class " + pretty_class(f->owner));
+}
+
+// VerifyFieldAccess<true>: without setAccessible(true), a final field is read-only.
+void check_set_access(Runtime& rt, Handle field_obj, const rt::Field* f) {
+  if (is_accessible(rt, field_obj) || !(f->access & dex::kAccFinal)) return;
+  rt.throw_new("Ljava/lang/IllegalAccessException;", "Cannot set " + pretty_java_access_flags(f->access) + " field " +
+                                                          pretty_field(f) + " of class " + pretty_class(f->owner));
+}
+
+void register_libcore_members(rt::NativeRegistry& r) {
+  const char* ex = "Ljava/lang/reflect/Executable;";
+  r.bind(ex, "getAnnotationNative", "(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Method* m = executable_arg(rt, a.h(0));
+    if (m->interface_method) return kNull;
+    rt::Class* anno = class_arg(rt, a.h(1), "annotationType");
+    const rt::EncodedAnnotation* ea = runtime_annotation(m->annotations().annotations, anno);
+    return ea ? create_annotation_instance(rt, anno, *ea) : kNull;
+  });
+  r.bind(ex, "getDeclaredAnnotationsNative", "()[Ljava/lang/annotation/Annotation;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Method* m = executable_arg(rt, a.h(0));
+    if (is_proxy_class(m->owner)) return rt.new_array("[Ljava/lang/annotation/Annotation;", 0);
+    return get_declared_annotations(rt, m->annotations().annotations);
+  });
+  r.bind(ex, "getParameterAnnotationsNative", "()[[Ljava/lang/annotation/Annotation;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Method* m = executable_arg(rt, a.h(0));
+    if (m->interface_method) return kNull;
+    const auto& lists = m->annotations().parameter_annotations;
+    if (lists.empty()) return kNull;
+    // Constructors with implicit parameters (inner classes) get empty sets in
+    // front, unless the class is local, anonymous or an enum.
+    const size_t n = lists.size(), params = params_of(m).size();
+    const bool resize = m->name == "<init>" && n != params && !m->owner->annotations().enclosing_method &&
+                        !(m->owner->access & dex::kAccEnum);
+    const size_t total = resize ? params : n;
+    const char* desc = "[[Ljava/lang/annotation/Annotation;";
+    Handle outer = rt.new_array(desc, int32_t(total));
+    rt::GlobalRef keep(rt, outer);
+    for (size_t i = 0; i < total; ++i) {
+      std::ptrdiff_t src = std::ptrdiff_t(i) - (std::ptrdiff_t(total) - std::ptrdiff_t(n));
+      Handle set = src >= 0 ? get_declared_annotations(rt, lists[size_t(src)])
+                            : rt.new_array("[Ljava/lang/annotation/Annotation;", 0);
+      std::memcpy(&rt.array(outer, desc).data[i * 4], &set, 4);
+    }
+    return outer;
+  });
+  r.bind(ex, "getParameters0", "()[Ljava/lang/reflect/Parameter;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Method* m = executable_arg(rt, a.h(0));
+    if (is_proxy_class(m->owner)) return kNull;
+    // The MethodParameters system annotation (javac -parameters).
+    const auto& map = m->annotations().annotations;
+    auto it = map.find("Ldalvik/annotation/MethodParameters;");
+    if (it == map.end()) return kNull;
+    const rt::EncodedAnnotation& ea = it->second;
+    auto names = ea.elements.find("names");
+    auto flags = ea.elements.find("accessFlags");
+    if (names == ea.elements.end() || flags == ea.elements.end()) {
+      throw_iae(rt, "Missing parameter metadata for names or access flags for " + pretty_method(m, true));
+    }
+    size_t count = names->second.array.size();
+    if (count != flags->second.array.size()) {
+      throw_iae(rt, "Inconsistent parameter metadata for " + pretty_method(m, true) + ". names length: " +
+                        std::to_string(count) + ", access flags length: " + std::to_string(flags->second.array.size()));
+    }
+    rt::Class* parameter = rt.find_class("Ljava/lang/reflect/Parameter;");
+    rt::Method* init = parameter->declared_method("<init>", "(Ljava/lang/String;ILjava/lang/reflect/Executable;I)V");
+    if (!init) rt.throw_new("Ljava/lang/InternalError;", "Parameter.<init> absent");
+    const char* desc = "[Ljava/lang/reflect/Parameter;";
+    Handle out = rt.new_array(desc, int32_t(count));
+    rt::GlobalRef keep(rt, out);
+    for (size_t i = 0; i < count; ++i) {
+      const dex::EncodedValue& n = names->second.array[i];
+      Handle name = n.type == dex::EncodedValue::kString && ea.dex && n.bits < ea.dex->num_strings()
+                        ? rt.new_string_utf8(ea.dex->string(uint32_t(n.bits)))
+                        : kNull;
+      Handle p = rt.alloc(parameter);
+      uint32_t args[5] = {p, name, uint32_t(flags->second.array[i].bits), a.h(0), uint32_t(i)};
+      rt.invoke(init, args, 5);
+      std::memcpy(&rt.array(out, desc).data[i * 4], &p, 4);
+    }
+    return out;
+  });
+  r.bind(ex, "getSignatureAnnotation", "()[Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Method* m = executable_arg(rt, a.h(0));
+    if (is_proxy_class(m->owner)) return kNull;
+    return get_signature_annotation_array(rt, m->annotations().signature);
+  });
+  r.bind(ex, "isAnnotationPresentNative", "(Ljava/lang/Class;)Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Method* m = executable_arg(rt, a.h(0));
+    if (is_proxy_class(m->owner)) return rt::ret_bool(false);
+    return rt::ret_bool(runtime_annotation(m->annotations().annotations, class_arg(rt, a.h(1), "annotationType")));
+  });
+  r.bind(ex, "compareMethodParametersInternal", "(Ljava/lang/reflect/Method;)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::vector<std::string> mine = params_of(interface_method_if_proxy(executable_arg(rt, a.h(0))));
+    std::vector<std::string> other = params_of(interface_method_if_proxy(executable_arg(rt, a.h(1))));
+    if (mine.size() != other.size()) return rt::ret_int(int32_t(mine.size()) - int32_t(other.size()));
+    for (size_t i = 0; i < mine.size(); ++i) {
+      int cmp = mine[i].compare(other[i]);
+      if (cmp != 0) return rt::ret_int(cmp < 0 ? -1 : 1);
+    }
+    return rt::ret_int(0);
+  });
+  r.bind(ex, "getMethodNameInternal", "()Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt.intern(text::utf8_to_utf16(interface_method_if_proxy(executable_arg(rt, a.h(0)))->name));
+  });
+  r.bind(ex, "getMethodReturnTypeInternal", "()Ljava/lang/Class;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return class_of_descriptor(rt, return_of(interface_method_if_proxy(executable_arg(rt, a.h(0)))));
+  });
+  r.bind(ex, "getParameterTypesInternal", "()[Ljava/lang/Class;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::vector<std::string> params = params_of(interface_method_if_proxy(executable_arg(rt, a.h(0))));
+    if (params.empty()) return kNull;  // no type list
+    std::vector<Handle> objs;
+    for (const auto& p : params) objs.push_back(class_of_descriptor(rt, p));
+    return object_array(rt, "[Ljava/lang/Class;", objs);
+  });
+  r.bind(ex, "getParameterCountInternal", "()I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_int(int32_t(params_of(interface_method_if_proxy(executable_arg(rt, a.h(0)))).size()));
+  });
+
+  const char* method = "Ljava/lang/reflect/Method;";
+  r.bind(method, "getDefaultValue", "()Ljava/lang/Object;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Method* m = executable_arg(rt, a.h(0));
+    if (!(m->owner->access & dex::kAccAnnotation)) return kNull;
+    // The AnnotationDefault system annotation of the annotation type: an
+    // annotation of that type holding the default of each element.
+    const auto& map = m->owner->annotations().annotations;
+    auto it = map.find("Ldalvik/annotation/AnnotationDefault;");
+    if (it == map.end()) return kNull;
+    auto value = it->second.elements.find("value");
+    if (value == it->second.elements.end() || value->second.type != dex::EncodedValue::kAnnotation) return kNull;
+    const dex::EncodedValue& defaults = value->second;
+    for (size_t i = 0; i < defaults.names.size(); ++i) {
+      if (defaults.names[i] >= it->second.dex->num_strings() || it->second.dex->string(defaults.names[i]) != m->name) continue;
+      uint64_t raw = convert_encoded_value(rt, defaults.array[i], it->second.dex, m->signature);
+      return box_result(rt, m->return_type(), raw);
+    }
+    return kNull;
+  });
+  r.bind(method, "getExceptionTypes", "()[Ljava/lang/Class;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return exception_types(rt, interface_method_if_proxy(executable_arg(rt, a.h(0))));
+  });
+  r.bind(method, "invoke", "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return invoke_method(rt, a.h(0), a.h(1), a.h(2));
+  }, S::kPartial, "contrôle d'accès de l'appelant non appliqué");
+
+  const char* ctor = "Ljava/lang/reflect/Constructor;";
+  r.bind(ctor, "getExceptionTypes", "()[Ljava/lang/Class;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return exception_types(rt, interface_method_if_proxy(executable_arg(rt, a.h(0))));
+  });
+  r.bind(ctor, "newInstance0", "([Ljava/lang/Object;)Ljava/lang/Object;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Method* m = executable_arg(rt, a.h(0));
+    rt::Class* c = m->owner;
+    if (c->is_abstract()) {
+      rt.throw_new("Ljava/lang/InstantiationException;", std::string("Can't instantiate ") +
+                                                             (c->is_interface() ? "interface " : "abstract class ") +
+                                                             pretty_descriptor(c->descriptor));
+    }
+    rt.ensure_initialized(c);
+    std::vector<Handle> args = checked_args(rt, m, a.h(1));
+    if (c->descriptor == "Ljava/lang/String;") {
+      rt::Method* factory = string_factory_for(rt, m);
+      std::vector<uint32_t> words = build_arg_array(rt, m, kNull, args);
+      return invoke_wrapped(rt, factory, words);
+    }
+    Handle receiver = rt.alloc(c);
+    std::vector<uint32_t> words = build_arg_array(rt, m, receiver, args);
+    invoke_wrapped(rt, m, words);
+    return receiver;
+  }, S::kPartial, "contrôle d'accès de l'appelant non appliqué");
+  r.bind(ctor, "newInstanceFromSerialization", "(Ljava/lang/Class;Ljava/lang/Class;)Ljava/lang/Object;",
+         [](Runtime& rt, NativeArgs& a) -> uint64_t {
+           rt::Class* ctor_class = class_arg(rt, a.h(0), "ctorClass");
+           rt::Class* alloc_class = class_arg(rt, a.h(1), "allocClass");
+           rt::Method* init = ctor_class->declared_method("<init>", "()V");
+           if (!init) rt.throw_new("Ljava/lang/NoSuchMethodError;", "<init>");
+           rt.ensure_initialized(alloc_class);
+           Handle obj = rt.alloc(alloc_class);
+           uint32_t self = obj;
+           rt.invoke(init, &self, 1);
+           return obj;
+         });
+
+  const char* field = "Ljava/lang/reflect/Field;";
+  r.bind(field, "getAnnotationNative", "(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Field* f = field_arg(rt, a.h(0));
+    if (is_proxy_class(f->owner)) return kNull;
+    rt::Class* anno = class_arg(rt, a.h(1), "annotationType");
+    const rt::EncodedAnnotation* ea = runtime_annotation(f->annotations().annotations, anno);
+    return ea ? create_annotation_instance(rt, anno, *ea) : kNull;
+  });
+  r.bind(field, "isAnnotationPresentNative", "(Ljava/lang/Class;)Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Field* f = field_arg(rt, a.h(0));
+    if (is_proxy_class(f->owner)) return rt::ret_bool(false);
+    return rt::ret_bool(runtime_annotation(f->annotations().annotations, class_arg(rt, a.h(1), "annotationType")));
+  });
+  r.bind(field, "getDeclaredAnnotations", "()[Ljava/lang/annotation/Annotation;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Field* f = field_arg(rt, a.h(0));
+    if (is_proxy_class(f->owner)) return rt.new_array("[Ljava/lang/annotation/Annotation;", 0);
+    return get_declared_annotations(rt, f->annotations().annotations);
+  });
+  r.bind(field, "getSignatureAnnotation", "()[Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Field* f = field_arg(rt, a.h(0));
+    if (is_proxy_class(f->owner)) return kNull;
+    return get_signature_annotation_array(rt, f->annotations().signature);
+  });
+  r.bind(field, "getNameInternal", "()Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt.intern(text::utf8_to_utf16(field_arg(rt, a.h(0))->name));
+  });
+  r.bind(field, "getArtField", "()J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt.field_cookie(field_arg(rt, a.h(0)));
+  }, S::kPartial, "identifiant opaque (cookie), pas une adresse");
+  r.bind(field, "isUnmodifiable0", "()Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_bool(is_unmodifiable(rt, field_arg(rt, a.h(0))));
+  });
+  r.bind(field, "get", "(Ljava/lang/Object;)Ljava/lang/Object;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Field* f = field_arg(rt, a.h(0));
+    uint64_t v = read_storage(f, checked_field_storage(rt, f, a.h(1)));
+    return f->is_reference() ? v : box_result(rt, f->type[0], v);
+  });
+  for (char t : std::string("ZBCSIJFD")) {
+    static const std::map<char, std::string> names = {{'Z', "Boolean"}, {'B', "Byte"},  {'C', "Char"},  {'S', "Short"},
+                                                      {'I', "Int"},     {'J', "Long"},  {'F', "Float"}, {'D', "Double"}};
+    std::string type(1, t);
+    r.bind(field, "get" + names.at(t), "(Ljava/lang/Object;)" + type, [t](Runtime& rt, NativeArgs& a) -> uint64_t {
+      rt::Field* f = field_arg(rt, a.h(0));
+      uint64_t v = read_storage(f, checked_field_storage(rt, f, a.h(1)));
+      if (f->is_reference()) throw_iae(rt, "Not a primitive field: " + pretty_field(f));
+      return convert_primitive_value(rt, false, f->type[0], t, v);
+    });
+    r.bind(field, "set" + names.at(t), "(Ljava/lang/Object;" + type + ")V", [t](Runtime& rt, NativeArgs& a) -> uint64_t {
+      rt::Field* f = field_arg(rt, a.h(0));
+      uint32_t* s = checked_field_storage(rt, f, a.h(1));
+      check_overwritable(rt, f);
+      if (f->is_reference()) throw_iae(rt, "Not a primitive field: " + pretty_field(f));
+      uint64_t in = (t == 'J' || t == 'D') ? a.i64(2) : a.raw(2);
+      uint64_t v = convert_primitive_value(rt, false, t, f->type[0], in);
+      check_set_access(rt, a.h(0), f);
+      write_storage(f, s, v);
+      return 0;
+    });
+  }
+  r.bind(field, "set", "(Ljava/lang/Object;Ljava/lang/Object;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Field* f = field_arg(rt, a.h(0));
+    uint32_t* s = checked_field_storage(rt, f, a.h(1));
+    check_overwritable(rt, f);
+    uint64_t v = unbox_primitive(rt, a.h(2), f->type, f);
+    check_set_access(rt, a.h(0), f);
+    if (!f->is_static()) s = &rt.object(a.h(1))->fields.at(f->slot);  // unboxing may have run Java code
+    write_storage(f, s, v);
+    return 0;
+  });
+}
+
 }  // namespace
 
 void register_java_reflect(rt::NativeRegistry& r, Host&) {
   register_members(r);
   register_class_reflection(r);
   register_art_reflection_natives(r);
+  register_libcore_members(r);
   // Class objects for primitive types (int.class compiles to Integer.TYPE).
   for (auto [cls, prim] : {std::pair{"Ljava/lang/Integer;", "I"}, std::pair{"Ljava/lang/Long;", "J"},
                            std::pair{"Ljava/lang/Short;", "S"}, std::pair{"Ljava/lang/Byte;", "B"},

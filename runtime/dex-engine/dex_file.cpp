@@ -94,13 +94,14 @@ void read_encoded_value(ByteReader& r, EncodedValue& out, int depth) {
       break;
     case EncodedValue::kAnnotation: {
       if (depth > kMaxEncodedDepth) throw_format("annotation trop imbriquée");
-      r.uleb128();  // type_idx
+      out.bits = r.uleb128();  // type_idx
       uint32_t size = r.uleb128();
       if (size > r.remaining()) throw_format("annotation encodée invalide");
+      out.names.resize(size);
+      out.array.resize(size);
       for (uint32_t i = 0; i < size; ++i) {
-        r.uleb128();  // name_idx
-        EncodedValue ignored;
-        read_encoded_value(r, ignored, depth + 1);
+        out.names[i] = r.uleb128();
+        read_encoded_value(r, out.array[i], depth + 1);
       }
       break;
     }

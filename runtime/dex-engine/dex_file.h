@@ -148,13 +148,16 @@ struct EncodedValue {
   };
   uint8_t type = kNull;
   // Integers are sign/zero-extended, floats hold raw IEEE bits, references
-  // hold their index.
+  // hold their index; an annotation holds its type index.
   uint64_t bits = 0;
+  // Elements of an array; values of the elements of an annotation, named by
+  // the string indices of `names`.
   std::vector<EncodedValue> array;
+  std::vector<uint32_t> names;
 };
 
 // An annotation_item: visibility (0 build, 1 runtime, 2 system), type and
-// elements (name string index, value). Nested annotation values are skipped.
+// elements (name string index, value).
 struct Annotation {
   uint8_t visibility = 0;
   uint32_t type_idx = 0;

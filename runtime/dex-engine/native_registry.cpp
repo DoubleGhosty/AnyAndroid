@@ -113,10 +113,6 @@ bool is_vm_core_class(std::string_view d) {
       "Ljava/lang/ref/Reference;",
       "Ljava/lang/ref/WeakReference;",
       "Ljava/lang/ref/SoftReference;",
-      "Ljava/lang/reflect/AccessibleObject;",
-      "Ljava/lang/reflect/Method;",
-      "Ljava/lang/reflect/Constructor;",
-      "Ljava/lang/reflect/Field;",
       "Ljava/lang/reflect/Array;",
       "Ljava/lang/reflect/InvocationTargetException;",
   };

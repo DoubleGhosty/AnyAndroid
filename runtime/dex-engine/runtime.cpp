@@ -1223,6 +1223,86 @@ Method* Runtime::method_from_cookie(uint64_t cookie) {
   return method_cookies_[cookie - 1];
 }
 
+namespace {
+// An instance field of `cls` or of a superclass, for the fields of libcore's
+// reflection classes (absent from the bridge's own classes).
+Field* instance_field(Class* cls, std::string_view name, std::string_view type) {
+  for (Class* c = cls; c; c = c->super) {
+    Field* f = c->declared_field(name, type);
+    if (f && !f->is_static()) return f;
+  }
+  return nullptr;
+}
+
+void put_word(Object* o, Field* f, uint32_t v) {
+  if (f) o->fields.at(f->slot) = v;
+}
+
+void put_wide(Object* o, Field* f, uint64_t v) {
+  if (!f) return;
+  o->fields.at(f->slot) = uint32_t(v);
+  o->fields.at(f->slot + 1) = uint32_t(v >> 32);
+}
+}  // namespace
+
+Handle Runtime::reflect_method(Method* m) {
+  Class* cls = find_class(m->name == "<init>" ? "Ljava/lang/reflect/Constructor;" : "Ljava/lang/reflect/Method;");
+  Handle h = alloc(cls);
+  auto p = std::make_unique<MethodPeer>();
+  p->method = m;
+  Object* o = object(h);
+  o->peer = std::move(p);
+  put_wide(o, instance_field(cls, "artMethod", "J"), method_cookie(m));
+  put_word(o, instance_field(cls, "accessFlags", "I"), m->access);
+  Method* overridden = m->interface_method ? m->interface_method : m;
+  put_word(o, instance_field(cls, "dexMethodIndex", "I"), overridden->method_idx);
+  Handle owner = class_mirror(m->owner);
+  Handle overridden_owner = class_mirror(overridden->owner);
+  o = object(h);
+  put_word(o, instance_field(cls, "declaringClass", "Ljava/lang/Class;"), owner);
+  put_word(o, instance_field(cls, "declaringClassOfOverriddenMethod", "Ljava/lang/Class;"), overridden_owner);
+  return h;
+}
+
+Handle Runtime::reflect_field(Field* f) {
+  Class* cls = find_class("Ljava/lang/reflect/Field;");
+  Handle h = alloc(cls);
+  auto p = std::make_unique<FieldPeer>();
+  p->field = f;
+  object(h)->peer = std::move(p);
+  // The type is resolved first, as by ART; a type that does not resolve
+  // leaves it null (force_resolve false).
+  Handle type = kNull;
+  if (Field* tf = instance_field(cls, "type", "Ljava/lang/Class;")) {
+    Class* t = nullptr;
+    try {
+      t = find_class(f->type);
+    } catch (const JavaThrow&) {
+    }
+    type = t ? class_mirror(t) : kNull;
+    object(h)->fields.at(tf->slot) = type;
+  }
+  Object* o = object(h);
+  put_word(o, instance_field(cls, "declaringClass", "Ljava/lang/Class;"), class_mirror(f->owner));
+  o = object(h);
+  put_word(o, instance_field(cls, "accessFlags", "I"), f->access);
+  uint32_t index = 0;
+  while (index < f->owner->fields.size() && f->owner->fields[index].get() != f) ++index;
+  put_word(o, instance_field(cls, "artFieldIndex", "I"), index);
+  put_word(o, instance_field(cls, "offset", "I"), uint32_t(kFieldOffsetBase + 4 * int64_t(f->slot)));
+  return h;
+}
+
+Method* Runtime::reflected_method(Handle h) {
+  auto* p = peer<MethodPeer>(h);
+  return p ? p->method : nullptr;
+}
+
+Field* Runtime::reflected_field(Handle h) {
+  auto* p = peer<FieldPeer>(h);
+  return p ? p->field : nullptr;
+}
+
 Method* Runtime::resolve_virtual(Class* cls, std::string_view name, std::string_view sig) {
   std::string key = std::string(name) + std::string(sig);
   auto it = cls->vcache.find(key);

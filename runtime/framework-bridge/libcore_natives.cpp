@@ -982,7 +982,7 @@ void register_os(rt::NativeRegistry& r) {
 // never write into one, nor into native memory as a reference. Otherwise
 // bytes chosen by the application would become handles to arbitrary objects.
 
-constexpr int64_t kFieldBase = 8;
+constexpr int64_t kFieldBase = rt::kFieldOffsetBase;
 constexpr int64_t kArrayBase = 16;
 
 struct Access {
