@@ -1,0 +1,19 @@
+FileChannel, écriture groupée : 14 octets écrits, 14 lus : « Bonj|our, monde »
+Os.writev et Os.readv : 10 écrits, 10 lus : « Andr|oid 17 »
+invokeExact, méthode virtuelle : MéthodeHandle
+invokeExact, type différent : échec : java.lang.invoke.WrongMethodTypeException
+invoke, élargissement int vers long : 7 puis 9 (Long)
+invoke, rétrécissement long vers int : échec : java.lang.invoke.WrongMethodTypeException
+champs et constructeur : x = 7, créés 1
+bindTo et insertArguments : 20 et 6
+asType et filterReturnValue : 6 et « 5 »
+annotation de classe : classe, niveau 3, étiquettes [a, b], Marker true, toutes 2
+toString, equals, hashCode : @aa.host.LibcoreProbe$Note(level=3, tags=[a, b], value=classe), égales true, même hash true, type Note
+champ et méthode : champ, méthode niveau 7, paramètres paramètre / 0
+signatures génériques : java.util.List<java.lang.String> ; java.util.Map<java.lang.String, T> ; T étend [class java.lang.Number] ; paramètre T
+Proxy.newProxyInstance : compareTo(« seize ») = 5, classe mandataire true
+TimeZone Europe/Paris : hiver 1 h, été 2 h, heure d'été true
+java.time America/New_York : 2026-03-08 01:30 -05:00 puis 2026-03-08 03:30 -04:00
+zone inconnue : GMT
+dup, dup2, fcntl, ioctl : FIONREAD 7, FD_CLOEXEC de la copie false
+getpgid, umask : groupe true, umask rendu 22

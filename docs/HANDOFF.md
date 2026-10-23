@@ -163,8 +163,8 @@ ninja -C build
 WINEDEBUG=-all ctest --test-dir build -j8 --output-on-failure
 WINEDEBUG=-all wine build/tests/aa_unit_tests.exe [filtre]   # tests unitaires seuls, filtre par nom
 ```
-État au 2026-10-23 : **47 suites, toutes vertes sous wine** (46 suites et la fixture
-`wineserver` ; dont `e2e-launch`, `e2e-process-launch`, `e2e-process-input`, `e2e-process-back`,
+État au 2026-10-23 : **48 suites, toutes vertes sous wine** (47 suites et la fixture
+`wineserver` ; dont `e2e-host-libcore`, `e2e-launch`, `e2e-process-launch`, `e2e-process-input`, `e2e-process-back`,
 `e2e-process-toast(-end)`, `e2e-process-nav(-back)`, `e2e-process-dialog(-answer, -back)`),
 **197 tests unitaires**. Sous wine, la fixture `wineserver` lance le serveur avant les tests,
 détaché de leurs tubes : sinon le premier test lancé reste bloqué jusqu'à son délai (le
@@ -190,6 +190,9 @@ Pièges connus :
   `stubs/`, vérifie la signature :
   `python3 -I tools/dev/jarapi.py ~/aosp/dex/framework.jar natives 'android.graphics.Canvas'`,
   `… methods <classe>`, `… fields <classe>` (avec les constantes statiques), `… classes <motif>`.
+- `anyandroid libcore natives --bootclasspath <libcore> --orphans` : les liaisons natives qui ne
+  correspondent à aucune méthode native réelle (signature inventée, ou méthode non native) ; le
+  runtime ne les appelle jamais. À lancer après avoir ajouté une liaison.
 - `dis.sh` : désassemble une classe avec notre désassembleur
   (`AA_CLI="wine build/apps/cli/anyandroid.exe" tools/dev/dis.sh <jar> <classe> [méthode]`).
 - `launch.sh` : recompile et lance le lanceur J4 avec la trace des services
@@ -269,9 +272,10 @@ Fait et vérifié (voir STATUS.md pour le détail) :
    `startActivityForResult`), puis une vraie application de la GSI (`Music`) affichée et
    utilisable. Les motifs de césure `.hyb` et le pilotage déterministe des tests sont à concevoir
    sur l'horloge commune (`common/clock.h`).
-2. **Vérifier les ajouts G2 du 17 octobre** sur la vraie libcore (E/S scatter-gather,
-   `MethodHandle`, annotations, fuseaux horaires) ; relancer la CI Windows dès que le compte
-   GitHub Actions fonctionne.
+2. **Fin de G2** (les ajouts du 17 octobre sont vérifiés par `e2e-host-libcore`) : les 166
+   liaisons orphelines (`libcore natives --orphans`, surtout d'anciennes liaisons d'`Unsafe`), le
+   contrôle d'accès de la classe appelante dans la réflexion (`VerifyAccess`), `invoke-custom` ;
+   relancer la CI Windows dès que le compte GitHub Actions fonctionne.
 3. **G4 : code natif** : chargeur ELF et bionic. L'[évaluation d'ANDROWIN](evaluations/ANDROWIN.md)
    décrit ntdroid (ART réel dans un processus Windows par interception d'appels système) : c'est
    la référence pour un **processus hôte isolé** dédié au code natif ; l'option « ART réel à la
@@ -398,3 +402,13 @@ mal passé, pour que cela ne se reproduise pas (les règles correspondantes sont
     milieu d'une allocation. La règle du projet est l'inverse : exécuter le code d'AOSP et ne
     fournir que la frontière (ici, ce que fait le GC d'ART : vider les référents et appeler
     `ReferenceQueue.add`).
+11. **Des natives liées à des signatures qui n'existent pas.** Les ajouts G2 du 17 octobre
+    liaient `Memory.peekInt(J)I`, `Linux.flock`, `clock_gettime`, `ioctlInt(…, MutableInt)` ou
+    `duplicateForMapping0`, absentes de la libcore 17 : jamais appelées, elles passaient pour une
+    couverture (`libcore natives --orphans` les liste). `dup` rouvrait le fichier par son chemin
+    (avec `O_TRUNC` : le fichier était vidé). `MethodHandle` reprenait les genres de poignée et
+    les champs (`info`, `nominalType`) d'une ancienne version d'Android : sur Android 17, `IGET`
+    vaut 8 et non 9, et rien ne passait par `asType` ni par les transformateurs. Les annotations
+    venaient d'une classe synthétique, sans valeurs par défaut. Tous ses tests unitaires
+    passaient, sur un mini-framework smali ; la vraie libcore (`aa.host.LibcoreProbe`) échouait
+    dès la première ligne.

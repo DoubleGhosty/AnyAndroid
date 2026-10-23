@@ -22,7 +22,8 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
   doublons, traversée de chemins), manifeste binaire, DEX 035 à 040, multi-DEX, bibliothèques
   natives ELF, signature v1/v2, APK éclatés et bundles `.apks`/`.xapk`, API de la plateforme
   utilisées avec leur statut, verdict de compatibilité.
-- **Interpréteur Dalvik** : jeu d'instructions complet (sauf `invoke-custom`/`invoke-polymorphic`),
+- **Interpréteur Dalvik** : jeu d'instructions complet (sauf `invoke-custom` et les constantes
+  `const-method-handle`/`const-method-type`),
   exceptions, héritage et interfaces, initialisation des classes, vérification structurelle du
   bytecode, limites de pile, d'objets et d'instructions.
 - **Runtime G1** ([ADR-003](docs/adr/ADR-003-runtime-threads-gc-jni.md)) :
@@ -48,8 +49,12 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
   sur la **vraie libcore d'Android 17**, extraite d'une image système officielle (`image` : formats
   sparse, super, ext4, EROFS compressé, APEX, DEX 041). En mode libcore (`exec --bootclasspath`), le
   bytecode d'AOSP remplace le pont pour `java.*` ; ses méthodes natives sont implémentées pour
-  Windows (`libcore natives` mesure la couverture), avec `invoke-polymorphic`/`VarHandle`, les
-  chaînes compactes d'ART et les jeux de caractères standards. Collections, `Formatter`,
+  Windows (`libcore natives` mesure la couverture, `--orphans` les liaisons qui ne servent à
+  rien), avec `invoke-polymorphic` (`VarHandle`, et `MethodHandle` porté d'ART : `invokeExact`
+  exact, `invoke` par `asType` et les transformateurs de libcore), les chaînes compactes d'ART et
+  les jeux de caractères standards. La réflexion passe par les vraies classes de libcore et les
+  natives d'ART, les annotations par `AnnotationFactory` (valeurs par défaut, `toString`), les
+  classes proxy par `Proxy.generateProxy` (vérifié par l'e2e `host-libcore`). Collections, `Formatter`,
   `java.util.concurrent`, exceptions et **fichiers** (NIO.2 et `FileChannel` compris)
   fonctionnent : un système de fichiers virtuel
   ([ADR-005](docs/adr/ADR-005-systeme-de-fichiers-virtuel.md)) sert `/system` et `/apex` depuis

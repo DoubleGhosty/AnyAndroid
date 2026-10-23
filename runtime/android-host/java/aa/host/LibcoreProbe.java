@@ -1,0 +1,293 @@
+package aa.host;
+
+import android.system.Os;
+import android.system.OsConstants;
+import java.io.File;
+import java.io.FileDescriptor;
+import java.lang.annotation.Annotation;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
+import java.lang.invoke.WrongMethodTypeException;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.lang.reflect.TypeVariable;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.StandardOpenOption;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.TimeZone;
+
+/**
+ * Self-test of the libcore paths added to AnyAndroid on 17 October (G2), on AOSP's real libcore:
+ * scatter-gather I/O, MethodHandle invocation, annotations and generic signatures, time zones
+ * and the remaining POSIX calls. Each line is what Android prints; a failure prints its class.
+ */
+public final class LibcoreProbe {
+  private LibcoreProbe() {}
+
+  interface Check {
+    String run() throws Throwable;
+  }
+
+  static void check(String what, Check c) {
+    String result;
+    try {
+      result = c.run();
+    } catch (Throwable t) {
+      result = "échec : " + t.getClass().getName();  // messages differ from ART's
+    }
+    System.out.println(what + " : " + result);
+  }
+
+  public static void main(String[] args) {
+    scatterGather();
+    methodHandles();
+    annotations();
+    proxies();
+    timeZones();
+    posix();
+  }
+
+  // --- Scatter-gather I/O (readv, writev) -----------------------------------------------
+
+  static File scratch(String name) {
+    return new File(System.getProperty("java.io.tmpdir"), name);
+  }
+
+  static String text(ByteBuffer b) {
+    b.flip();
+    byte[] out = new byte[b.remaining()];
+    b.get(out);
+    return new String(out, StandardCharsets.UTF_8);
+  }
+
+  static void scatterGather() {
+    check("FileChannel, écriture groupée", () -> {
+      File f = scratch("aa-gather.bin");
+      try (FileChannel ch = FileChannel.open(f.toPath(), StandardOpenOption.CREATE, StandardOpenOption.WRITE,
+          StandardOpenOption.READ, StandardOpenOption.TRUNCATE_EXISTING)) {
+        ByteBuffer direct = ByteBuffer.allocateDirect(5);
+        direct.put("jour,".getBytes(StandardCharsets.UTF_8)).flip();
+        long written = ch.write(new ByteBuffer[] {
+            ByteBuffer.wrap("Bon".getBytes(StandardCharsets.UTF_8)), direct,
+            ByteBuffer.wrap(" monde".getBytes(StandardCharsets.UTF_8))});
+        ch.position(0);
+        ByteBuffer a = ByteBuffer.allocate(4);
+        ByteBuffer b = ByteBuffer.allocateDirect(10);
+        long read = ch.read(new ByteBuffer[] {a, b});
+        return written + " octets écrits, " + read + " lus : « " + text(a) + "|" + text(b) + " »";
+      }
+    });
+    check("Os.writev et Os.readv", () -> {
+      File f = scratch("aa-iov.bin");
+      FileDescriptor fd = Os.open(f.getPath(), OsConstants.O_RDWR | OsConstants.O_CREAT | OsConstants.O_TRUNC, 0600);
+      try {
+        byte[] head = "xxAndroid".getBytes(StandardCharsets.UTF_8);
+        ByteBuffer tail = ByteBuffer.allocateDirect(8);
+        tail.put(" 17".getBytes(StandardCharsets.UTF_8));
+        int written = Os.writev(fd, new Object[] {head, tail}, new int[] {2, 0}, new int[] {7, 3});
+        Os.lseek(fd, 0, OsConstants.SEEK_SET);
+        byte[] first = new byte[4];
+        ByteBuffer second = ByteBuffer.allocateDirect(16);
+        int read = Os.readv(fd, new Object[] {first, second}, new int[] {0, 2}, new int[] {4, 14});
+        byte[] rest = new byte[read - 4];
+        for (int i = 0; i < rest.length; i++) rest[i] = second.get(2 + i);
+        return written + " écrits, " + read + " lus : « " + new String(first, StandardCharsets.UTF_8) + "|"
+            + new String(rest, StandardCharsets.UTF_8) + " »";
+      } finally {
+        Os.close(fd);
+      }
+    });
+  }
+
+  // --- MethodHandle (invoke-polymorphic) ----------------------------------------------
+
+  static final class Point {
+    int x = 4;
+    static long created;
+
+    Point() {}
+
+    Point(int x) {
+      this.x = x;
+      created++;
+    }
+
+    int scaled(int by) {
+      return x * by;
+    }
+  }
+
+  static void methodHandles() {
+    MethodHandles.Lookup lookup = MethodHandles.lookup();
+    check("invokeExact, méthode virtuelle", () -> {
+      MethodHandle concat = lookup.findVirtual(String.class, "concat", MethodType.methodType(String.class, String.class));
+      return (String) concat.invokeExact("Méthode", "Handle");
+    });
+    check("invokeExact, type différent", () -> {
+      MethodHandle concat = lookup.findVirtual(String.class, "concat", MethodType.methodType(String.class, String.class));
+      Object r = (Object) concat.invokeExact("a", "b");
+      return "accepté à tort : " + r;
+    });
+    check("invoke, élargissement int vers long", () -> {
+      MethodHandle max = lookup.findStatic(Math.class, "max", MethodType.methodType(long.class, long.class, long.class));
+      long r = (long) max.invoke(3, 7L);
+      Object boxed = max.invoke(Integer.valueOf(9), 2L);
+      return r + " puis " + boxed + " (" + boxed.getClass().getSimpleName() + ")";
+    });
+    check("invoke, rétrécissement long vers int", () -> {
+      MethodHandle max = lookup.findStatic(Math.class, "max", MethodType.methodType(long.class, long.class, long.class));
+      int r = (int) max.invoke(1L, 2L);
+      return "accepté à tort : " + r;
+    });
+    check("champs et constructeur", () -> {
+      MethodHandle getter = lookup.findGetter(Point.class, "x", int.class);
+      MethodHandle setter = lookup.findSetter(Point.class, "x", int.class);
+      MethodHandle ctor = lookup.findConstructor(Point.class, MethodType.methodType(void.class, int.class));
+      MethodHandle count = lookup.findStaticGetter(Point.class, "created", long.class);
+      Point p = (Point) ctor.invokeExact(6);
+      setter.invokeExact(p, (int) getter.invokeExact(p) + 1);
+      return "x = " + p.x + ", créés " + (long) count.invokeExact();
+    });
+    check("bindTo et insertArguments", () -> {
+      MethodHandle scaled = lookup.findVirtual(Point.class, "scaled", MethodType.methodType(int.class, int.class));
+      MethodHandle bound = scaled.bindTo(new Point());
+      MethodHandle triple = MethodHandles.insertArguments(scaled, 1, 3);
+      return (int) bound.invokeExact(5) + " et " + (int) triple.invokeExact(new Point(2));
+    });
+    check("asType et filterReturnValue", () -> {
+      MethodHandle length = lookup.findVirtual(String.class, "length", MethodType.methodType(int.class));
+      MethodHandle generic = length.asType(MethodType.methodType(Object.class, Object.class));
+      MethodHandle toStr = lookup.findStatic(Integer.class, "toString", MethodType.methodType(String.class, int.class));
+      MethodHandle described = MethodHandles.filterReturnValue(length, toStr);
+      return generic.invoke((Object) "quatre") + " et « " + (String) described.invokeExact("cinq!") + " »";
+    });
+  }
+
+  // --- Annotations and generic signatures ------------------------------------------------
+
+  @Retention(RetentionPolicy.RUNTIME)
+  @interface Note {
+    String value();
+
+    int level() default 3;
+
+    String[] tags() default {};
+  }
+
+  @Retention(RetentionPolicy.RUNTIME)
+  @interface Marker {}
+
+  @Note(value = "classe", tags = {"a", "b"})
+  @Marker
+  static class Annotated {
+    @Note("champ")
+    List<String> names;
+
+    @Note(value = "méthode", level = 7)
+    <T extends Number> Map<String, T> pick(@Note("paramètre") T x, int y) {
+      return null;
+    }
+  }
+
+  static void annotations() {
+    check("annotation de classe", () -> {
+      Note n = Annotated.class.getAnnotation(Note.class);
+      return n.value() + ", niveau " + n.level() + ", étiquettes " + Arrays.toString(n.tags()) + ", Marker "
+          + Annotated.class.isAnnotationPresent(Marker.class) + ", toutes "
+          + Annotated.class.getDeclaredAnnotations().length;
+    });
+    check("toString, equals, hashCode", () -> {
+      Note a = Annotated.class.getAnnotation(Note.class);
+      Note b = Annotated.class.getAnnotation(Note.class);
+      return a + ", égales " + a.equals(b) + ", même hash " + (a.hashCode() == b.hashCode()) + ", type "
+          + a.annotationType().getSimpleName();
+    });
+    check("champ et méthode", () -> {
+      Field f = Annotated.class.getDeclaredField("names");
+      Method m = Annotated.class.getDeclaredMethod("pick", Number.class, int.class);
+      Annotation[][] params = m.getParameterAnnotations();
+      return f.getAnnotation(Note.class).value() + ", " + m.getAnnotation(Note.class).value() + " niveau "
+          + m.getAnnotation(Note.class).level() + ", paramètres " + ((Note) params[0][0]).value() + " / "
+          + params[1].length;
+    });
+    check("signatures génériques", () -> {
+      Field f = Annotated.class.getDeclaredField("names");
+      Method m = Annotated.class.getDeclaredMethod("pick", Number.class, int.class);
+      TypeVariable<Method> t = m.getTypeParameters()[0];
+      return f.getGenericType() + " ; " + m.getGenericReturnType() + " ; " + t.getName() + " étend "
+          + Arrays.toString(t.getBounds()) + " ; paramètre " + m.getGenericParameterTypes()[0];
+    });
+  }
+
+  // --- Dynamic proxies (java.lang.reflect.Proxy, which ART's annotations rely on) ---------
+
+  static void proxies() {
+    check("Proxy.newProxyInstance", () -> {
+      InvocationHandler h = (proxy, method, args) ->
+          method.getName().equals("compareTo") ? Integer.valueOf(((String) args[0]).length()) : null;
+      @SuppressWarnings("unchecked")
+      Comparable<String> c = (Comparable<String>) Proxy.newProxyInstance(
+          LibcoreProbe.class.getClassLoader(), new Class<?>[] {Comparable.class}, h);
+      return "compareTo(« seize ») = " + c.compareTo("seize") + ", classe mandataire "
+          + Proxy.isProxyClass(c.getClass());
+    });
+  }
+
+  // --- Time zones (tzdata of the image, read by the i18n module's Memory) -----------------
+
+  static void timeZones() {
+    check("TimeZone Europe/Paris", () -> {
+      TimeZone paris = TimeZone.getTimeZone("Europe/Paris");
+      long winter = Instant.parse("2026-01-15T12:00:00Z").toEpochMilli();
+      long summer = Instant.parse("2026-07-15T12:00:00Z").toEpochMilli();
+      return "hiver " + paris.getOffset(winter) / 3600000 + " h, été " + paris.getOffset(summer) / 3600000
+          + " h, heure d'été " + paris.useDaylightTime();
+    });
+    check("java.time America/New_York", () -> {
+      ZonedDateTime t = Instant.parse("2026-03-08T06:30:00Z").atZone(ZoneId.of("America/New_York"));
+      ZonedDateTime later = t.plusHours(1);
+      DateTimeFormatter f = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm xxx");
+      return t.format(f) + " puis " + later.format(f);
+    });
+    check("zone inconnue", () -> TimeZone.getTimeZone("Mars/Olympus").getID());
+  }
+
+  // --- Remaining POSIX calls ---------------------------------------------------------------
+
+  static void posix() {
+    check("dup, dup2, fcntl, ioctl", () -> {
+      File f = scratch("aa-posix.bin");
+      FileDescriptor fd = Os.open(f.getPath(), OsConstants.O_RDWR | OsConstants.O_CREAT | OsConstants.O_TRUNC, 0600);
+      try {
+        Os.writev(fd, new Object[] {"0123456789".getBytes(StandardCharsets.UTF_8)}, new int[] {0}, new int[] {10});
+        Os.lseek(fd, 3, OsConstants.SEEK_SET);
+        FileDescriptor copy = Os.dup(fd);
+        int available = Os.ioctlInt(copy, OsConstants.FIONREAD);
+        int cloexec = Os.fcntlInt(copy, OsConstants.F_GETFD, 0) & OsConstants.FD_CLOEXEC;
+        Os.close(copy);
+        return "FIONREAD " + available + ", FD_CLOEXEC de la copie " + (cloexec != 0);
+      } finally {
+        Os.close(fd);
+      }
+    });
+    check("getpgid, umask", () -> {
+      boolean group = Os.getpgid(0) > 0;
+      int old = Os.umask(022);
+      int back = Os.umask(old);
+      return "groupe " + group + ", umask rendu " + Integer.toOctalString(back);
+    });
+  }
+}

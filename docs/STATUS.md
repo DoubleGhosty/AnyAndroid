@@ -1,6 +1,6 @@
 # État du projet AnyAndroid for Windows
 
-*Mis à jour le 16 octobre 2026.*
+*Mis à jour le 23 octobre 2026.*
 
 ## Le but final
 
@@ -47,7 +47,7 @@ le nombre de fichiers, et ne montent qu'avec une preuve sur le vrai framework ou
 |-------|------------------------------------------------------------|-----------:|------|
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
-| G2    | Vraie libcore d'AOSP (Android 17)                           | 93 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART ([ADR-004](adr/ADR-004-libcore-aosp.md)). Ajouts du 17 octobre encore **à vérifier** sur la vraie libcore : E/S scatter-gather, `MethodHandle` polymorphique, annotations, fuseaux horaires |
+| G2    | Vraie libcore d'AOSP (Android 17)                           | 96 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART ([ADR-004](adr/ADR-004-libcore-aosp.md)). Ajouts du 17 octobre vérifiés et corrigés sur la vraie libcore (e2e `host-libcore`) : E/S scatter-gather, POSIX résiduel, `MethodHandle` porté d'ART, réflexion par les vraies classes de libcore, annotations par `AnnotationFactory`, `Proxy`, fuseaux horaires. Reste : 166 liaisons orphelines (surtout `Unsafe`), contrôle d'accès de la réflexion, `invoke-custom` |
 | G3    | Vrai `framework.jar` et une application AOSP affichée       | 87 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md). J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, à 420 dpi depuis le 23 octobre) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK comme Android 12+, prouvés par des tests e2e) ; J9 fait (navigation entre activités, toasts et dialogues prouvés par des e2e) ; J10 à faire ; J3 en cours |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire : architecture proposée dans l'[ADR-009](adr/ADR-009-couche-native-elf.md) (chargeur ELF x86_64, bionic, JNI) |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
@@ -56,7 +56,7 @@ le nombre de fichiers, et ne montent qu'avec une preuve sur le vrai framework ou
 ```
 G0 ██████████ 100 %
 G1 ██████████ 100 %
-G2 █████████░  93 %
+G2 █████████░  96 %
 G3 ████████░░  87 %
 G4 ░░░░░░░░░░   0 %
 G5 ░░░░░░░░░░   0 %
@@ -64,7 +64,7 @@ G5 ░░░░░░░░░░   0 %
    █████░░░░░ ≈ 50 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 46 suites de tests et 197 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 48 suites de tests et 197 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.
@@ -78,6 +78,18 @@ G5 ░░░░░░░░░░   0 %
   EROFS compressé, APEX.
 - **Vraie libcore d'Android 17** : collections, `Formatter`, concurrence, fichiers, jeux de
   caractères, `VarHandle`, et **NIO.2 (`sun.nio.fs`, `FileDispatcherImpl`, `FileChannel`) sur VFS**.
+  - **Réflexion, `MethodHandle`, annotations et `Proxy` comme dans ART** (e2e `host-libcore`) :
+    `Method`, `Constructor`, `Field` et `AccessibleObject` sont les classes de libcore, créées
+    avec les champs d'ART et servies par les natives d'ART portées (`Method.invoke`, `Field.get`
+    et `set*` avec leurs conversions et leurs messages, signatures génériques, `MethodParameters`).
+    `invokeExact` exige le type exact, `invoke` passe par `asType` et les transformateurs Java de
+    libcore (`EmulatedStackFrame`). Les annotations sont créées par `AnnotationFactory`
+    (valeurs par défaut, `toString`, `equals`), dans l'ordre du fichier DEX. Les classes proxy
+    suivent `ClassLinker::CreateProxyClass`. Limites : le contrôle d'accès de la classe appelante
+    n'est pas appliqué, le chargeur de classes d'un proxy est ignoré (un seul espace de classes).
+  - **POSIX résiduel** : `dup` et `dup2` partagent la description ouverte (position commune),
+    `ioctlInt(FIONREAD)`, `fcntlInt`, `umask` ; `readv`/`writev` et les E/S groupées de
+    `FileChannel`.
   - **`java.util.zip`** (`Deflater`, `Inflater`, flux GZIP, `CRC32`, `Adler32`) sur
     [miniz](../runtime/third_party/miniz/README.md) intégré, avec le comportement de zlib pour les
     vidages (répétés, ou dans un tampon trop petit) et un nombre plafonné de flux vivants ; les
@@ -429,7 +441,10 @@ vrais gestionnaires d'`ActivityThread`.
 1. **J10** : une vraie application AOSP affichée et utilisable (d'abord un exemple en Java sur les
    widgets du framework : listes, `PopupWindow`, `startActivityForResult`, puis `Music` de la
    GSI).
-2. **Vérifier les ajouts G2 du 17 octobre** sur la vraie libcore et réparer la CI Windows.
+2. **Fin de G2** : retirer ou corriger les 166 liaisons orphelines (`libcore natives --orphans`,
+   surtout d'anciennes liaisons de `sun.misc.Unsafe` et `jdk.internal.misc.Unsafe`), appliquer
+   le contrôle d'accès de la classe appelante dans la réflexion (`VerifyAccess`), prendre en
+   charge `invoke-custom` ; relancer la CI Windows dès que le compte GitHub Actions fonctionne.
 3. **G4** : chargeur ELF et bionic, pour les applications avec du code natif (`.so` x86_64), selon l'[ADR-009](adr/ADR-009-couche-native-elf.md).
 4. **G5** : microG (démarrage de GmsCore avec les mêmes services), puis les GApps.
 

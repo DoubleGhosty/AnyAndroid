@@ -133,6 +133,12 @@ if(AA_LIBCORE_DIR)
       aa_e2e(host-probe CODE 0 GOLDEN host-probe.txt
         ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
              ${S}/hello-dex.apk aa.host.Probe)
+      # G2: the libcore paths added on 17 October (scatter-gather I/O, MethodHandle,
+      # annotations and Proxy, time zones, residual POSIX) on the real libcore. The
+      # golden is the output Android gives for this code.
+      aa_e2e(host-libcore CODE 0 GOLDEN host-libcore.txt
+        ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
+             ${S}/hello-dex.apk aa.host.LibcoreProbe)
       # J3: local system services ("package" through the framework's PackageParser), and the
       # trace of the framework's calls to them.
       aa_e2e(host-services CODE 0 GOLDEN host-services.txt

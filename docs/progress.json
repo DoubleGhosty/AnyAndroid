@@ -2,7 +2,7 @@
   "metadata": {
     "project": "AnyAndroid for Windows",
     "version": "0.1.0",
-    "generated_at": "2026-10-23T15:19:46.907094+00:00",
+    "generated_at": "2026-10-23T18:58:11.957198+00:00",
     "target": "Android natif sur Windows (sans VM ni hyperviseur)"
   },
   "summary": {
@@ -40,10 +40,10 @@
       {
         "id": "G2",
         "name": "Vraie libcore d'AOSP (Android 17)",
-        "description": "NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART (ADR-004). Ajouts du 17 octobre encore **à vérifier** sur la vraie libcore : E/S scatter-gather, `MethodHandle` polymorphique, annotations, fuseaux horaires",
-        "progress": 93,
+        "description": "NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART (ADR-004). Ajouts du 17 octobre vérifiés et corrigés sur la vraie libcore (e2e `host-libcore`) : E/S scatter-gather, POSIX résiduel, `MethodHandle` porté d'ART, réflexion par les vraies classes de libcore, annotations par `AnnotationFactory`, `Proxy`, fuseaux horaires. Reste : 166 liaisons orphelines (surtout `Unsafe`), contrôle d'accès de la réflexion, `invoke-custom`",
+        "progress": 96,
         "weight": 10,
-        "status": "NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART (ADR-004). Ajouts du 17 octobre encore **à vérifier** sur la vraie libcore : E/S scatter-gather, `MethodHandle` polymorphique, annotations, fuseaux horaires",
+        "status": "NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART (ADR-004). Ajouts du 17 octobre vérifiés et corrigés sur la vraie libcore (e2e `host-libcore`) : E/S scatter-gather, POSIX résiduel, `MethodHandle` porté d'ART, réflexion par les vraies classes de libcore, annotations par `AnnotationFactory`, `Proxy`, fuseaux horaires. Reste : 166 liaisons orphelines (surtout `Unsafe`), contrôle d'accès de la réflexion, `invoke-custom`",
         "adr": "ADR-004",
         "state": "in_progress"
       },
@@ -11135,10 +11135,10 @@
     ]
   },
   "tests": {
-    "total_suites": 46,
-    "passed_suites": 46,
+    "total_suites": 48,
+    "passed_suites": 48,
     "unit_tests": 197,
-    "e2e_suites": 41,
+    "e2e_suites": 42,
     "fuzz_suites": 3,
     "percent_core": 100.0,
     "note": "Toutes les suites passent avec les entrées Android et R8 (STATUS.md)"
