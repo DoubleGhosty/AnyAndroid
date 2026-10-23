@@ -2,7 +2,7 @@
   "metadata": {
     "project": "AnyAndroid for Windows",
     "version": "0.1.0",
-    "generated_at": "2026-10-23T08:39:19.889983+00:00",
+    "generated_at": "2026-10-23T13:32:26.902684+00:00",
     "target": "Android natif sur Windows (sans VM ni hyperviseur)"
   },
   "summary": {
@@ -50,10 +50,10 @@
       {
         "id": "G3",
         "name": "Vrai `framework.jar` et une application AOSP affichée",
-        "description": "**En cours** : plan de l'ADR-006. J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK jusqu'à `onDestroy`, prouvés par des tests e2e) ; J9 en cours (code poussé le 17 octobre, à vérifier sur le vrai framework) ; J10 à faire ; J3 en cours",
-        "progress": 82,
+        "description": "**En cours** : plan de l'ADR-006. J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, mais à la densité 160 dpi au lieu de 420 : voir « Problèmes connus ») ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK jusqu'à `onDestroy`, prouvés par des tests e2e) ; J9 en cours (toasts et composition des fenêtres prouvés par des e2e ; dialogues et pile d'activités du 17 octobre encore à vérifier) ; J10 à faire ; J3 en cours",
+        "progress": 83,
         "weight": 30,
-        "status": "**En cours** : plan de l'ADR-006. J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK jusqu'à `onDestroy`, prouvés par des tests e2e) ; J9 en cours (code poussé le 17 octobre, à vérifier sur le vrai framework) ; J10 à faire ; J3 en cours",
+        "status": "**En cours** : plan de l'ADR-006. J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, mais à la densité 160 dpi au lieu de 420 : voir « Problèmes connus ») ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK jusqu'à `onDestroy`, prouvés par des tests e2e) ; J9 en cours (toasts et composition des fenêtres prouvés par des e2e ; dialogues et pile d'activités du 17 octobre encore à vérifier) ; J10 à faire ; J3 en cours",
         "adr": "ADR-006",
         "state": "in_progress"
       },
@@ -11135,13 +11135,12 @@
     ]
   },
   "tests": {
-    "total_suites": 39,
-    "passed_suites": 36,
-    "optional_suites": 3,
+    "total_suites": 41,
+    "passed_suites": 41,
     "unit_tests": 196,
-    "e2e_suites": 35,
+    "e2e_suites": 36,
     "fuzz_suites": 3,
     "percent_core": 100.0,
-    "note": "Les 3 tests non passés requièrent une image système AOSP externe (G2/G3 facultatifs hors dépôt)"
+    "note": "Toutes les suites passent avec les entrées Android et R8 (STATUS.md)"
   }
 }

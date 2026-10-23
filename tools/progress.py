@@ -260,15 +260,17 @@ def parse_tests():
             total_suites = int(m.group(1))
             unit_tests = int(m.group(2))
 
+    # STATUS.md only counts suites that all pass (with the Android inputs and R8).
+    cmake = (REPO_ROOT / "tests" / "CMakeLists.txt").read_text(encoding="utf-8")
+    fuzz_suites = len(re.findall(r"add_test\(NAME fuzz-", cmake))
     return {
         "total_suites": total_suites,
-        "passed_suites": total_suites - 3,
-        "optional_suites": 3,
+        "passed_suites": total_suites,
         "unit_tests": unit_tests,
-        "e2e_suites": total_suites - 4,
-        "fuzz_suites": 3,
+        "e2e_suites": len(re.findall(r"^\s*aa_e2e\(", cmake, re.M)),
+        "fuzz_suites": fuzz_suites,
         "percent_core": 100.0,
-        "note": "Les 3 tests non passés requièrent une image système AOSP externe (G2/G3 facultatifs hors dépôt)"
+        "note": "Toutes les suites passent avec les entrées Android et R8 (STATUS.md)"
     }
 
 

@@ -18,10 +18,10 @@
 <rect x="408.0" y="66" width="174.8" height="16" rx="3" fill="#d29922"/>
 <text x="414.0" y="78" font-size="10" font-weight="600" fill="#f0f6fc">G2: 93%</text>
 </g>
-<g><title>G3: Vrai `framework.jar` et une application AOSP affichée — 82% (**En cours** : plan de l'ADR-006. J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK jusqu'à `onDestroy`, prouvés par des tests e2e) ; J9 en cours (code poussé le 17 octobre, à vérifier sur le vrai framework) ; J10 à faire ; J3 en cours)</title>
+<g><title>G3: Vrai `framework.jar` et une application AOSP affichée — 83% (**En cours** : plan de l'ADR-006. J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, mais à la densité 160 dpi au lieu de 420 : voir « Problèmes connus ») ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK jusqu'à `onDestroy`, prouvés par des tests e2e) ; J9 en cours (toasts et composition des fenêtres prouvés par des e2e ; dialogues et pile d'activités du 17 octobre encore à vérifier) ; J10 à faire ; J3 en cours)</title>
 <rect x="600.0" y="66" width="188.0" height="16" rx="3" fill="#161b22" stroke="#30363d" stroke-width="1"/>
-<rect x="600.0" y="66" width="154.2" height="16" rx="3" fill="#d29922"/>
-<text x="606.0" y="78" font-size="10" font-weight="600" fill="#f0f6fc">G3: 82%</text>
+<rect x="600.0" y="66" width="156.0" height="16" rx="3" fill="#d29922"/>
+<text x="606.0" y="78" font-size="10" font-weight="600" fill="#f0f6fc">G3: 83%</text>
 </g>
 <g><title>G4: Couche native ELF (bibliothèques `.so` des applications) — 0% (À faire : architecture proposée dans l'ADR-009 (chargeur ELF x86_64, bionic, JNI))</title>
 <rect x="792.0" y="66" width="188.0" height="16" rx="3" fill="#161b22" stroke="#30363d" stroke-width="1"/>
