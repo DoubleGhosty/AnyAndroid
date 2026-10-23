@@ -13,6 +13,10 @@ public class Resources {
     throw new RuntimeException("stub");
   }
 
+  public int getInteger(int id) {
+    throw new RuntimeException("stub");
+  }
+
   public int getColor(int id) {
     throw new RuntimeException("stub");
   }

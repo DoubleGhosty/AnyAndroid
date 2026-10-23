@@ -163,8 +163,9 @@ ninja -C build
 WINEDEBUG=-all ctest --test-dir build -j8 --output-on-failure
 WINEDEBUG=-all wine build/tests/aa_unit_tests.exe [filtre]   # tests unitaires seuls, filtre par nom
 ```
-État au 2026-10-23 : **39 suites, toutes vertes sous wine** (dont `e2e-launch`,
-`e2e-process-launch`, `e2e-process-input` et `e2e-process-back`), **196 tests unitaires**. La CI
+État au 2026-10-23 : **41 suites, toutes vertes sous wine** (dont `e2e-launch`,
+`e2e-process-launch`, `e2e-process-input`, `e2e-process-back`, `e2e-process-toast` et
+`e2e-process-toast-end`), **196 tests unitaires**. La CI
 Windows (27 suites) ne démarrait plus le 23 octobre : toutes les exécutions échouaient en quelques
 secondes sans journal, un problème du compte GitHub Actions et non du code.
 Avec `-DAA_R8_JAR` le code d'hôte Java est construit et les suites `host-probe`,
@@ -221,9 +222,17 @@ Fait et vérifié (voir STATUS.md pour le détail) :
   fenêtres tenue par l'hôte (`InputWindows`) ; natives `KeyCharacterMap`, `KeyEvent`,
   `MotionEvent`, `InputChannel`, `InputEventReceiver` ; scripts d'entrées (`exec --input`,
   `--trace-input`). Tests `e2e-process-input` (deux clics, « Clics : 2 ») et `e2e-process-back`.
-- **G3/J9 (en cours, non vérifié)** : pile d'activités (`ActivityTaskService`), fenêtres
-  secondaires (`WindowService`), compositeur de plusieurs surfaces, poussés le 17 octobre sans
-  exécution du vrai framework (signatures corrigées par `c1ebbc4`).
+- **G3/J9 (en cours)** : toasts faits (`NotificationService`, file de
+  NotificationManagerService, `ToastPresenter` du framework ; e2e `process-toast` et
+  `process-toast-end`). `WindowService` fait comme WMS : cadres par le vrai
+  `WindowLayout.computeFrames`, une couche par fenêtre sous laquelle la surface créée par
+  `ViewRootImpl` (hors de l'arbre, `NOT_ADD_TO_ROOT`) est rattachée, couche par
+  `WindowPolicy` (transcription de `getWindowLayerFromTypeLw`), voile de `Dimmer`. Le pont compose
+  l'arbre des couches comme SurfaceFlinger (`framework_surface.cpp`, `layers_to_draw`) ;
+  `--log-level debug` écrit chaque composition (« compositeur »). Pas encore vérifiés : pile
+  d'activités (`ActivityTaskService`) et dialogues, poussés le 17 octobre.
+- **Défaut connu** : l'application est dessinée à 160 dpi au lieu de 420 (la configuration
+  globale n'a pas de `densityDpi`) ; voir STATUS « Problèmes connus ».
 - Natives graphiques fidèles à HWUI/Skia : `Paint`, `RenderNode` (magasins de propriétés),
   `Path` (modèle `SkPath`, `approximate`), `PathParser` (SVG, arcs en coniques), `Matrix`
   (`SkMatrix`), `Canvas` (Skia AOSP), `Region` (`SkRegion`),
@@ -245,19 +254,21 @@ Fait et vérifié (voir STATUS.md pour le détail) :
 
 ## 9. Prochaines étapes, dans l'ordre
 
-1. **J9 : toasts, dialogues, navigation**, vérifiés sur le vrai framework (service
-   `notification` et `ToastPresenter`, compositeur, pile d'activités).
-2. **Vérifier les ajouts G2 du 17 octobre** sur la vraie libcore (E/S scatter-gather,
+1. **Densité** : `densityDpi` 420 dans la configuration globale (et `ro.sf.lcd_density`),
+   sondes de pixels des e2e régénérées en lançant les commandes.
+2. **J9 : dialogues, navigation**, vérifiés sur le vrai framework par des e2e (un dialogue avec
+   `FLAG_DIM_BEHIND` et le retour du focus, `startActivity` puis BACK vers l'activité précédente).
+3. **Vérifier les ajouts G2 du 17 octobre** sur la vraie libcore (E/S scatter-gather,
    `MethodHandle`, annotations, fuseaux horaires) ; relancer la CI Windows dès que le compte
    GitHub Actions fonctionne.
-3. **J10** : une vraie application AOSP (comme `Music`) affichée et utilisable. Les motifs de
+4. **J10** : une vraie application AOSP (comme `Music`) affichée et utilisable. Les motifs de
    césure `.hyb` et le pilotage déterministe des tests sont à concevoir sur l'horloge commune
    (`common/clock.h`).
-4. **G4 : code natif** : chargeur ELF et bionic. L'[évaluation d'ANDROWIN](evaluations/ANDROWIN.md)
+5. **G4 : code natif** : chargeur ELF et bionic. L'[évaluation d'ANDROWIN](evaluations/ANDROWIN.md)
    décrit ntdroid (ART réel dans un processus Windows par interception d'appels système) : c'est
    la référence pour un **processus hôte isolé** dédié au code natif ; l'option « ART réel à la
    place de notre interpréteur » est archivée.
-5. **G5 : microG** (démarrer GmsCore avec nos services : comptes, `GoogleApiAvailability`), puis
+6. **G5 : microG** (démarrer GmsCore avec nos services : comptes, `GoogleApiAvailability`), puis
    les GApps dans les limites du §2.1.
 
 ## 10. Savoir-faire technique

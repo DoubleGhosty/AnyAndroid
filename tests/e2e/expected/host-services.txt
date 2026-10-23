@@ -8,6 +8,7 @@ service : LocalServiceManager.addService
 service : LocalServiceManager.addService
 service : LocalServiceManager.addService
 service : LocalServiceManager.addService
+service : LocalServiceManager.addService
 service : LocalServiceManager.checkService2
 service : LocalServiceManager.checkService2
 service : PermissionService.getSplitPermissions
@@ -31,4 +32,5 @@ service : LocalServiceManager.checkService2
 service : LocalServiceManager.checkService2
 service : LocalServiceManager.checkService2
 service : LocalServiceManager.checkService2
-surcharges : 64 méthodes dans 12 classes, toutes reconnues
+service : LocalServiceManager.checkService2
+surcharges : 69 méthodes dans 13 classes, toutes reconnues

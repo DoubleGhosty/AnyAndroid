@@ -7,6 +7,7 @@ import aa.host.services.AudioService;
 import aa.host.services.DisplayService;
 import aa.host.services.InputMethodService;
 import aa.host.services.InputService;
+import aa.host.services.NotificationService;
 import aa.host.services.PackageService;
 import aa.host.services.PermissionService;
 import aa.host.services.SystemFeatures;
@@ -44,6 +45,7 @@ public final class SystemServer {
     ServiceManager.addService("input_method", new InputMethodService());
     ServiceManager.addService("accessibility", new AccessibilityService());
     ServiceManager.addService("audio", new AudioService());
+    ServiceManager.addService("notification", new NotificationService());
     ServiceManager.addService("activity", new ActivityService(packages));
     ServiceManager.addService("activity_task", new ActivityTaskService());
   }

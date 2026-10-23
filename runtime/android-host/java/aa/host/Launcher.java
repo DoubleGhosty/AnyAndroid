@@ -26,7 +26,8 @@ import android.os.Looper;
 public final class Launcher {
   private Launcher() {}
 
-  static void log(String s) {
+  /** A line of the launch's trace, on standard output. */
+  public static void log(String s) {
     System.out.println(s);
   }
 

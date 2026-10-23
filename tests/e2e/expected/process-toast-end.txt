@@ -1,0 +1,15 @@
+démarrage : ActivityThread.main
+processus attaché : com.anyandroid.samples.basic
+application : android.app.Application
+cycle : MainActivity.onCreate
+cycle : MainActivity.onStart
+cycle : MainActivity.onResume
+activité au premier plan
+entrée : appui 540,127 → traité
+entrée : relâchement 540,127 → traité
+entrée : appui 540,127 → traité
+entrée : relâchement 540,127 → traité
+entrée : appui 540,127 → traité
+entrée : relâchement 540,127 → traité
+toast : « Trois clics ! » montré
+toast : « Trois clics ! » masqué

@@ -48,7 +48,7 @@ le nombre de fichiers, et ne montent qu'avec une preuve sur le vrai framework ou
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
 | G2    | Vraie libcore d'AOSP (Android 17)                           | 93 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART ([ADR-004](adr/ADR-004-libcore-aosp.md)). Ajouts du 17 octobre encore **à vérifier** sur la vraie libcore : E/S scatter-gather, `MethodHandle` polymorphique, annotations, fuseaux horaires |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 82 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md). J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK jusqu'à `onDestroy`, prouvés par des tests e2e) ; J9 en cours (code poussé le 17 octobre, à vérifier sur le vrai framework) ; J10 à faire ; J3 en cours |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 83 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md). J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, mais à la densité 160 dpi au lieu de 420 : voir « Problèmes connus ») ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK jusqu'à `onDestroy`, prouvés par des tests e2e) ; J9 en cours (toasts et composition des fenêtres prouvés par des e2e ; dialogues et pile d'activités du 17 octobre encore à vérifier) ; J10 à faire ; J3 en cours |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire : architecture proposée dans l'[ADR-009](adr/ADR-009-couche-native-elf.md) (chargeur ELF x86_64, bionic, JNI) |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
 | **Total** | **Android natif sur Windows**                          | **≈ 49 %** | Pondéré par l'effort : G0 5 %, G1 10 %, G2 10 %, G3 30 %, G4 25 %, G5 20 % |
@@ -57,14 +57,14 @@ le nombre de fichiers, et ne montent qu'avec une preuve sur le vrai framework ou
 G0 ██████████ 100 %
 G1 ██████████ 100 %
 G2 █████████░  93 %
-G3 ████████░░  82 %
+G3 ████████░░  83 %
 G4 ░░░░░░░░░░   0 %
 G5 ░░░░░░░░░░   0 %
    ───────────────
    █████░░░░░ ≈ 49 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 39 suites de tests et 196 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 41 suites de tests et 196 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.
@@ -262,10 +262,11 @@ logique (cadres 1080×1920, inset, configuration fusionnée, paire d'`InputChann
 `activityResumed` est reçu, le vsync à 60 Hz (`DisplayEventReceiver`, minuteurs de la file native
 servis par `nativePollOnce`) déclenche `performTraversals`. La hiérarchie entière se mesure, texte
 compris (`BoringLayout` et `StaticLayout`). `relayoutWindow` crée la surface côté application
-(Android 17 gère la mise en page de la fenêtre localement : `SurfaceControl`, transactions et
-couches logiques), `IWindowSession.relayout` renvoie les cadres de l'écran avec une
-`WindowConfiguration` plein écran, puis `BLASTBufferQueue` fournit la `Surface`. La mise en page se
-fait aux vraies tailles et `drawSoftware` verrouille la surface : **la fenêtre est dessinée**
+(Android 17 la crée hors de l'arbre des couches, `NOT_ADD_TO_ROOT`, et la confie au gestionnaire
+de fenêtres, qui la rattache sous la couche de la fenêtre : voir J9), `IWindowSession.relayout`
+renvoie les cadres avec une `WindowConfiguration` plein écran, puis `BLASTBufferQueue` fournit la
+`Surface`. La mise en page se fait à la taille de l'écran (mais à 160 dpi, voir « Problèmes
+connus ») et `drawSoftware` verrouille la surface : **la fenêtre est dessinée**
 par le Skia d'AOSP dans le tampon de la `Surface` (fond de `DecorView`, barre d'action avec son
 titre, les deux `TextView` de l'activité, bouton Material avec son ombre et son texte), l'image
 est publiée (`unlockCanvasAndPost`), la synchronisation de `SurfaceSyncGroup` se termine et
@@ -323,6 +324,33 @@ l'identique ; et deux vrais clics de souris dans la fenêtre Win32 (sous Xvfb) d
 image. Le clic joue un son (`View.playSoundEffect`) : le service `audio` répond comme
 `AudioService`, sans sortie audio.
 
+**J9 en cours : toasts faits, fenêtres composées comme sur un téléphone.**
+- Le service `notification` de l'hôte (`NotificationService`) reprend la file de
+  NotificationManagerService : un toast à la fois, au plus 5 par paquet, 2 s (`LENGTH_SHORT`) ou
+  3,5 s (`LENGTH_LONG`), 333 ms de plus pour un toast texte et 250 ms de plus après un toast
+  texte. Un toast texte est montré comme le fait `ToastUI` de SystemUI, avec le `ToastPresenter`
+  du framework et sa vue `transient_notification`, dans le processus de l'application (la mise en
+  page de SystemUI, avec l'icône de l'application, n'est pas chargée) ; un toast personnalisé
+  passe par le `Toast.TN` de l'application, comme sur un téléphone.
+- Android 17 crée la surface d'une fenêtre côté application (`ViewRootImpl.createSurfaceControl`,
+  hors de l'arbre des couches) et la confie à `relayout`. `WindowService` fait comme WMS :
+  cadres calculés par le vrai `WindowLayout.computeFrames` du framework (comme
+  `DisplayPolicy.layoutWindowLw`), une couche par fenêtre (`WindowState`) sous laquelle la surface
+  de l'application est rattachée (`setClientSurface`), placée au cadre, ordonnée par la politique
+  d'Android 17 (`getWindowLayerFromTypeLw`), et un voile noir d'alpha `dimAmount` sous une
+  fenêtre `FLAG_DIM_BEHIND`, comme `Dimmer` (sans fondu).
+- Le pont compose l'arbre des couches comme SurfaceFlinger (parents, positions, alpha, z relatif,
+  couches hors de l'arbre, couches de couleur) et présente une image quand un tampon est posté ou
+  qu'une transaction change ce qui s'affiche. Non faits : découpes, matrices, coins arrondis,
+  ombres (le rendu est logiciel, comme un Android sans accélération), flou.
+
+Preuves : `e2e-process-toast` (le troisième clic montre « Trois clics ! » centré à 48 dp du bas,
+au-dessus de l'activité, sondes sur le « T ») et `e2e-process-toast-end` (le toast disparaît après
+2 333 ms : sa fenêtre et sa couche sont retirées, l'activité reste seule), chacun lancé trois fois à
+l'identique ; test unitaire `surface_compositor_walks_the_layer_tree`. Pas encore vérifiés : les
+dialogues (`FLAG_DIM_BEHIND` n'a pas d'e2e), les fenêtres popup et la pile d'activités
+(`startActivity`, retour à l'activité précédente) du code poussé le 17 octobre.
+
 **À savoir pour la suite** :
 - dans le bac à sable `/data`, `unlink` et `rename` d'un fichier ouvert suivent Linux (nom libéré
   ou remplacé tout de suite) : sémantique POSIX de NTFS, avec un repli par répertoire caché quand
@@ -355,17 +383,32 @@ image. Le clic joue un son (`View.playSoundEffect`) : le service `audio` répond
   pression mémoire ;
 - la casse Unicode suit les tables du système ; le signe Kelvin (U+212A) ne se replie pas sur `k`.
 
+## Problèmes connus
+
+- **Densité** : l'écran annonce 420 dpi (`DisplayInfo`), mais la configuration donnée à
+  l'application reprend celle de `Resources.getSystem()`, sans `densityDpi` (ni
+  `ro.sf.lcd_density`) : l'application est mise en page et dessinée à 160 dpi (densité 1 ; la
+  barre d'action fait 56 pixels au lieu de 147). Les images vérifiées au pixel de J5 à J9 le sont
+  à cette densité. Découvert le 23 octobre en mesurant le toast (48 dp = 48 pixels) ; prochaine
+  correction.
+- **CI Windows** : depuis le 23 octobre, toutes les exécutions GitHub Actions du dépôt échouent en
+  quelques secondes sans journal (problème du compte, pas du code) ; les vérifications sont faites
+  sous wine avec les entrées Android en attendant.
+
 ## Prochaines étapes, dans l'ordre
 
 Le plan de G3 est fixé par [ADR-006](adr/ADR-006-demarrage-applications.md) : pas de
 `system_server`, des services système locaux en Java (javac + D8) appelés sans `Parcel`, et les
 vrais gestionnaires d'`ActivityThread`.
 
-1. **J9 : toasts, dialogues et navigation**, vérifiés sur le vrai framework : service `notification` et `ToastPresenter`, compositeur de plusieurs fenêtres, pile d'activités du code poussé le 17 octobre.
-2. **Vérifier les ajouts G2 du 17 octobre** sur la vraie libcore et réparer la CI Windows.
-3. **J10** : une vraie application AOSP affichée et utilisable.
-4. **G4** : chargeur ELF et bionic, pour les applications avec du code natif (`.so` x86_64), selon l'[ADR-009](adr/ADR-009-couche-native-elf.md).
-5. **G5** : microG (démarrage de GmsCore avec les mêmes services), puis les GApps.
+1. **Densité de l'écran** : donner à la configuration globale `densityDpi` 420 (et
+   `ro.sf.lcd_density`), puis régénérer les sondes de pixels des e2e.
+2. **J9 : dialogues et navigation**, vérifiés sur le vrai framework : un dialogue (`FLAG_DIM_BEHIND`,
+   retour du focus) et la pile d'activités du code poussé le 17 octobre, chacun avec un e2e.
+3. **Vérifier les ajouts G2 du 17 octobre** sur la vraie libcore et réparer la CI Windows.
+4. **J10** : une vraie application AOSP affichée et utilisable.
+5. **G4** : chargeur ELF et bionic, pour les applications avec du code natif (`.so` x86_64), selon l'[ADR-009](adr/ADR-009-couche-native-elf.md).
+6. **G5** : microG (démarrage de GmsCore avec les mêmes services), puis les GApps.
 
 ## Règles que le projet s'impose
 
