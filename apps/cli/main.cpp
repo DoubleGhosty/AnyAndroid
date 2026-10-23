@@ -101,9 +101,10 @@ void usage() {
       "        after-frames N (attend N images publiées), tap X Y, key NOM|CODE, text <caractères>,\n"
       "        sleep MS, settle MS (attend la fin des événements puis MS ms sans nouvelle image), quit.\n"
       "      --trace-input : écrit sur stdout une ligne par événement d'entrée terminé.\n"
-      "  libcore natives --bootclasspath <dossier> [--libcore-only] [--all] [--core]\n"
+      "  libcore natives --bootclasspath <dossier> [--libcore-only] [--all] [--core] [--orphans]\n"
       "      Couverture des méthodes natives de la libcore par AnyAndroid ; --core liste les membres\n"
-      "      des classes du cœur de la VM référencés mais absents.\n"
+      "      des classes du cœur de la VM référencés mais absents ; --orphans, les liaisons qui ne\n"
+      "      correspondent à aucune méthode native réelle.\n"
       "  compat [--markdown]\n"
       "      Affiche la matrice des API Android/Java prises en charge.\n"
       "  gaps <fichier.apk|.apks|.xapk>... [--markdown] [--top <n>] [--output <fichier>]\n"
@@ -1006,6 +1007,40 @@ int cmd_libcore(const Args& a) {
       "\n");
   if (a.has("--core")) {
     for (const auto& m : core_missing) out("  " + m + "\n");
+  }
+  if (a.has("--orphans")) {
+    // The other way round: bindings of a boot class path class that match none
+    // of its natives (a signature that does not exist, or a method that is not
+    // native and that the binding does not replace): the runtime never calls them.
+    std::map<std::string, std::map<std::string, bool>, std::less<>> declared;  // class -> name+sig -> native
+    for (const auto& d : boot.dex) {
+      for (uint32_t c = 0; c < d->num_class_defs(); ++c) {
+        const dex::ClassDef& def = d->class_def(c);
+        auto& methods = declared[d->type_descriptor(def.class_idx)];
+        dex::ClassData cd = d->class_data(def);
+        for (const auto* list : {&cd.direct_methods, &cd.virtual_methods}) {
+          for (const auto& m : *list) {
+            const dex::MethodId& mid = d->method(m.method_idx);
+            methods[d->string(mid.name_idx) + d->proto_signature(mid.proto_idx)] = (m.access_flags & dex::kAccNative) != 0;
+          }
+        }
+      }
+    }
+    std::vector<std::string> orphans;
+    for (const auto& [key, b] : reg.registry.bindings()) {
+      size_t arrow = key.find("->");
+      if (arrow == std::string::npos) continue;
+      auto cls = declared.find(std::string_view(key).substr(0, arrow));
+      if (cls == declared.end()) continue;  // not a boot class path class
+      auto m = cls->second.find(key.substr(arrow + 2));
+      if (m == cls->second.end()) {
+        orphans.push_back(key + "  (absente de la classe)");
+      } else if (!m->second && !b.replaces_bytecode) {
+        orphans.push_back(key + "  (méthode non native, jamais appelée)");
+      }
+    }
+    out("\nLiaisons sans méthode native correspondante : " + std::to_string(orphans.size()) + "\n");
+    for (const auto& o : orphans) out("  " + o + "\n");
   }
   std::vector<std::pair<std::string, std::vector<std::string>>> by_size(missing.begin(), missing.end());
   std::stable_sort(by_size.begin(), by_size.end(), [](const auto& x, const auto& y) { return x.second.size() > y.second.size(); });
