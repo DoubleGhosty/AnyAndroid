@@ -18,10 +18,10 @@
 <rect x="408.0" y="66" width="174.8" height="16" rx="3" fill="#d29922"/>
 <text x="414.0" y="78" font-size="10" font-weight="600" fill="#f0f6fc">G2: 93%</text>
 </g>
-<g><title>G3: Vrai `framework.jar` et une application AOSP affichée — 85% (**En cours** : plan de l'ADR-006. J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, à 420 dpi depuis le 23 octobre) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK comme Android 12+, prouvés par des tests e2e) ; J9 en cours (toasts, composition des fenêtres et navigation entre activités prouvés par des e2e ; dialogues encore à vérifier) ; J10 à faire ; J3 en cours)</title>
+<g><title>G3: Vrai `framework.jar` et une application AOSP affichée — 87% (**En cours** : plan de l'ADR-006. J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, à 420 dpi depuis le 23 octobre) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK comme Android 12+, prouvés par des tests e2e) ; J9 fait (navigation entre activités, toasts et dialogues prouvés par des e2e) ; J10 à faire ; J3 en cours)</title>
 <rect x="600.0" y="66" width="188.0" height="16" rx="3" fill="#161b22" stroke="#30363d" stroke-width="1"/>
-<rect x="600.0" y="66" width="159.8" height="16" rx="3" fill="#d29922"/>
-<text x="606.0" y="78" font-size="10" font-weight="600" fill="#f0f6fc">G3: 85%</text>
+<rect x="600.0" y="66" width="163.6" height="16" rx="3" fill="#d29922"/>
+<text x="606.0" y="78" font-size="10" font-weight="600" fill="#f0f6fc">G3: 87%</text>
 </g>
 <g><title>G4: Couche native ELF (bibliothèques `.so` des applications) — 0% (À faire : architecture proposée dans l'ADR-009 (chargeur ELF x86_64, bionic, JNI))</title>
 <rect x="792.0" y="66" width="188.0" height="16" rx="3" fill="#161b22" stroke="#30363d" stroke-width="1"/>

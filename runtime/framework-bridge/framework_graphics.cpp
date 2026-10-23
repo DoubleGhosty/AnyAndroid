@@ -517,6 +517,7 @@ void register_framework_graphics(rt::NativeRegistry& r) {
   register_framework_region(r);
   register_framework_vector_drawable(r);
   register_framework_surface(r);
+  register_framework_interpolator(r);
 }
 
 bool color_space_params(int64_t handle, std::array<float, 7>& transfer, std::array<float, 9>& to_xyz) {

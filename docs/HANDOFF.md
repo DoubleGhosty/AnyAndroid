@@ -163,9 +163,12 @@ ninja -C build
 WINEDEBUG=-all ctest --test-dir build -j8 --output-on-failure
 WINEDEBUG=-all wine build/tests/aa_unit_tests.exe [filtre]   # tests unitaires seuls, filtre par nom
 ```
-État au 2026-10-23 : **43 suites, toutes vertes sous wine** (dont `e2e-launch`,
-`e2e-process-launch`, `e2e-process-input`, `e2e-process-back`, `e2e-process-toast` et
-`e2e-process-toast-end`, `e2e-process-nav`, `e2e-process-nav-back`), **196 tests unitaires**. La CI
+État au 2026-10-23 : **47 suites, toutes vertes sous wine** (46 suites et la fixture
+`wineserver` ; dont `e2e-launch`, `e2e-process-launch`, `e2e-process-input`, `e2e-process-back`,
+`e2e-process-toast(-end)`, `e2e-process-nav(-back)`, `e2e-process-dialog(-answer, -back)`),
+**197 tests unitaires**. Sous wine, la fixture `wineserver` lance le serveur avant les tests,
+détaché de leurs tubes : sinon le premier test lancé reste bloqué jusqu'à son délai (le
+`wineserver` qu'il a démarré garde sa sortie ouverte). La CI
 Windows (27 suites) ne démarrait plus le 23 octobre : toutes les exécutions échouaient en quelques
 secondes sans journal, un problème du compte GitHub Actions et non du code.
 Avec `-DAA_R8_JAR` le code d'hôte Java est construit et les suites `host-probe`,
@@ -222,7 +225,7 @@ Fait et vérifié (voir STATUS.md pour le détail) :
   fenêtres tenue par l'hôte (`InputWindows`) ; natives `KeyCharacterMap`, `KeyEvent`,
   `MotionEvent`, `InputChannel`, `InputEventReceiver` ; scripts d'entrées (`exec --input`,
   `--trace-input`). Tests `e2e-process-input` (deux clics, « Clics : 2 ») et `e2e-process-back`.
-- **G3/J9 (en cours)** : toasts faits (`NotificationService`, file de
+- **G3/J9 (fait)** : toasts faits (`NotificationService`, file de
   NotificationManagerService, `ToastPresenter` du framework ; e2e `process-toast` et
   `process-toast-end`). `WindowService` fait comme WMS : cadres par le vrai
   `WindowLayout.computeFrames`, une couche par fenêtre sous laquelle la surface créée par
@@ -232,8 +235,10 @@ Fait et vérifié (voir STATUS.md pour le détail) :
   `--log-level debug` écrit chaque composition (« compositeur »). Navigation vérifiée
   (`ActivityTaskService` : `startActivity`, `finish`, BACK ; e2e `process-nav` et
   `process-nav-back`) ; BACK sur l'activité racine passe la tâche en arrière-plan comme
-  `shouldMoveTaskToBack`. Pas encore vérifiés : dialogues, popups, `startActivityForResult`,
-  modes de lancement.
+  `shouldMoveTaskToBack`. Dialogues vérifiés (`AlertDialog`, voile, clic, BACK, focus ; e2e
+  `process-dialog`, `-answer`, `-back` sur l'exemple `dialog-demo`) ; natives `Interpolator`
+  (`framework_interpolator.cpp`, port de `SkiaInterpolator`). Pas encore vérifiés : popups,
+  `startActivityForResult`, modes de lancement, changements de configuration.
 - **Densité** : la configuration globale est calculée comme
   `DisplayContent.computeScreenConfiguration` (`DisplayService.computeScreenConfiguration` :
   420 dpi, 411 × 731 dp, écran tactile, sans clavier physique) et `ro.sf.lcd_density` vaut 420.
@@ -255,24 +260,23 @@ Fait et vérifié (voir STATUS.md pour le détail) :
 0x1114 Layer, 0x1115 Transaction, 0x1116 Receiver, 0x1117 Channel, 0x1118 InputReceiver,
 0x1119 Setter, 0x111A Builder, 0x111B Measured, 0x111C LineBreakerConfig, 0x111D LineBreakResult,
 0x111E BufferQueue, 0x111F NativeSurface, 0x1120 Fence, 0x1124 MaskFilter, 0x1125 PathEffect,
-0x1126 KeyCharacterMap, 0x1127 MotionEvent, 0x1128 RuntimeShader.shader_builders, 0x1129 PositionedGlyphs. **Suivante : 0x112A.**
+0x1126 KeyCharacterMap, 0x1127 MotionEvent, 0x1128 RuntimeShader.shader_builders, 0x1129 PositionedGlyphs,
+0x112A Interpolator. **Suivante : 0x112B.**
 
 ## 9. Prochaines étapes, dans l'ordre
 
-1. **J9 : dialogues**, vérifiés sur le vrai framework par un e2e (un `AlertDialog` avec
-   `FLAG_DIM_BEHIND`, un clic sur un bouton et le retour du focus), puis
-   `startActivityForResult` et les modes de lancement.
+1. **J10** : un exemple en Java sur les widgets du framework (listes, `PopupWindow`,
+   `startActivityForResult`), puis une vraie application de la GSI (`Music`) affichée et
+   utilisable. Les motifs de césure `.hyb` et le pilotage déterministe des tests sont à concevoir
+   sur l'horloge commune (`common/clock.h`).
 2. **Vérifier les ajouts G2 du 17 octobre** sur la vraie libcore (E/S scatter-gather,
    `MethodHandle`, annotations, fuseaux horaires) ; relancer la CI Windows dès que le compte
    GitHub Actions fonctionne.
-3. **J10** : une vraie application AOSP (comme `Music`) affichée et utilisable. Les motifs de
-   césure `.hyb` et le pilotage déterministe des tests sont à concevoir sur l'horloge commune
-   (`common/clock.h`).
-4. **G4 : code natif** : chargeur ELF et bionic. L'[évaluation d'ANDROWIN](evaluations/ANDROWIN.md)
+3. **G4 : code natif** : chargeur ELF et bionic. L'[évaluation d'ANDROWIN](evaluations/ANDROWIN.md)
    décrit ntdroid (ART réel dans un processus Windows par interception d'appels système) : c'est
    la référence pour un **processus hôte isolé** dédié au code natif ; l'option « ART réel à la
    place de notre interpréteur » est archivée.
-5. **G5 : microG** (démarrer GmsCore avec nos services : comptes, `GoogleApiAvailability`), puis
+4. **G5 : microG** (démarrer GmsCore avec nos services : comptes, `GoogleApiAvailability`), puis
    les GApps dans les limites du §2.1.
 
 ## 10. Savoir-faire technique

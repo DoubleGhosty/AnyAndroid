@@ -200,6 +200,34 @@ if(AA_LIBCORE_DIR)
              --trace-input
              --input "after-frames 1\nsettle 1500\ntap 540 261\nsettle 3000\ntap 540 261\nsettle 3000\ntap 540 261\nsettle 3000\nkey BACK\nsettle 3000\nquit"
              ${S}/two-screens.apk aa.host.ProcessLauncher com.anyandroid.samples.nav)
+      # J9: a dialog of the framework (AlertDialog, its Material layout) over the activity:
+      # its window centered by the framework's WindowLayout, the Dimmer's black layer of
+      # alpha 0.6 (the theme's backgroundDimAmount) below it. Probes: the action bar and the
+      # window behind at 40 %, the dialog's surface, the "Q" of its title, the "I" of "OUI".
+      aa_e2e(process-dialog CODE 0 GOLDEN process-dialog.txt
+        FRAME 1080x1920 "540,28,#0A0A0C" "540,1500,#5F5F62" "540,1000,#EDEDF6" "139,829,#30323A"
+              "918,1092,#4B5D8B"
+        ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
+             --trace-input --input "after-frames 1\nsettle 1500\ntap 540 261\nsettle 2000\nquit"
+             ${S}/dialog-demo.apk aa.host.ProcessLauncher com.anyandroid.samples.dialog)
+      # ... "OUI" calls the activity's DialogInterface.OnClickListener and dismisses the dialog:
+      # the label reads "Réponse : oui" (ink at 174,175 where "aucune" has none, none at 254,172
+      # where it has), no dim, no dialog.
+      aa_e2e(process-dialog-answer CODE 0 GOLDEN process-dialog-answer.txt
+        FRAME 1080x1920 "540,28,#1A1B20" "540,1500,#EDEDF6" "174,175,#787A84" "254,172,#EDEDF6"
+              "540,1000,#EDEDF6"
+        ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
+             --trace-input
+             --input "after-frames 1\nsettle 1500\ntap 540 261\nsettle 2000\ntap 894 1093\nsettle 2000\nquit"
+             ${S}/dialog-demo.apk aa.host.ProcessLauncher com.anyandroid.samples.dialog)
+      # ... BACK goes to the dialog, which has the focus, and cancels it (Dialog.onKeyUp; its
+      # window is gone before the key's release is finished, which InputDispatcher then drops);
+      # the focus is back on the activity: the next BACK moves its task to the back.
+      aa_e2e(process-dialog-back CODE 0 GOLDEN process-dialog-back.txt
+        ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
+             --trace-input
+             --input "after-frames 1\nsettle 1500\ntap 540 261\nsettle 2000\nkey BACK\nsettle 2000\nkey BACK\nsettle 3000\nquit"
+             ${S}/dialog-demo.apk aa.host.ProcessLauncher com.anyandroid.samples.dialog)
       # ... and goes away after LENGTH_SHORT (2 s, 333 ms more for a text toast): its window and
       # layer are removed, the display shows the activity alone again.
       aa_e2e(process-toast-end CODE 0 GOLDEN process-toast-end.txt

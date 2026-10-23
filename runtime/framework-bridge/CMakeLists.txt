@@ -10,6 +10,7 @@ add_library(aa_bridge STATIC
   framework_graphics.cpp
   framework_images.cpp
   framework_input.cpp
+  framework_interpolator.cpp
   framework_matrix.cpp
   framework_motion_event.cpp
   framework_paint.cpp

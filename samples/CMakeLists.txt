@@ -31,6 +31,7 @@ aa_sample(zip-demo)
 aa_sample(framework-demo)
 aa_sample(basic-activity)
 aa_sample(two-screens)
+aa_sample(dialog-demo)
 aa_sample(resources-demo)
 aa_sample(native-lib EXTRA_ARGS
   --stub-lib lib/arm64-v8a/libnative.so:aarch64

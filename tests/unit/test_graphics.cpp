@@ -1031,6 +1031,52 @@ TEST(graphics_region_follows_skregion) {
   CHECK_EQ(thrown(rt, [&] { op_rect(a, 0, 0, 1, 1, 9); }), std::string("java.lang.IllegalArgumentException"));
 }
 
+// Interpolator: HWUI's SkiaInterpolator, key frames blended by a unit cubic
+// (the default blend is a straight line), frozen at both ends, repeated in
+// mirror.
+TEST(graphics_interpolator_follows_skia_interpolator) {
+  Vm vm;
+  rt::Runtime& rt = *vm.rt;
+  const char* ip = "Landroid/graphics/Interpolator;";
+  rt::GlobalRef values(rt, rt.new_array("[F", 1));
+  auto put = [&](float v) { std::memcpy(rt.array(values.get(), "float[]").data.data(), &v, 4); };
+  auto got = [&] {
+    float v;
+    std::memcpy(&v, rt.array(values.get(), "float[]").data.data(), 4);
+    return v;
+  };
+  auto at = [&](int64_t h, int32_t msec) {
+    return int32_t(call(rt, ip, "nativeTimeToValues", "(JI[F)I", Args().j(h).i(msec).h(values.get())));
+  };
+  int64_t h = int64_t(call(rt, ip, "nativeConstructor", "(II)J", Args().i(1).i(2)));
+  CHECK(h != 0);
+  put(0.0f);
+  call(rt, ip, "nativeSetKeyFrame", "(JII[F[F)V", Args().j(h).i(0).i(0).h(values.get()).h(rt::kNull));
+  put(10.0f);
+  call(rt, ip, "nativeSetKeyFrame", "(JII[F[F)V", Args().j(h).i(1).i(100).h(values.get()).h(rt::kNull));
+  CHECK_EQ(at(h, 0), 0);  // Result.NORMAL, on the first key frame
+  CHECK_EQ(got(), 0.0f);
+  CHECK_EQ(at(h, 50), 0);
+  CHECK(std::fabs(got() - 5.0f) < 0.02f);
+  CHECK_EQ(at(h, 150), 2);  // Result.FREEZE_END
+  CHECK_EQ(got(), 10.0f);
+  // Twice, the second time backwards: 150 ms reads as 50 ms.
+  call(rt, ip, "nativeSetRepeatMirror", "(JFZ)V", Args().j(h).f(2.0f).z(true));
+  CHECK_EQ(at(h, 150), 0);
+  CHECK(std::fabs(got() - 5.0f) < 0.02f);
+  CHECK_EQ(at(h, 250), 2);
+  CHECK_EQ(got(), 10.0f);
+  // A blend array shorter than 4 is refused, as AutoJavaFloatArray does.
+  rt::GlobalRef short_blend(rt, rt.new_array("[F", 2));
+  CHECK_EQ(thrown(rt, [&] {
+             call(rt, ip, "nativeSetKeyFrame", "(JII[F[F)V",
+                  Args().j(h).i(1).i(100).h(values.get()).h(short_blend.get()));
+           }),
+           std::string("java.lang.ArrayIndexOutOfBoundsException"));
+  call(rt, ip, "nativeDestructor", "(J)V", Args().j(h));
+  CHECK_EQ(thrown(rt, [&] { at(h, 0); }), std::string("java.lang.IllegalStateException"));
+}
+
 // VectorDrawable: HWUI's tree as a property store, its defaults and property
 // layouts, owned by VirtualRefBasePtr (the last reference frees every node).
 TEST(graphics_vector_drawable_follows_hwui) {

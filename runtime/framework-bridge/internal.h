@@ -145,6 +145,8 @@ bool color_space_params(int64_t handle, std::array<float, 7>& transfer, std::arr
 void register_framework_vector_drawable(rt::NativeRegistry& r);
 // SurfaceControl, its Transaction and Surface (framework_surface.cpp), registered by register_framework_graphics.
 void register_framework_surface(rt::NativeRegistry& r);
+// android.graphics.Interpolator (framework_interpolator.cpp), registered by register_framework_graphics.
+void register_framework_interpolator(rt::NativeRegistry& r);
 // Runs fn on the thread of a MessageQueue (its mPtr), from its nativePollOnce,
 // once `deadline` (monotonic nanoseconds) passes, as Looper::pollOnce runs the
 // callbacks of watched descriptors (framework_natives.cpp). Wakes the poller.

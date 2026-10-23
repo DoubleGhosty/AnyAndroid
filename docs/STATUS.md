@@ -48,7 +48,7 @@ le nombre de fichiers, et ne montent qu'avec une preuve sur le vrai framework ou
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
 | G2    | Vraie libcore d'AOSP (Android 17)                           | 93 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART ([ADR-004](adr/ADR-004-libcore-aosp.md)). Ajouts du 17 octobre encore **à vérifier** sur la vraie libcore : E/S scatter-gather, `MethodHandle` polymorphique, annotations, fuseaux horaires |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 85 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md). J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, à 420 dpi depuis le 23 octobre) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK comme Android 12+, prouvés par des tests e2e) ; J9 en cours (toasts, composition des fenêtres et navigation entre activités prouvés par des e2e ; dialogues encore à vérifier) ; J10 à faire ; J3 en cours |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 87 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md). J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, à 420 dpi depuis le 23 octobre) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK comme Android 12+, prouvés par des tests e2e) ; J9 fait (navigation entre activités, toasts et dialogues prouvés par des e2e) ; J10 à faire ; J3 en cours |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire : architecture proposée dans l'[ADR-009](adr/ADR-009-couche-native-elf.md) (chargeur ELF x86_64, bionic, JNI) |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
 | **Total** | **Android natif sur Windows**                          | **≈ 50 %** | Pondéré par l'effort : G0 5 %, G1 10 %, G2 10 %, G3 30 %, G4 25 %, G5 20 % |
@@ -57,14 +57,14 @@ le nombre de fichiers, et ne montent qu'avec une preuve sur le vrai framework ou
 G0 ██████████ 100 %
 G1 ██████████ 100 %
 G2 █████████░  93 %
-G3 ████████░░  85 %
+G3 ████████░░  87 %
 G4 ░░░░░░░░░░   0 %
 G5 ░░░░░░░░░░   0 %
    ───────────────
    █████░░░░░ ≈ 50 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 43 suites de tests et 196 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 46 suites de tests et 197 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.
@@ -327,7 +327,7 @@ l'identique ; et deux vrais clics de souris dans la fenêtre Win32 (sous Xvfb) d
 image. Le clic joue un son (`View.playSoundEffect`) : le service `audio` répond comme
 `AudioService`, sans sortie audio.
 
-**J9 en cours : toasts faits, fenêtres composées comme sur un téléphone.**
+**J9 fait : navigation, toasts et dialogues, fenêtres composées comme sur un téléphone.**
 - Le service `notification` de l'hôte (`NotificationService`) reprend la file de
   NotificationManagerService : un toast à la fois, au plus 5 par paquet, 2 s (`LENGTH_SHORT`) ou
   3,5 s (`LENGTH_LONG`), 333 ms de plus pour un toast texte et 250 ms de plus après un toast
@@ -362,8 +362,21 @@ l'identique ; test unitaire `surface_compositor_walks_the_layer_tree`.
 Preuves : `e2e-process-nav` (l'écran de détail et son message) et `e2e-process-nav-back` (retour
 par le bouton puis par BACK, l'écran principal revient), sur l'exemple `two-screens`, chacun lancé
 trois fois. Non faits : une seule tâche, sans modes de lancement ni drapeaux d'intention
-(`singleTop`, `CLEAR_TOP`…), sans `startActivityForResult`. Pas encore vérifiés : les dialogues
-(`FLAG_DIM_BEHIND` n'a pas d'e2e) et les fenêtres popup.
+(`singleTop`, `CLEAR_TOP`…), sans `startActivityForResult`.
+
+**Dialogues vérifiés** : un `AlertDialog` du framework (mise en page Material
+`alert_dialog_material`, coins arrondis, titre, message, boutons) s'ouvre dans sa propre fenêtre,
+centrée par le `WindowLayout` du framework, avec le voile de `Dimmer` sous elle (alpha 0,6, le
+`backgroundDimAmount` du thème : la fenêtre derrière est à 40 %). « OUI » appelle le
+`DialogInterface.OnClickListener` de l'activité et ferme le dialogue ; BACK va au dialogue, qui a
+le focus, et l'annule (`Dialog.onKeyUp`) ; le focus revient ensuite à l'activité. La `ScrollView`
+du dialogue a demandé les natives de `android.graphics.Interpolator` (fondu des barres de
+défilement), portées de `SkiaInterpolator` de HWUI. Preuves : `e2e-process-dialog` (sondes sur le
+voile, la surface du dialogue, son titre et « OUI »), `e2e-process-dialog-answer` (« Réponse :
+oui », plus de voile), `e2e-process-dialog-back` (annulation, puis BACK atteint l'activité), sur
+l'exemple `dialog-demo`, chacun lancé trois fois ; test unitaire
+`graphics_interpolator_follows_skia_interpolator`. Pas encore vérifiés : `PopupWindow` (menus
+déroulants, sous-fenêtres) et les changements de configuration (rotation, recréation).
 
 **À savoir pour la suite** :
 - dans le bac à sable `/data`, `unlink` et `rename` d'un fichier ouvert suivent Linux (nom libéré
@@ -413,13 +426,12 @@ Le plan de G3 est fixé par [ADR-006](adr/ADR-006-demarrage-applications.md) : p
 `system_server`, des services système locaux en Java (javac + D8) appelés sans `Parcel`, et les
 vrais gestionnaires d'`ActivityThread`.
 
-1. **J9 : dialogues**, vérifiés sur le vrai framework : un `AlertDialog` (voile `FLAG_DIM_BEHIND`,
-   clic sur un bouton, retour du focus) avec un e2e ; puis `startActivityForResult` et les modes de
-   lancement.
+1. **J10** : une vraie application AOSP affichée et utilisable (d'abord un exemple en Java sur les
+   widgets du framework : listes, `PopupWindow`, `startActivityForResult`, puis `Music` de la
+   GSI).
 2. **Vérifier les ajouts G2 du 17 octobre** sur la vraie libcore et réparer la CI Windows.
-3. **J10** : une vraie application AOSP affichée et utilisable.
-4. **G4** : chargeur ELF et bionic, pour les applications avec du code natif (`.so` x86_64), selon l'[ADR-009](adr/ADR-009-couche-native-elf.md).
-5. **G5** : microG (démarrage de GmsCore avec les mêmes services), puis les GApps.
+3. **G4** : chargeur ELF et bionic, pour les applications avec du code natif (`.so` x86_64), selon l'[ADR-009](adr/ADR-009-couche-native-elf.md).
+4. **G5** : microG (démarrage de GmsCore avec les mêmes services), puis les GApps.
 
 ## Règles que le projet s'impose
 

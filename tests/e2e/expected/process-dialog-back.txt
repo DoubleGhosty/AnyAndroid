@@ -1,0 +1,17 @@
+démarrage : ActivityThread.main
+processus attaché : com.anyandroid.samples.dialog
+application : android.app.Application
+cycle : MainActivity.onCreate
+cycle : MainActivity.onStart
+cycle : MainActivity.onResume
+activité au premier plan
+entrée : appui 540,261 → traité
+entrée : relâchement 540,261 → traité
+entrée : appui sur la touche BACK → traité
+entrée : relâchement de la touche BACK → abandonné (fenêtre retirée)
+entrée : appui sur la touche BACK → traité
+entrée : relâchement de la touche BACK → traité
+cycle : MainActivity.onPause
+cycle : MainActivity.onStop
+tâche passée en arrière-plan
+boucle principale quittée
