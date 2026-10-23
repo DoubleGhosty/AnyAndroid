@@ -236,3 +236,21 @@ aa_e2e(malformed-bad-dex-run-refused CODE 4 ARGS run ${S}/malformed-bad-dex.apk 
 add_test(NAME fuzz-basic COMMAND aa_fuzz ${S}/basic-activity.apk 3000 1)
 add_test(NAME fuzz-nav COMMAND aa_fuzz ${S}/two-screens.apk 3000 2)
 add_test(NAME fuzz-hello-exec COMMAND aa_fuzz ${S}/hello-dex.apk 3000 3 Lcom/anyandroid/samples/hello/Hello;)
+
+# Under wine, the first wine process of a run starts wineserver, which then
+# holds that test's standard output and error open: CTest waits for those pipes
+# as long as later tests keep wineserver alive, until the test's timeout (the
+# processes themselves have ended). A wineserver started first, detached from
+# every test's pipes, serves the whole run.
+if(CMAKE_CROSSCOMPILING_EMULATOR)
+  list(GET CMAKE_CROSSCOMPILING_EMULATOR 0 aa_emulator)
+  get_filename_component(aa_emulator ${aa_emulator} NAME)
+  find_program(AA_WINESERVER wineserver)
+  if(aa_emulator MATCHES "^wine" AND AA_WINESERVER)
+    add_test(NAME wineserver COMMAND sh -c "'${AA_WINESERVER}' -p30 </dev/null >/dev/null 2>&1; exit 0")
+    set_tests_properties(wineserver PROPERTIES FIXTURES_SETUP wineserver)
+    get_property(aa_tests DIRECTORY PROPERTY TESTS)
+    list(REMOVE_ITEM aa_tests wineserver)
+    set_tests_properties(${aa_tests} PROPERTIES FIXTURES_REQUIRED wineserver)
+  endif()
+endif()
