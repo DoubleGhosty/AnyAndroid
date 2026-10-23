@@ -9,6 +9,5 @@ entrée : appui sur la touche BACK → traité
 entrée : relâchement de la touche BACK → traité
 cycle : MainActivity.onPause
 cycle : MainActivity.onStop
-cycle : MainActivity.onDestroy
-pile d'activités vide
+tâche passée en arrière-plan
 boucle principale quittée

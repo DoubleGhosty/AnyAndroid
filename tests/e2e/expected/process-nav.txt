@@ -1,0 +1,15 @@
+démarrage : ActivityThread.main
+processus attaché : com.anyandroid.samples.nav
+application : android.app.Application
+cycle : MainActivity.onCreate
+cycle : MainActivity.onStart
+cycle : MainActivity.onResume
+activité au premier plan
+entrée : appui 540,261 → traité
+entrée : relâchement 540,261 → traité
+cycle : MainActivity.onPause
+cycle : DetailActivity.onCreate
+cycle : DetailActivity.onStart
+cycle : DetailActivity.onResume
+cycle : MainActivity.onStop
+activité au premier plan

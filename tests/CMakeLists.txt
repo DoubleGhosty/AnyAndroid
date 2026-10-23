@@ -161,8 +161,10 @@ if(AA_LIBCORE_DIR)
              --trace-input
              --input "after-frames 1\nsettle 1500\ntap 540 332\nsettle 1500\ntap 540 332\nsettle 1500\nquit"
              ${S}/basic-activity.apk aa.host.ProcessLauncher com.anyandroid.samples.basic)
-      # J8: BACK finishes the only activity (onPause, onStop, onDestroy), then
-      # the process ends, no home screen to return to.
+      # J8: BACK on the root activity, started from the home screen with a main
+      # intent, moves the task to the back as Android 12+ does (onPause, onStop,
+      # no onDestroy: ActivityClientController.shouldMoveTaskToBack); without a
+      # home screen to show, the process then ends.
       aa_e2e(process-back CODE 0 GOLDEN process-back.txt
         ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
              --trace-input --input "after-frames 1\nsettle 1500\nkey BACK\nsettle 3000\nquit"
@@ -178,6 +180,26 @@ if(AA_LIBCORE_DIR)
              --trace-input
              --input "after-frames 1\nsettle 1500\ntap 540 332\nsettle 1000\ntap 540 332\nsettle 1000\ntap 540 332\nsettle 600\nquit"
              ${S}/basic-activity.apk aa.host.ProcessLauncher com.anyandroid.samples.basic)
+      # J9: navigation on the activity stack of the host's ActivityTaskService. A tap on
+      # "Ouvrir le détail" starts DetailActivity with an extra (onPause, onCreate, onStart,
+      # onResume, then onStop of MainActivity); the frame shows the detail screen.
+      # Probes: the title "Détail" (no ink where "Navigation" has some), the message received,
+      # the button's background where "OUVRIR LE DÉTAIL" has ink.
+      aa_e2e(process-nav CODE 0 GOLDEN process-nav.txt
+        FRAME 1080x1920 "540,28,#1A1B20" "48,75,#E1E1E2" "245,77,#1A1B20" "27,177,#787A84" "670,261,#D6D7D7"
+              "540,1000,#EDEDF6"
+        ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
+             --trace-input --input "after-frames 1\nsettle 1500\ntap 540 261\nsettle 3000\nquit"
+             ${S}/two-screens.apk aa.host.ProcessLauncher com.anyandroid.samples.nav)
+      # ... back by the button (finish()), then again by the BACK key: MainActivity
+      # comes back to the front each time, DetailActivity is destroyed.
+      # Probes: the main screen again (title "Navigation", no message, "OUVRIR LE DÉTAIL").
+      aa_e2e(process-nav-back CODE 0 GOLDEN process-nav-back.txt
+        FRAME 1080x1920 "540,28,#1A1B20" "245,77,#E1E1E2" "27,177,#EDEDF6" "670,261,#30323A" "540,1000,#EDEDF6"
+        ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
+             --trace-input
+             --input "after-frames 1\nsettle 1500\ntap 540 261\nsettle 3000\ntap 540 261\nsettle 3000\ntap 540 261\nsettle 3000\nkey BACK\nsettle 3000\nquit"
+             ${S}/two-screens.apk aa.host.ProcessLauncher com.anyandroid.samples.nav)
       # ... and goes away after LENGTH_SHORT (2 s, 333 ms more for a text toast): its window and
       # layer are removed, the display shows the activity alone again.
       aa_e2e(process-toast-end CODE 0 GOLDEN process-toast-end.txt

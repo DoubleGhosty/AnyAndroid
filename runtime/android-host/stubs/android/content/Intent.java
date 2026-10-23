@@ -34,6 +34,10 @@ public class Intent {
     return null;
   }
 
+  public boolean hasCategory(String category) {
+    throw new RuntimeException("stub");
+  }
+
   public Intent addCategory(String category) {
     return this;
   }

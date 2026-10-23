@@ -1016,7 +1016,10 @@ void register_framework_surface(rt::NativeRegistry& r) {
     std::lock_guard<std::mutex> guard(l->lock);
     return rt::ret_obj(rt.new_string_utf8(l->name));
   });
+  // A released SurfaceControl (handle 0) is ignored, as android_view_SurfaceControl
+  // does: ViewRootImpl sets the hint after releasing a hidden window's surface.
   r.bind(sc, "nativeSetTransformHint", "(JI)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (a.i64(0) == 0) return 0;
     auto l = layer(rt, a.i64(0));
     std::lock_guard<std::mutex> guard(l->lock);
     l->transform_hint = a.i32(2);

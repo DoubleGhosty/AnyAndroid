@@ -27,6 +27,8 @@ import java.util.Map;
  */
 public final class ActivityTaskService extends IActivityTaskManager.Stub {
   private static final int PROCESS_STATE_TOP = 2;
+  /** ActivityManager.START_INTENT_NOT_RESOLVED, START_CLASS_NOT_FOUND. */
+  private static final int START_INTENT_NOT_RESOLVED = -91, START_CLASS_NOT_FOUND = -92;
 
   public static final int STATE_INITIALIZING = 0;
   public static final int STATE_STARTED = 1;
@@ -41,6 +43,7 @@ public final class ActivityTaskService extends IActivityTaskManager.Stub {
     public final ActivityInfo info;
     public int state = STATE_INITIALIZING;
     public boolean finishing = false;
+    boolean launchedFromHome;  // ActivityRecord.LAUNCH_SOURCE_TYPE_HOME: the launcher's own start
 
     ActivityRecord(IBinder token, Intent intent, ActivityInfo info) {
       this.token = token;
@@ -55,8 +58,11 @@ public final class ActivityTaskService extends IActivityTaskManager.Stub {
   public static volatile String sPackageName;
   public static volatile Runnable onResumed;
   public static volatile Runnable onStackEmpty;
+  /** The task went behind the home screen (BACK on its root activity); there is no home here. */
+  public static volatile Runnable onTaskMovedToBack;
 
-  private final Deque<ActivityRecord> stack = new ArrayDeque<>();
+  private final Deque<ActivityRecord> stack = new ArrayDeque<>();  // the single task, top first
+  private boolean movingToBack;
   private final Map<IBinder, ActivityRecord> activities = new HashMap<>();
   private final ActivityClient client = new ActivityClient(this);
 
@@ -75,8 +81,9 @@ public final class ActivityTaskService extends IActivityTaskManager.Stub {
   }
 
   /**
-   * Pushes the initial activity token created by the launcher onto the stack. Static: a public
-   * instance method of a binder service must override the framework's interface (ServicesProbe).
+   * Pushes the initial activity token created by the launcher onto the stack: the launcher plays
+   * the home screen's part. Static: a public instance method of a binder service must override
+   * the framework's interface (ServicesProbe).
    */
   public static void recordInitialActivity(IBinder token, Intent intent, ActivityInfo info) {
     ActivityTaskService service = sInstance;
@@ -84,6 +91,7 @@ public final class ActivityTaskService extends IActivityTaskManager.Stub {
     synchronized (service) {
       ActivityRecord rec = new ActivityRecord(token, intent, info);
       rec.state = STATE_INITIALIZING;
+      rec.launchedFromHome = true;
       service.stack.push(rec);
       service.activities.put(token, rec);
     }
@@ -102,11 +110,11 @@ public final class ActivityTaskService extends IActivityTaskManager.Stub {
       int flags,
       ProfilerInfo profilerInfo,
       Bundle options) {
-    if (intent == null) return -1;
+    if (intent == null) return START_INTENT_NOT_RESOLVED;
     ActivityInfo info = resolveActivity(intent);
     if (info == null) {
-      System.err.println("[AnyAndroid] Activité introuvable pour l'intent : " + intent);
-      return -1;
+      // Instrumentation.checkStartActivityResult turns both into ActivityNotFoundException.
+      return intent.getComponent() != null ? START_CLASS_NOT_FOUND : START_INTENT_NOT_RESOLVED;
     }
     IBinder token = new Binder();
     ActivityRecord next = new ActivityRecord(token, intent, info);
@@ -150,6 +158,8 @@ public final class ActivityTaskService extends IActivityTaskManager.Stub {
           Runnable empty = onStackEmpty;
           if (empty != null) empty.run();
         }
+      } else if (movingToBack && rec != null && rec == stack.peekLast()) {
+        stopActivity(rec);  // the task is behind the home screen: no longer visible
       } else {
         ActivityRecord top = stack.peek();
         if (top != null && top != rec && top.state == STATE_INITIALIZING) {
@@ -174,9 +184,44 @@ public final class ActivityTaskService extends IActivityTaskManager.Stub {
   }
 
   void onActivityStopped(IBinder token) {
+    boolean movedToBack;
     synchronized (this) {
       ActivityRecord rec = activities.get(token);
       if (rec != null) rec.state = STATE_STOPPED;
+      movedToBack = movingToBack && rec != null && rec == stack.peekLast();
+      if (movedToBack) movingToBack = false;
+    }
+    Runnable back = onTaskMovedToBack;
+    if (movedToBack && back != null) back.run();
+  }
+
+  /**
+   * ActivityClientController.shouldMoveTaskToBack (android-17.0.0_r1): BACK on the last activity
+   * of the task, its base activity, started from the home screen with a main intent, moves the
+   * task to the back instead of finishing the activity.
+   */
+  private synchronized boolean shouldMoveTaskToBack(IBinder token) {
+    ActivityRecord r = activities.get(token);
+    ActivityRecord root = stack.peekLast();
+    return r != null && r == root && stack.peek() == r && root.launchedFromHome && isMainIntent(root.intent);
+  }
+
+  /** ActivityRecord.isMainIntent. */
+  private static boolean isMainIntent(Intent intent) {
+    return "android.intent.action.MAIN".equals(intent.getAction())
+        && intent.hasCategory("android.intent.category.LAUNCHER") && intent.getCategories().size() == 1
+        && intent.getData() == null && intent.getType() == null;
+  }
+
+  /** moveActivityTaskToBackInner: the home screen comes in front, the activity pauses then stops. */
+  private synchronized void moveTaskToBack(IBinder token) {
+    ActivityRecord rec = activities.get(token);
+    if (rec == null || movingToBack) return;
+    movingToBack = true;
+    if (rec.state == STATE_RESUMED) {
+      pauseActivity(rec, false);
+    } else if (rec.state == STATE_PAUSED) {
+      stopActivity(rec);
     }
   }
 
@@ -324,15 +369,17 @@ public final class ActivityTaskService extends IActivityTaskManager.Stub {
       service.onActivityDestroyed(token);
     }
 
+    /**
+     * ActivityClientController.onBackPressed: the task goes to the back when
+     * shouldMoveTaskToBack says so, otherwise the activity finishes (requestCallbackFinish).
+     */
     @Override
     public void onBackPressed(IBinder token, IRequestFinishCallback callback) {
-      if (callback != null) {
-        try {
-          callback.requestFinish();
-          return;
-        } catch (Throwable ignored) {}
+      if (service.shouldMoveTaskToBack(token)) {
+        service.moveTaskToBack(token);
+        return;
       }
-      service.doFinishActivity(token);
+      if (callback != null) callback.requestFinish();  // a local callback: no RemoteException
     }
   }
 }

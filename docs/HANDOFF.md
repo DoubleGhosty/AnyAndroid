@@ -163,9 +163,9 @@ ninja -C build
 WINEDEBUG=-all ctest --test-dir build -j8 --output-on-failure
 WINEDEBUG=-all wine build/tests/aa_unit_tests.exe [filtre]   # tests unitaires seuls, filtre par nom
 ```
-État au 2026-10-23 : **41 suites, toutes vertes sous wine** (dont `e2e-launch`,
+État au 2026-10-23 : **43 suites, toutes vertes sous wine** (dont `e2e-launch`,
 `e2e-process-launch`, `e2e-process-input`, `e2e-process-back`, `e2e-process-toast` et
-`e2e-process-toast-end`), **196 tests unitaires**. La CI
+`e2e-process-toast-end`, `e2e-process-nav`, `e2e-process-nav-back`), **196 tests unitaires**. La CI
 Windows (27 suites) ne démarrait plus le 23 octobre : toutes les exécutions échouaient en quelques
 secondes sans journal, un problème du compte GitHub Actions et non du code.
 Avec `-DAA_R8_JAR` le code d'hôte Java est construit et les suites `host-probe`,
@@ -229,8 +229,11 @@ Fait et vérifié (voir STATUS.md pour le détail) :
   `ViewRootImpl` (hors de l'arbre, `NOT_ADD_TO_ROOT`) est rattachée, couche par
   `WindowPolicy` (transcription de `getWindowLayerFromTypeLw`), voile de `Dimmer`. Le pont compose
   l'arbre des couches comme SurfaceFlinger (`framework_surface.cpp`, `layers_to_draw`) ;
-  `--log-level debug` écrit chaque composition (« compositeur »). Pas encore vérifiés : pile
-  d'activités (`ActivityTaskService`) et dialogues, poussés le 17 octobre.
+  `--log-level debug` écrit chaque composition (« compositeur »). Navigation vérifiée
+  (`ActivityTaskService` : `startActivity`, `finish`, BACK ; e2e `process-nav` et
+  `process-nav-back`) ; BACK sur l'activité racine passe la tâche en arrière-plan comme
+  `shouldMoveTaskToBack`. Pas encore vérifiés : dialogues, popups, `startActivityForResult`,
+  modes de lancement.
 - **Densité** : la configuration globale est calculée comme
   `DisplayContent.computeScreenConfiguration` (`DisplayService.computeScreenConfiguration` :
   420 dpi, 411 × 731 dp, écran tactile, sans clavier physique) et `ro.sf.lcd_density` vaut 420.
@@ -256,8 +259,9 @@ Fait et vérifié (voir STATUS.md pour le détail) :
 
 ## 9. Prochaines étapes, dans l'ordre
 
-1. **J9 : dialogues, navigation**, vérifiés sur le vrai framework par des e2e (un dialogue avec
-   `FLAG_DIM_BEHIND` et le retour du focus, `startActivity` puis BACK vers l'activité précédente).
+1. **J9 : dialogues**, vérifiés sur le vrai framework par un e2e (un `AlertDialog` avec
+   `FLAG_DIM_BEHIND`, un clic sur un bouton et le retour du focus), puis
+   `startActivityForResult` et les modes de lancement.
 2. **Vérifier les ajouts G2 du 17 octobre** sur la vraie libcore (E/S scatter-gather,
    `MethodHandle`, annotations, fuseaux horaires) ; relancer la CI Windows dès que le compte
    GitHub Actions fonctionne.

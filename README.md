@@ -7,7 +7,7 @@
 Couche de compatibilité qui exécute des applications Android (bytecode DEX) **comme des processus
 Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 
-> **Avancement : ≈ 49 % vers « Android natif sur Windows »**
+> **Avancement : ≈ 50 % vers « Android natif sur Windows »**
 > 📊 Détail des jalons et carte complète dans [docs/STATUS.md](docs/STATUS.md) · [Données brutes](docs/progress.json).
 >
 > **Statut : prototype de recherche.** La preuve de concept de l'annexe A du cadrage fonctionne :
@@ -78,8 +78,8 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 | J5 — démarrage par les vrais gestionnaires d'`ActivityThread`, fenêtre logique | atteint : jusqu'à la première image publiée (test e2e `process-launch`) |
 | J6 — texte (FreeType + HarfBuzz, logique de minikin) | fait pour l'exemple : mesure (`Paint`), `MeasuredText`, coupure (`LineBreaker`), dessin ; `TextRunShaper` et `PositionedGlyphs` ajoutés, pas encore exercés par une vraie application |
 | J7 — moteur 2D logiciel (dessin des vues dans la `Surface`) | fait pour l'exemple (image vérifiée au pixel) : `SkiaCanvas` de HWUI sur le Skia d'AOSP, effets des `Paint` ; rotations 3D de `RenderNode`, `drawGlyphs` et AGSL ajoutés, pas encore exercés par une vraie application |
-| J8 — fenêtre Win32 et entrées | fait : `exec --window` montre l'écran ; la souris et le clavier passent par un répartiteur d'entrées fidèle à InputDispatcher jusqu'au vrai framework (deux clics changent le libellé, BACK termine l'activité : tests `process-input` et `process-back`) |
-| J9 — navigation, cycle de vie complet, toasts et dialogues | en cours : **toasts faits** (service `notification` fidèle à NotificationManagerService, `ToastPresenter` du framework ; tests `process-toast` et `process-toast-end`) ; fenêtres composées comme sur un téléphone (cadres par le `WindowLayout` du framework, une couche par fenêtre, arbre de couches façon SurfaceFlinger) ; dialogues et pile d'activités du 17 octobre encore à vérifier |
+| J8 — fenêtre Win32 et entrées | fait : `exec --window` montre l'écran ; la souris et le clavier passent par un répartiteur d'entrées fidèle à InputDispatcher jusqu'au vrai framework (deux clics changent le libellé, BACK passe la tâche en arrière-plan comme Android 12+ : tests `process-input` et `process-back`) |
+| J9 — navigation, cycle de vie complet, toasts et dialogues | en cours : **toasts faits** (service `notification` fidèle à NotificationManagerService, `ToastPresenter` du framework ; tests `process-toast` et `process-toast-end`) ; **navigation entre activités faite** (`startActivity`, `finish`, BACK, cycle de vie dans l'ordre d'Android ; tests `process-nav` et `process-nav-back`) ; fenêtres composées comme sur un téléphone (cadres par le `WindowLayout` du framework, une couche par fenêtre, arbre de couches façon SurfaceFlinger) ; dialogues encore à vérifier |
 | J10 — une vraie application AOSP affichée et utilisable | à faire |
 
 ## Limites actuelles

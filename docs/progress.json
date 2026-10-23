@@ -2,11 +2,11 @@
   "metadata": {
     "project": "AnyAndroid for Windows",
     "version": "0.1.0",
-    "generated_at": "2026-10-23T13:53:27.382326+00:00",
+    "generated_at": "2026-10-23T14:13:59.753574+00:00",
     "target": "Android natif sur Windows (sans VM ni hyperviseur)"
   },
   "summary": {
-    "overall_percent": 49.0,
+    "overall_percent": 50.0,
     "bridge_percent": 88.0,
     "libcore_percent": 47.2,
     "dalvik_percent": 99.6,
@@ -50,10 +50,10 @@
       {
         "id": "G3",
         "name": "Vrai `framework.jar` et une application AOSP affichée",
-        "description": "**En cours** : plan de l'ADR-006. J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, à 420 dpi depuis le 23 octobre) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK jusqu'à `onDestroy`, prouvés par des tests e2e) ; J9 en cours (toasts et composition des fenêtres prouvés par des e2e ; dialogues et pile d'activités du 17 octobre encore à vérifier) ; J10 à faire ; J3 en cours",
-        "progress": 83,
+        "description": "**En cours** : plan de l'ADR-006. J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, à 420 dpi depuis le 23 octobre) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK comme Android 12+, prouvés par des tests e2e) ; J9 en cours (toasts, composition des fenêtres et navigation entre activités prouvés par des e2e ; dialogues encore à vérifier) ; J10 à faire ; J3 en cours",
+        "progress": 85,
         "weight": 30,
-        "status": "**En cours** : plan de l'ADR-006. J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, à 420 dpi depuis le 23 octobre) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK jusqu'à `onDestroy`, prouvés par des tests e2e) ; J9 en cours (toasts et composition des fenêtres prouvés par des e2e ; dialogues et pile d'activités du 17 octobre encore à vérifier) ; J10 à faire ; J3 en cours",
+        "status": "**En cours** : plan de l'ADR-006. J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, à 420 dpi depuis le 23 octobre) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK comme Android 12+, prouvés par des tests e2e) ; J9 en cours (toasts, composition des fenêtres et navigation entre activités prouvés par des e2e ; dialogues encore à vérifier) ; J10 à faire ; J3 en cours",
         "adr": "ADR-006",
         "state": "in_progress"
       },
@@ -78,7 +78,7 @@
         "state": "pending"
       }
     ],
-    "overall_percent": 49.0
+    "overall_percent": 50.0
   },
   "bridge": {
     "classes": {
@@ -11135,10 +11135,10 @@
     ]
   },
   "tests": {
-    "total_suites": 41,
-    "passed_suites": 41,
+    "total_suites": 43,
+    "passed_suites": 43,
     "unit_tests": 196,
-    "e2e_suites": 36,
+    "e2e_suites": 38,
     "fuzz_suites": 3,
     "percent_core": 100.0,
     "note": "Toutes les suites passent avec les entrées Android et R8 (STATUS.md)"

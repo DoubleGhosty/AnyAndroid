@@ -48,23 +48,23 @@ le nombre de fichiers, et ne montent qu'avec une preuve sur le vrai framework ou
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
 | G2    | Vraie libcore d'AOSP (Android 17)                           | 93 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART ([ADR-004](adr/ADR-004-libcore-aosp.md)). Ajouts du 17 octobre encore **à vérifier** sur la vraie libcore : E/S scatter-gather, `MethodHandle` polymorphique, annotations, fuseaux horaires |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 83 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md). J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, à 420 dpi depuis le 23 octobre) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK jusqu'à `onDestroy`, prouvés par des tests e2e) ; J9 en cours (toasts et composition des fenêtres prouvés par des e2e ; dialogues et pile d'activités du 17 octobre encore à vérifier) ; J10 à faire ; J3 en cours |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 85 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md). J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, à 420 dpi depuis le 23 octobre) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK comme Android 12+, prouvés par des tests e2e) ; J9 en cours (toasts, composition des fenêtres et navigation entre activités prouvés par des e2e ; dialogues encore à vérifier) ; J10 à faire ; J3 en cours |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire : architecture proposée dans l'[ADR-009](adr/ADR-009-couche-native-elf.md) (chargeur ELF x86_64, bionic, JNI) |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
-| **Total** | **Android natif sur Windows**                          | **≈ 49 %** | Pondéré par l'effort : G0 5 %, G1 10 %, G2 10 %, G3 30 %, G4 25 %, G5 20 % |
+| **Total** | **Android natif sur Windows**                          | **≈ 50 %** | Pondéré par l'effort : G0 5 %, G1 10 %, G2 10 %, G3 30 %, G4 25 %, G5 20 % |
 
 ```
 G0 ██████████ 100 %
 G1 ██████████ 100 %
 G2 █████████░  93 %
-G3 ████████░░  83 %
+G3 ████████░░  85 %
 G4 ░░░░░░░░░░   0 %
 G5 ░░░░░░░░░░   0 %
    ───────────────
-   █████░░░░░ ≈ 49 % vers « Android natif sur Windows »
+   █████░░░░░ ≈ 50 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 41 suites de tests et 196 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 43 suites de tests et 196 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.
@@ -319,8 +319,10 @@ La souris et le clavier de la fenêtre atteignent l'application comme sur un té
   `--trace-input` rendent les tests déterministes.
 
 Preuves : `e2e-process-input` (deux clics sur le bouton de l'exemple : `View.onClick` du vrai
-framework, le libellé devient « Clics : 2 », sondes de pixels), `e2e-process-back` (BACK :
-`onPause`, `onStop`, `onDestroy`, puis fin du processus), chaque test lancé trois fois à
+framework, le libellé devient « Clics : 2 », sondes de pixels), `e2e-process-back` (BACK sur
+l'activité racine, lancée depuis l'écran d'accueil : comme Android 12+, la tâche passe en
+arrière-plan, `onPause` et `onStop` sans `onDestroy` ; sans écran d'accueil à montrer, le
+processus se termine), chaque test lancé trois fois à
 l'identique ; et deux vrais clics de souris dans la fenêtre Win32 (sous Xvfb) donnent la même
 image. Le clic joue un son (`View.playSoundEffect`) : le service `audio` répond comme
 `AudioService`, sans sortie audio.
@@ -348,9 +350,20 @@ image. Le clic joue un son (`View.playSoundEffect`) : le service `audio` répond
 Preuves : `e2e-process-toast` (le troisième clic montre « Trois clics ! » centré à 48 dp du bas,
 au-dessus de l'activité, sondes sur le « T ») et `e2e-process-toast-end` (le toast disparaît après
 2 333 ms : sa fenêtre et sa couche sont retirées, l'activité reste seule), chacun lancé trois fois à
-l'identique ; test unitaire `surface_compositor_walks_the_layer_tree`. Pas encore vérifiés : les
-dialogues (`FLAG_DIM_BEHIND` n'a pas d'e2e), les fenêtres popup et la pile d'activités
-(`startActivity`, retour à l'activité précédente) du code poussé le 17 octobre.
+l'identique ; test unitaire `surface_compositor_walks_the_layer_tree`.
+
+**Navigation entre activités vérifiée** (pile du service `activity_task` de l'hôte, poussée le
+17 octobre, corrigée le 23) : `startActivity` avec un extra, `onPause` de l'activité courante,
+`onCreate`/`onStart`/`onResume` de la nouvelle puis `onStop` de la précédente ; retour par
+`finish()` ou par BACK : `onPause`, `onStart`/`onResume` de l'activité précédente, `onStop` et
+`onDestroy` de celle qui finit, dans l'ordre d'Android. BACK sur l'activité racine suit
+`ActivityClientController.shouldMoveTaskToBack` ; une activité introuvable donne
+`START_CLASS_NOT_FOUND` ou `START_INTENT_NOT_RESOLVED` (donc `ActivityNotFoundException`).
+Preuves : `e2e-process-nav` (l'écran de détail et son message) et `e2e-process-nav-back` (retour
+par le bouton puis par BACK, l'écran principal revient), sur l'exemple `two-screens`, chacun lancé
+trois fois. Non faits : une seule tâche, sans modes de lancement ni drapeaux d'intention
+(`singleTop`, `CLEAR_TOP`…), sans `startActivityForResult`. Pas encore vérifiés : les dialogues
+(`FLAG_DIM_BEHIND` n'a pas d'e2e) et les fenêtres popup.
 
 **À savoir pour la suite** :
 - dans le bac à sable `/data`, `unlink` et `rename` d'un fichier ouvert suivent Linux (nom libéré
@@ -400,8 +413,9 @@ Le plan de G3 est fixé par [ADR-006](adr/ADR-006-demarrage-applications.md) : p
 `system_server`, des services système locaux en Java (javac + D8) appelés sans `Parcel`, et les
 vrais gestionnaires d'`ActivityThread`.
 
-1. **J9 : dialogues et navigation**, vérifiés sur le vrai framework : un dialogue (`FLAG_DIM_BEHIND`,
-   retour du focus) et la pile d'activités du code poussé le 17 octobre, chacun avec un e2e.
+1. **J9 : dialogues**, vérifiés sur le vrai framework : un `AlertDialog` (voile `FLAG_DIM_BEHIND`,
+   clic sur un bouton, retour du focus) avec un e2e ; puis `startActivityForResult` et les modes de
+   lancement.
 2. **Vérifier les ajouts G2 du 17 octobre** sur la vraie libcore et réparer la CI Windows.
 3. **J10** : une vraie application AOSP affichée et utilisable.
 4. **G4** : chargeur ELF et bionic, pour les applications avec du code natif (`.so` x86_64), selon l'[ADR-009](adr/ADR-009-couche-native-elf.md).

@@ -547,6 +547,13 @@ void register_process_binder(rt::NativeRegistry& r) {
   for (const char* name : {"sendSignal", "sendSignalQuiet", "sendSignalThrows"}) {
     r.bind(proc, name, "(II)V", send, S::kPartial, "seul l'arrêt du processus courant est pris en compte");
   }
+  // android_app_ActivityThread.cpp: mallopt(M_PURGE) after an activity is
+  // destroyed (PurgeIdler), and heap profiling of a zygote child.
+  const char* thread = "Landroid/app/ActivityThread;";
+  r.bind(thread, "nPurgePendingResources", "()V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; }, S::kStub,
+         "le tas natif n'est pas rendu au système (pas de mallopt)");
+  r.bind(thread, "nInitZygoteChildHeapProfiling", "()V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; },
+         S::kStub, "pas de profilage du tas natif");
 
   const char* binder = "Landroid/os/Binder;";
   r.bind(binder, "getCallingUid", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_int(kAppUid); });

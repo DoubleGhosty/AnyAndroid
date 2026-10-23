@@ -58,6 +58,12 @@ public final class ProcessLauncher implements ActivityService.AttachHandler {
       Launcher.log("pile d'activités vide");
       throw new Stop();
     });
+    // Without a home screen to show, a task sent to the back ends the process, as the system
+    // would end a cached process later.
+    ActivityTaskService.onTaskMovedToBack = () -> new Handler(Looper.getMainLooper()).post(() -> {
+      Launcher.log("tâche passée en arrière-plan");
+      throw new Stop();
+    });
     // Software drawing (ADR-006 §3): ViewRootImpl draws through drawSoftware, without HWUI.
     Reflect.setStatic(Reflect.type("android.view.ThreadedRenderer"), "sRendererEnabled", false);
     // What zygote preloads for every process (ZygoteInit.preloadCompatConfig): the compat rules
