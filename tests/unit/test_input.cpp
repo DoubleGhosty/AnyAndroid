@@ -1,21 +1,17 @@
 // libinput's KeyCharacterMap (framework-bridge/key_character_map.h): the .kcm
 // syntax of Android's keyboards, modifier matching, typed characters as key
-// strokes, overlays and the parcel layout.
-#include <cstring>
+// strokes, overlays and the parcel layout. Then the input dispatcher's
+// decisions (input_routing.h), the input scripts of `exec --input` and the
+// window's letterbox mapping.
 #include <map>
-#include <memory>
 #include <string>
 #include <vector>
 
-#include "dex-engine/dex_file.h"
-#include "dex-engine/runtime.h"
-#include "dex_writer.h"
-#include "framework-bridge/bridge.h"
-#include "framework-bridge/internal.h"
+#include "framework-bridge/input_routing.h"
 #include "framework-bridge/key_character_map.h"
-#include "framework-bridge/motion_event.h"
-#include "smali.h"
+#include "headless/input_script.h"
 #include "test.h"
+#include "windows/windowing/letterbox.h"
 
 using namespace aa;
 using bridge::KeyCharacterMap;
@@ -163,537 +159,156 @@ TEST(input_key_character_map_rejects_malformed_files) {
 
 namespace {
 
-void set_long_field(rt::Runtime& rt, rt::Handle obj, const char* name, int64_t v) {
-  rt::Object& o = rt.nonnull(obj, name);
-  rt::Field* f = o.klass->declared_field(name, "J");
-  if (!f) return;
-  o.fields.at(f->slot) = uint32_t(uint64_t(v));
-  o.fields.at(f->slot + 1) = uint32_t(uint64_t(v) >> 32);
+// A window of the dispatcher's list (from the top), its touchable region
+// being its frame unless given.
+bridge::InputWindow window(uint64_t connection, int32_t type, int32_t flags, bridge::InputRect frame,
+                           bool visible = true) {
+  bridge::InputWindow w;
+  w.connection = connection;
+  w.type = type;
+  w.layout_flags = flags;
+  w.frame = frame;
+  w.touchable = frame;
+  w.visible = visible;
+  w.focusable = visible && (flags & bridge::kWindowFlagNotFocusable) == 0;
+  return w;
 }
 
-int64_t get_long_field(rt::Runtime& rt, rt::Handle obj, const char* name) {
-  rt::Object& o = rt.nonnull(obj, name);
-  rt::Field* f = o.klass->declared_field(name, "J");
-  if (!f) return 0;
-  return int64_t(uint64_t(o.fields.at(f->slot)) | (uint64_t(o.fields.at(f->slot + 1)) << 32));
-}
-
-struct InputVm {
-  std::unique_ptr<dex::DexFile> boot;
-  bridge::NullHost host;
-  std::unique_ptr<rt::Runtime> rt;
-  std::unique_ptr<rt::Runtime::Scope> scope;
-
-  InputVm() {
-    std::vector<tool::ClassDef> b;
-    b.push_back(tool::assemble_smali(R"(
-.class public final Landroid/view/InputChannel;
-.super Ljava/lang/Object;
-.field public mPtr:J
-.method public constructor <init>()V
-    .registers 1
-    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
-    return-void
-.end method
-.method public static native nativeOpenInputChannelPair(Ljava/lang/String;)[J
-.end method
-.method public native nativeDispose(J)V
-.end method
-.method public native nativeGetToken(J)Landroid/os/IBinder;
-.end method
-.method public native nativeWriteToParcel(Landroid/os/Parcel;)V
-.end method
-.method public native nativeReadFromParcel(Landroid/os/Parcel;)V
-.end method
-)", "InputChannel.smali"));
-
-    b.push_back(tool::assemble_smali(R"(
-.class public abstract Landroid/view/InputEventReceiver;
-.super Ljava/lang/Object;
-.field public mReceiverPtr:J
-.method public constructor <init>()V
-    .registers 1
-    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
-    return-void
-.end method
-.method public static native nativeInit(Ljava/lang/ref/WeakReference;Landroid/view/InputChannel;Landroid/os/MessageQueue;)J
-.end method
-.method public static native nativeDispose(J)V
-.end method
-.method public static native nativeFinishInputEvent(JIZ)V
-.end method
-.method public static native nativeProbablyHasInput(J)Z
-.end method
-.method public dispatchInputEvent(ILandroid/view/InputEvent;)V
-    .registers 3
-    return-void
-.end method
-)", "InputEventReceiver.smali"));
-
-    b.push_back(tool::assemble_smali(R"(
-.class public LTestReceiver;
-.super Landroid/view/InputEventReceiver;
-.field public static lastSeq:I
-.field public static lastEvent:Landroid/view/InputEvent;
-.method public constructor <init>()V
-    .registers 1
-    invoke-direct {p0}, Landroid/view/InputEventReceiver;-><init>()V
-    return-void
-.end method
-.method public dispatchInputEvent(ILandroid/view/InputEvent;)V
-    .registers 3
-    sput p1, LTestReceiver;->lastSeq:I
-    sput-object p2, LTestReceiver;->lastEvent:Landroid/view/InputEvent;
-    return-void
-.end method
-)", "TestReceiver.smali"));
-
-    b.push_back(tool::assemble_smali(R"(
-.class public Landroid/os/Binder;
-.super Ljava/lang/Object;
-.implements Landroid/os/IBinder;
-.method public constructor <init>()V
-    .registers 1
-    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
-    return-void
-.end method
-)", "Binder.smali"));
-
-    b.push_back(tool::assemble_smali(R"(
-.class public interface abstract Landroid/os/IBinder;
-.super Ljava/lang/Object;
-)", "IBinder.smali"));
-
-    b.push_back(tool::assemble_smali(R"(
-.class public final Landroid/os/Parcel;
-.super Ljava/lang/Object;
-.field public mNativePtr:J
-.method public constructor <init>()V
-    .registers 3
-    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
-    invoke-static {}, Landroid/os/Parcel;->nativeCreate()J
-    move-result-wide v0
-    iput-wide v0, p0, Landroid/os/Parcel;->mNativePtr:J
-    return-void
-.end method
-.method public static native nativeCreate()J
-.end method
-.method public static native nativeDestroy(J)V
-.end method
-.method public static native nativeSetDataPosition(JI)V
-.end method
-)", "Parcel.smali"));
-
-    b.push_back(tool::assemble_smali(R"(
-.class public final Landroid/os/MessageQueue;
-.super Ljava/lang/Object;
-.field public mPtr:J
-.method public constructor <init>()V
-    .registers 1
-    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
-    return-void
-.end method
-.method public static native nativeInit()J
-.end method
-.method public static native nativeDestroy(J)V
-.end method
-.method public native nativePollOnce(JI)V
-.end method
-)", "MessageQueue.smali"));
-
-    b.push_back(tool::assemble_smali(R"(
-.class public abstract Landroid/view/InputEvent;
-.super Ljava/lang/Object;
-.method public constructor <init>()V
-    .registers 1
-    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
-    return-void
-.end method
-)", "InputEvent.smali"));
-
-    b.push_back(tool::assemble_smali(R"(
-.class public final Landroid/view/MotionEvent;
-.super Landroid/view/InputEvent;
-.field public mNativePtr:J
-.method public constructor <init>()V
-    .registers 1
-    invoke-direct {p0}, Landroid/view/InputEvent;-><init>()V
-    return-void
-.end method
-.method public static obtain()Landroid/view/MotionEvent;
-    .registers 1
-    new-instance v0, Landroid/view/MotionEvent;
-    invoke-direct {v0}, Landroid/view/MotionEvent;-><init>()V
-    return-object v0
-.end method
-)", "MotionEvent.smali"));
-
-    b.push_back(tool::assemble_smali(R"(
-.class public final Landroid/view/KeyEvent;
-.super Landroid/view/InputEvent;
-.field public mNativePtr:J
-.method public constructor <init>()V
-    .registers 1
-    invoke-direct {p0}, Landroid/view/InputEvent;-><init>()V
-    return-void
-.end method
-.method public static obtain(IJJIIIIIIIII[BLjava/lang/String;)Landroid/view/KeyEvent;
-    .registers 17
-    new-instance v0, Landroid/view/KeyEvent;
-    invoke-direct {v0}, Landroid/view/KeyEvent;-><init>()V
-    return-object v0
-.end method
-)", "KeyEvent.smali"));
-
-    boot = dex::DexFile::open(tool::write_dex(b), "test-input.dex");
-    rt = std::make_unique<rt::Runtime>();
-    rt->add_boot_dex(boot.get());
-    bridge::install(rt->registry(), host);
-    scope = std::make_unique<rt::Runtime::Scope>(*rt, "test");
-  }
-};
+constexpr bridge::InputRect kScreen{0, 0, 1080, 1920};
 
 }  // namespace
 
-TEST(input_channel_and_event_receiver_pipeline) {
-  InputVm vm;
-  auto& rt = *vm.rt;
+// InputDispatcher: a touch goes to the topmost visible window that accepts
+// it (a toast, NOT_TOUCHABLE, never takes it); keys to the topmost focusable
+// window (a toast is not focusable either).
+TEST(input_routing_follows_input_dispatcher) {
+  using bridge::find_focused_window;
+  using bridge::find_outside_targets;
+  using bridge::find_touched_window;
+  const int32_t toast_flags = bridge::kWindowFlagNotTouchable | bridge::kWindowFlagNotFocusable;
+  std::vector<bridge::InputWindow> windows = {
+      window(3, 2005, toast_flags, {240, 1600, 840, 1720}),  // TYPE_TOAST
+      window(1, 1, 0, kScreen),                              // the activity
+  };
+  CHECK_EQ(find_touched_window(windows, 540, 1650), 1);  // through the toast
+  CHECK_EQ(find_focused_window(windows), 1);
+  CHECK_EQ(find_touched_window(windows, 1080, 10), -1);  // right edge excluded
 
-  // 1. Open channel pair
-  rt::Handle name = rt.new_string_utf8("test-channel");
-  rt::Handle pair_arr = rt::Handle(rt.call_static("Landroid/view/InputChannel;", "nativeOpenInputChannelPair",
-                                                  "(Ljava/lang/String;)[J", {name}));
-  CHECK(pair_arr != rt::kNull);
-  auto& arr = rt.array(pair_arr, "long[]");
-  CHECK_EQ(arr.length, 2u);
-  int64_t server_h = 0, client_h = 0;
-  std::memcpy(&server_h, arr.data.data(), sizeof(int64_t));
-  std::memcpy(&client_h, arr.data.data() + sizeof(int64_t), sizeof(int64_t));
-  CHECK(server_h != 0);
-  CHECK(client_h != 0);
-  CHECK(server_h != client_h);
+  // A touch-modal dialog: the window manager makes its touchable region the
+  // display, so a touch outside its frame is still its own.
+  bridge::InputWindow dialog = window(2, 2, 0, {140, 760, 940, 1160});
+  dialog.touchable = kScreen;
+  windows.insert(windows.begin(), dialog);
+  CHECK_EQ(find_touched_window(windows, 540, 900), 0);
+  CHECK_EQ(find_touched_window(windows, 10, 10), 0);
+  CHECK_EQ(find_focused_window(windows), 0);
 
-  rt::Handle server_chan = bridge::construct(rt, "Landroid/view/InputChannel;", "()V", {});
-  set_long_field(rt, server_chan, "mPtr", server_h);
+  // NOT_TOUCH_MODAL, watching outside touches: a touch outside goes below,
+  // the popup gets ACTION_OUTSIDE.
+  windows[0] = window(2, 1000, bridge::kWindowFlagNotTouchModal | bridge::kWindowFlagWatchOutsideTouch,
+                      {140, 760, 940, 1160});
+  CHECK_EQ(find_touched_window(windows, 10, 10), 2);
+  CHECK(find_outside_targets(windows, 2) == std::vector<size_t>{0});
+  CHECK(find_outside_targets(windows, 0).empty());
 
-  rt::Handle client_chan = bridge::construct(rt, "Landroid/view/InputChannel;", "()V", {});
-  set_long_field(rt, client_chan, "mPtr", client_h);
-
-  uint32_t s_lo = uint32_t(uint64_t(server_h)), s_hi = uint32_t(uint64_t(server_h) >> 32);
-  uint32_t c_lo = uint32_t(uint64_t(client_h)), c_hi = uint32_t(uint64_t(client_h) >> 32);
-
-  rt::Handle server_token = rt::Handle(rt.call_virtual(server_chan, "nativeGetToken",
-                                                       "(J)Landroid/os/IBinder;", {s_lo, s_hi}));
-  rt::Handle client_token = rt::Handle(rt.call_virtual(client_chan, "nativeGetToken",
-                                                       "(J)Landroid/os/IBinder;", {c_lo, c_hi}));
-  CHECK(server_token != rt::kNull);
-  CHECK(client_token != rt::kNull);
-  CHECK_EQ(server_token, client_token);
-
-  // 2. Parcel serialization and deserialization
-  rt::Handle parcel = bridge::construct(rt, "Landroid/os/Parcel;", "()V", {});
-  rt.call_virtual(client_chan, "nativeWriteToParcel", "(Landroid/os/Parcel;)V", {parcel});
-
-  int64_t parcel_native_ptr = get_long_field(rt, parcel, "mNativePtr");
-  uint32_t p_lo = uint32_t(uint64_t(parcel_native_ptr)), p_hi = uint32_t(uint64_t(parcel_native_ptr) >> 32);
-  rt.call_static("Landroid/os/Parcel;", "nativeSetDataPosition", "(JI)V", {p_lo, p_hi, 0});
-
-  rt::Handle restored_chan = bridge::construct(rt, "Landroid/view/InputChannel;", "()V", {});
-  rt.call_virtual(restored_chan, "nativeReadFromParcel", "(Landroid/os/Parcel;)V", {parcel});
-  int64_t restored_h = get_long_field(rt, restored_chan, "mPtr");
-  CHECK(restored_h != 0);
-
-  uint32_t r_lo = uint32_t(uint64_t(restored_h)), r_hi = uint32_t(uint64_t(restored_h) >> 32);
-  rt::Handle restored_token = rt::Handle(rt.call_virtual(restored_chan, "nativeGetToken",
-                                                         "(J)Landroid/os/IBinder;", {r_lo, r_hi}));
-  CHECK_EQ(restored_token, client_token);
-
-  // 3. MessageQueue and InputEventReceiver
-  rt::Handle mq = bridge::construct(rt, "Landroid/os/MessageQueue;", "()V", {});
-  int64_t mq_ptr = int64_t(rt.call_static("Landroid/os/MessageQueue;", "nativeInit", "()J", {}));
-  set_long_field(rt, mq, "mPtr", mq_ptr);
-  uint32_t mq_lo = uint32_t(uint64_t(mq_ptr)), mq_hi = uint32_t(uint64_t(mq_ptr) >> 32);
-
-  rt::Handle recv = bridge::construct(rt, "LTestReceiver;", "()V", {});
-  rt::GlobalRef keep_recv(rt, recv);
-  rt::Handle weak_ref = bridge::construct(rt, "Ljava/lang/ref/WeakReference;", "(Ljava/lang/Object;)V", {recv});
-
-  int64_t recv_ptr = int64_t(rt.call_static("Landroid/view/InputEventReceiver;", "nativeInit",
-                                            "(Ljava/lang/ref/WeakReference;Landroid/view/InputChannel;Landroid/os/MessageQueue;)J",
-                                            {weak_ref, client_chan, mq}));
-  CHECK(recv_ptr != 0);
-  set_long_field(rt, recv, "mReceiverPtr", recv_ptr);
-  uint32_t recv_lo = uint32_t(uint64_t(recv_ptr)), recv_hi = uint32_t(uint64_t(recv_ptr) >> 32);
-
-  CHECK(!rt.call_static("Landroid/view/InputEventReceiver;", "nativeProbablyHasInput", "(J)Z", {recv_lo, recv_hi}));
-
-  rt::Class* tr_cls = rt.find_class("LTestReceiver;");
-  CHECK(tr_cls != nullptr);
-  rt::Field* seq_f = tr_cls->declared_field("lastSeq", "I");
-  rt::Field* ev_f = tr_cls->declared_field("lastEvent", "Landroid/view/InputEvent;");
-  CHECK(seq_f != nullptr && ev_f != nullptr);
-
-  // 4. Post MotionEvent to server channel
-  bridge::MotionEvent motion = bridge::make_touch_event(0 /* DOWN */, 120.0f, 240.0f, 1000, 1000);
-  CHECK(bridge::post_channel_motion_event(rt, server_h, motion));
-  CHECK(rt.call_static("Landroid/view/InputEventReceiver;", "nativeProbablyHasInput", "(J)Z", {recv_lo, recv_hi}));
-
-  // Poll MessageQueue to dispatch
-  rt.call_virtual(mq, "nativePollOnce", "(JI)V", {mq_lo, mq_hi, 0});
-  CHECK_EQ(int32_t(tr_cls->statics.at(seq_f->slot)), 1);
-  CHECK(tr_cls->statics.at(ev_f->slot) != rt::kNull);
-  CHECK(!rt.call_static("Landroid/view/InputEventReceiver;", "nativeProbablyHasInput", "(J)Z", {recv_lo, recv_hi}));
-  rt.call_static("Landroid/view/InputEventReceiver;", "nativeFinishInputEvent", "(JIZ)V", {recv_lo, recv_hi, 1, 1});
-
-  // 5. Post KeyEvent to server channel
-  CHECK(bridge::post_channel_key_event(rt, server_h, 0, 66 /* ENTER */, 0, true, 2000));
-  rt.call_virtual(mq, "nativePollOnce", "(JI)V", {mq_lo, mq_hi, 0});
-  CHECK_EQ(int32_t(tr_cls->statics.at(seq_f->slot)), 2);
-  CHECK(tr_cls->statics.at(ev_f->slot) != rt::kNull);
-  rt.call_static("Landroid/view/InputEventReceiver;", "nativeFinishInputEvent", "(JIZ)V", {recv_lo, recv_hi, 2, 1});
-
-  // 6. Post window touch and key through active runtime
-  bridge::set_active_runtime(&rt);
-  CHECK(bridge::post_window_touch(2 /* MOVE */, 130.0f, 250.0f, 1000, 3000));
-  rt.call_virtual(mq, "nativePollOnce", "(JI)V", {mq_lo, mq_hi, 0});
-  CHECK_EQ(int32_t(tr_cls->statics.at(seq_f->slot)), 3);
-  CHECK(tr_cls->statics.at(ev_f->slot) != rt::kNull);
-  rt.call_static("Landroid/view/InputEventReceiver;", "nativeFinishInputEvent", "(JIZ)V", {recv_lo, recv_hi, 3, 1});
-
-  CHECK(bridge::post_window_key(0, 4 /* BACK */, 0, false, 4000));
-  rt.call_virtual(mq, "nativePollOnce", "(JI)V", {mq_lo, mq_hi, 0});
-  CHECK_EQ(int32_t(tr_cls->statics.at(seq_f->slot)), 4);
-  CHECK(tr_cls->statics.at(ev_f->slot) != rt::kNull);
-  rt.call_static("Landroid/view/InputEventReceiver;", "nativeFinishInputEvent", "(JIZ)V", {recv_lo, recv_hi, 4, 1});
-
-  bridge::set_active_runtime(nullptr);
-
-  // 7. Cleanup
-  rt.call_static("Landroid/view/InputEventReceiver;", "nativeDispose", "(J)V", {recv_lo, recv_hi});
-  rt.call_virtual(server_chan, "nativeDispose", "(J)V", {s_lo, s_hi});
-  rt.call_virtual(client_chan, "nativeDispose", "(J)V", {c_lo, c_hi});
-  rt.call_virtual(restored_chan, "nativeDispose", "(J)V", {r_lo, r_hi});
-  rt.call_static("Landroid/os/MessageQueue;", "nativeDestroy", "(J)V", {mq_lo, mq_hi});
-  rt.call_static("Landroid/os/Parcel;", "nativeDestroy", "(J)V", {p_lo, p_hi});
+  // Invisible windows take nothing.
+  windows[0].visible = windows[0].focusable = false;
+  CHECK_EQ(find_touched_window(windows, 540, 900), 2);
+  CHECK(find_outside_targets(windows, 2).empty());
+  windows[2].visible = windows[2].focusable = false;
+  CHECK_EQ(find_focused_window(windows), -1);
+  CHECK_EQ(find_touched_window(windows, 540, 900), -1);
 }
 
-TEST(input_event_receiver_lifo_stack_routes_to_top_and_restores_on_dispose) {
-  InputVm vm;
-  auto& rt = *vm.rt;
-
-  // Channel 1 & Receiver 1 (Main Window)
-  rt::Handle name1 = rt.new_string_utf8("chan1");
-  rt::Handle pair1 = rt::Handle(rt.call_static("Landroid/view/InputChannel;", "nativeOpenInputChannelPair",
-                                              "(Ljava/lang/String;)[J", {name1}));
-  auto& arr1 = rt.array(pair1, "long[]");
-  int64_t server_h1 = 0, client_h1 = 0;
-  std::memcpy(&server_h1, arr1.data.data(), sizeof(int64_t));
-  std::memcpy(&client_h1, arr1.data.data() + sizeof(int64_t), sizeof(int64_t));
-
-  rt::Handle client_chan1 = bridge::construct(rt, "Landroid/view/InputChannel;", "()V", {});
-  set_long_field(rt, client_chan1, "mPtr", client_h1);
-
-  rt::Handle mq1 = bridge::construct(rt, "Landroid/os/MessageQueue;", "()V", {});
-  int64_t mq_ptr1 = int64_t(rt.call_static("Landroid/os/MessageQueue;", "nativeInit", "()J", {}));
-  set_long_field(rt, mq1, "mPtr", mq_ptr1);
-
-  rt::Handle recv1 = bridge::construct(rt, "LTestReceiver;", "()V", {});
-  rt::GlobalRef keep_recv1(rt, recv1);
-  rt::Handle weak_ref1 = bridge::construct(rt, "Ljava/lang/ref/WeakReference;", "(Ljava/lang/Object;)V", {recv1});
-
-  int64_t recv_ptr1 = int64_t(rt.call_static("Landroid/view/InputEventReceiver;", "nativeInit",
-                                             "(Ljava/lang/ref/WeakReference;Landroid/view/InputChannel;Landroid/os/MessageQueue;)J",
-                                             {weak_ref1, client_chan1, mq1}));
-  CHECK(recv_ptr1 != 0);
-  set_long_field(rt, recv1, "mReceiverPtr", recv_ptr1);
-  CHECK_EQ(bridge::active_input_receivers_count(), 1u);
-
-  // Channel 2 & Receiver 2 (Dialog / Popup Window)
-  rt::Handle name2 = rt.new_string_utf8("chan2");
-  rt::Handle pair2 = rt::Handle(rt.call_static("Landroid/view/InputChannel;", "nativeOpenInputChannelPair",
-                                              "(Ljava/lang/String;)[J", {name2}));
-  auto& arr2 = rt.array(pair2, "long[]");
-  int64_t server_h2 = 0, client_h2 = 0;
-  std::memcpy(&server_h2, arr2.data.data(), sizeof(int64_t));
-  std::memcpy(&client_h2, arr2.data.data() + sizeof(int64_t), sizeof(int64_t));
-
-  rt::Handle client_chan2 = bridge::construct(rt, "Landroid/view/InputChannel;", "()V", {});
-  set_long_field(rt, client_chan2, "mPtr", client_h2);
-
-  rt::Handle recv2 = bridge::construct(rt, "LTestReceiver;", "()V", {});
-  rt::GlobalRef keep_recv2(rt, recv2);
-  rt::Handle weak_ref2 = bridge::construct(rt, "Ljava/lang/ref/WeakReference;", "(Ljava/lang/Object;)V", {recv2});
-
-  int64_t recv_ptr2 = int64_t(rt.call_static("Landroid/view/InputEventReceiver;", "nativeInit",
-                                             "(Ljava/lang/ref/WeakReference;Landroid/view/InputChannel;Landroid/os/MessageQueue;)J",
-                                             {weak_ref2, client_chan2, mq1}));
-  CHECK(recv_ptr2 != 0);
-  set_long_field(rt, recv2, "mReceiverPtr", recv_ptr2);
-  CHECK_EQ(bridge::active_input_receivers_count(), 2u);
-
-  // Event routing: when dialog is open, post_window_touch routes to recv2
-  bridge::set_active_runtime(&rt);
-  uint32_t r2_lo = uint32_t(uint64_t(recv_ptr2)), r2_hi = uint32_t(uint64_t(recv_ptr2) >> 32);
-  uint32_t r1_lo = uint32_t(uint64_t(recv_ptr1)), r1_hi = uint32_t(uint64_t(recv_ptr1) >> 32);
-  CHECK(!rt.call_static("Landroid/view/InputEventReceiver;", "nativeProbablyHasInput", "(J)Z", {r2_lo, r2_hi}));
-  CHECK(!rt.call_static("Landroid/view/InputEventReceiver;", "nativeProbablyHasInput", "(J)Z", {r1_lo, r1_hi}));
-
-  CHECK(bridge::post_window_touch(0 /* DOWN */, 50.0f, 50.0f, 100, 100));
-  CHECK(rt.call_static("Landroid/view/InputEventReceiver;", "nativeProbablyHasInput", "(J)Z", {r2_lo, r2_hi}));
-  CHECK(!rt.call_static("Landroid/view/InputEventReceiver;", "nativeProbablyHasInput", "(J)Z", {r1_lo, r1_hi}));
-
-  // Dismiss dialog (dispose receiver 2) -> receiver 1 automatically becomes top
-  rt.call_static("Landroid/view/InputEventReceiver;", "nativeDispose", "(J)V", {r2_lo, r2_hi});
-  CHECK_EQ(bridge::active_input_receivers_count(), 1u);
-
-  CHECK(bridge::post_window_touch(1 /* UP */, 60.0f, 60.0f, 200, 200));
-  CHECK(rt.call_static("Landroid/view/InputEventReceiver;", "nativeProbablyHasInput", "(J)Z", {r1_lo, r1_hi}));
-
-  // Cleanup
-  bridge::set_active_runtime(nullptr);
-  rt.call_static("Landroid/view/InputEventReceiver;", "nativeDispose", "(J)V", {r1_lo, r1_hi});
-  CHECK_EQ(bridge::active_input_receivers_count(), 0u);
-  rt.call_static("Landroid/os/MessageQueue;", "nativeDestroy", "(J)V",
-                 {uint32_t(uint64_t(mq_ptr1)), uint32_t(uint64_t(mq_ptr1) >> 32)});
+// Typed text: the strokes of the key character map (KeyCharacterMap.getEvents),
+// characters without a key in one ACTION_MULTIPLE.
+TEST(input_text_becomes_key_strokes) {
+  std::string error;
+  auto map = load(kVirtual, KeyCharacterMap::Format::kBase, &error);
+  CHECK(map != nullptr);
+  auto strokes = bridge::text_to_strokes(map.get(), u"aA€\U0001F600!");
+  const int32_t shift = bridge::kMetaShiftOn | bridge::kMetaShiftLeftOn;
+  std::vector<bridge::TextStroke> expected;
+  auto key = [&](int32_t code, int32_t meta, bool down) {
+    bridge::TextStroke s;
+    s.key_code = code;
+    s.meta_state = meta;
+    s.down = down;
+    expected.push_back(s);
+  };
+  key(kA, 0, true);
+  key(kA, 0, false);
+  key(kShiftLeft, shift, true);
+  key(kA, shift, true);
+  key(kA, shift, false);
+  key(kShiftLeft, 0, false);
+  bridge::TextStroke multiple;
+  multiple.multiple = true;
+  multiple.characters = u"€\U0001F600";
+  expected.push_back(multiple);
+  key(kShiftLeft, shift, true);
+  key(k1, shift, true);
+  key(k1, shift, false);
+  key(kShiftLeft, 0, false);
+  CHECK(strokes == expected);
+  // Without a map, everything in one ACTION_MULTIPLE.
+  auto plain = bridge::text_to_strokes(nullptr, u"ab");
+  CHECK_EQ(plain.size(), size_t(1));
+  CHECK(plain[0].multiple && plain[0].characters == u"ab");
 }
 
-TEST(input_interactive_click_and_back_navigation_pipeline) {
-  InputVm vm;
-  auto& rt = *vm.rt;
-
-  // 1. Setup channel and receiver for main interactive window
-  rt::Handle name = rt.new_string_utf8("main-interactive-window");
-  rt::Handle pair_arr = rt::Handle(rt.call_static("Landroid/view/InputChannel;", "nativeOpenInputChannelPair",
-                                                  "(Ljava/lang/String;)[J", {name}));
-  CHECK(pair_arr != rt::kNull);
-  auto& arr = rt.array(pair_arr, "long[]");
-  int64_t server_h = 0, client_h = 0;
-  std::memcpy(&server_h, arr.data.data(), sizeof(int64_t));
-  std::memcpy(&client_h, arr.data.data() + sizeof(int64_t), sizeof(int64_t));
-
-  rt::Handle client_chan = bridge::construct(rt, "Landroid/view/InputChannel;", "()V", {});
-  set_long_field(rt, client_chan, "mPtr", client_h);
-  rt::Handle server_chan = bridge::construct(rt, "Landroid/view/InputChannel;", "()V", {});
-  set_long_field(rt, server_chan, "mPtr", server_h);
-
-  rt::Handle mq = bridge::construct(rt, "Landroid/os/MessageQueue;", "()V", {});
-  int64_t mq_ptr = int64_t(rt.call_static("Landroid/os/MessageQueue;", "nativeInit", "()J", {}));
-  set_long_field(rt, mq, "mPtr", mq_ptr);
-
-  rt::Handle recv = bridge::construct(rt, "LTestReceiver;", "()V", {});
-  rt::GlobalRef keep_recv(rt, recv);
-  rt::Handle weak_ref = bridge::construct(rt, "Ljava/lang/ref/WeakReference;", "(Ljava/lang/Object;)V", {recv});
-
-  int64_t recv_ptr = int64_t(rt.call_static("Landroid/view/InputEventReceiver;", "nativeInit",
-                                            "(Ljava/lang/ref/WeakReference;Landroid/view/InputChannel;Landroid/os/MessageQueue;)J",
-                                            {weak_ref, client_chan, mq}));
-  CHECK(recv_ptr != 0);
-  set_long_field(rt, recv, "mReceiverPtr", recv_ptr);
-  CHECK_EQ(bridge::active_input_receivers_count(), 1u);
-
-  rt::Class* tr_cls = rt.find_class("LTestReceiver;");
-  CHECK(tr_cls != nullptr);
-  rt::Field* seq_f = tr_cls->declared_field("lastSeq", "I");
-  rt::Field* ev_f = tr_cls->declared_field("lastEvent", "Landroid/view/InputEvent;");
-  CHECK(seq_f != nullptr && ev_f != nullptr);
-
-  uint32_t mq_lo = uint32_t(uint64_t(mq_ptr)), mq_hi = uint32_t(uint64_t(mq_ptr) >> 32);
-  uint32_t recv_lo = uint32_t(uint64_t(recv_ptr)), recv_hi = uint32_t(uint64_t(recv_ptr) >> 32);
-
-  bridge::set_active_runtime(&rt);
-
-  // 2. Interactive Click cycle: ACTION_DOWN followed by ACTION_UP on button
-  int64_t t0 = 1000;
-  CHECK(bridge::post_window_touch(0 /* ACTION_DOWN */, 540.0f, 960.0f, t0, t0));
-  CHECK(rt.call_static("Landroid/view/InputEventReceiver;", "nativeProbablyHasInput", "(J)Z", {recv_lo, recv_hi}));
-  rt.call_virtual(mq, "nativePollOnce", "(JI)V", {mq_lo, mq_hi, 0});
-  int32_t s1 = int32_t(tr_cls->statics.at(seq_f->slot));
-  CHECK(s1 > 0);
-  CHECK(tr_cls->statics.at(ev_f->slot) != rt::kNull);
-  rt.call_static("Landroid/view/InputEventReceiver;", "nativeFinishInputEvent", "(JIZ)V", {recv_lo, recv_hi, uint32_t(s1), 1});
-
-  CHECK(bridge::post_window_touch(1 /* ACTION_UP */, 540.0f, 960.0f, t0, t0 + 50));
-  rt.call_virtual(mq, "nativePollOnce", "(JI)V", {mq_lo, mq_hi, 0});
-  int32_t s2 = int32_t(tr_cls->statics.at(seq_f->slot));
-  CHECK_EQ(s2, s1 + 1);
-  CHECK(tr_cls->statics.at(ev_f->slot) != rt::kNull);
-  rt.call_static("Landroid/view/InputEventReceiver;", "nativeFinishInputEvent", "(JIZ)V", {recv_lo, recv_hi, uint32_t(s2), 1});
-
-  // 3. Interactive Back Navigation key cycle: KEYCODE_BACK down followed by up
-  int64_t t1 = 2000;
-  CHECK(bridge::post_window_key(0 /* device_id */, 4 /* KEYCODE_BACK */, 0 /* meta */, true /* down */, t1));
-  rt.call_virtual(mq, "nativePollOnce", "(JI)V", {mq_lo, mq_hi, 0});
-  int32_t s3 = int32_t(tr_cls->statics.at(seq_f->slot));
-  CHECK_EQ(s3, s2 + 1);
-  CHECK(tr_cls->statics.at(ev_f->slot) != rt::kNull);
-  rt.call_static("Landroid/view/InputEventReceiver;", "nativeFinishInputEvent", "(JIZ)V", {recv_lo, recv_hi, uint32_t(s3), 1});
-
-  CHECK(bridge::post_window_key(0 /* device_id */, 4 /* KEYCODE_BACK */, 0 /* meta */, false /* up */, t1 + 40));
-  rt.call_virtual(mq, "nativePollOnce", "(JI)V", {mq_lo, mq_hi, 0});
-  int32_t s4 = int32_t(tr_cls->statics.at(seq_f->slot));
-  CHECK_EQ(s4, s3 + 1);
-  CHECK(tr_cls->statics.at(ev_f->slot) != rt::kNull);
-  rt.call_static("Landroid/view/InputEventReceiver;", "nativeFinishInputEvent", "(JIZ)V", {recv_lo, recv_hi, uint32_t(s4), 1});
-
-  // 4. Modal dialog opened: push second receiver and verify priority routing
-  rt::Handle name2 = rt.new_string_utf8("modal-dialog-window");
-  rt::Handle pair_arr2 = rt::Handle(rt.call_static("Landroid/view/InputChannel;", "nativeOpenInputChannelPair",
-                                                   "(Ljava/lang/String;)[J", {name2}));
-  auto& arr2 = rt.array(pair_arr2, "long[]");
-  int64_t server_h2 = 0, client_h2 = 0;
-  std::memcpy(&server_h2, arr2.data.data(), sizeof(int64_t));
-  std::memcpy(&client_h2, arr2.data.data() + sizeof(int64_t), sizeof(int64_t));
-
-  rt::Handle client_chan2 = bridge::construct(rt, "Landroid/view/InputChannel;", "()V", {});
-  set_long_field(rt, client_chan2, "mPtr", client_h2);
-  rt::Handle server_chan2 = bridge::construct(rt, "Landroid/view/InputChannel;", "()V", {});
-  set_long_field(rt, server_chan2, "mPtr", server_h2);
-  rt::Handle recv2 = bridge::construct(rt, "LTestReceiver;", "()V", {});
-  rt::GlobalRef keep_recv2(rt, recv2);
-  rt::Handle weak_ref2 = bridge::construct(rt, "Ljava/lang/ref/WeakReference;", "(Ljava/lang/Object;)V", {recv2});
-  int64_t recv_ptr2 = int64_t(rt.call_static("Landroid/view/InputEventReceiver;", "nativeInit",
-                                             "(Ljava/lang/ref/WeakReference;Landroid/view/InputChannel;Landroid/os/MessageQueue;)J",
-                                             {weak_ref2, client_chan2, mq}));
-  CHECK(recv_ptr2 != 0);
-  set_long_field(rt, recv2, "mReceiverPtr", recv_ptr2);
-  CHECK_EQ(bridge::active_input_receivers_count(), 2u);
-
-  // Click routed to dialog receiver
-  uint32_t r2_lo = uint32_t(uint64_t(recv_ptr2)), r2_hi = uint32_t(uint64_t(recv_ptr2) >> 32);
-  CHECK(bridge::post_window_touch(0 /* ACTION_DOWN */, 600.0f, 1000.0f, 3000, 3000));
-  CHECK(rt.call_static("Landroid/view/InputEventReceiver;", "nativeProbablyHasInput", "(J)Z", {r2_lo, r2_hi}));
-  CHECK(!rt.call_static("Landroid/view/InputEventReceiver;", "nativeProbablyHasInput", "(J)Z", {recv_lo, recv_hi}));
-  rt.call_virtual(mq, "nativePollOnce", "(JI)V", {mq_lo, mq_hi, 0});
-  int32_t s5 = int32_t(tr_cls->statics.at(seq_f->slot));
-  CHECK_EQ(s5, s4 + 1);
-  rt.call_static("Landroid/view/InputEventReceiver;", "nativeFinishInputEvent", "(JIZ)V", {r2_lo, r2_hi, uint32_t(s5), 1});
-
-  // Dismiss modal dialog -> focus returns to main window
-  rt.call_static("Landroid/view/InputEventReceiver;", "nativeDispose", "(J)V", {r2_lo, r2_hi});
-  CHECK_EQ(bridge::active_input_receivers_count(), 1u);
-
-  // Next click goes back to main window
-  CHECK(bridge::post_window_touch(0 /* ACTION_DOWN */, 540.0f, 960.0f, 4000, 4000));
-  CHECK(rt.call_static("Landroid/view/InputEventReceiver;", "nativeProbablyHasInput", "(J)Z", {recv_lo, recv_hi}));
-  rt.call_virtual(mq, "nativePollOnce", "(JI)V", {mq_lo, mq_hi, 0});
-  int32_t s6 = int32_t(tr_cls->statics.at(seq_f->slot));
-  CHECK_EQ(s6, s5 + 1);
-  rt.call_static("Landroid/view/InputEventReceiver;", "nativeFinishInputEvent", "(JIZ)V", {recv_lo, recv_hi, uint32_t(s6), 1});
-
-  // 5. Cleanup
-  bridge::set_active_runtime(nullptr);
-  rt.call_static("Landroid/view/InputEventReceiver;", "nativeDispose", "(J)V", {recv_lo, recv_hi});
-  rt.call_virtual(server_chan, "nativeDispose", "(J)V",
-                  {uint32_t(uint64_t(server_h)), uint32_t(uint64_t(server_h) >> 32)});
-  rt.call_virtual(client_chan, "nativeDispose", "(J)V",
-                  {uint32_t(uint64_t(client_h)), uint32_t(uint64_t(client_h) >> 32)});
-  rt.call_virtual(server_chan2, "nativeDispose", "(J)V",
-                  {uint32_t(uint64_t(server_h2)), uint32_t(uint64_t(server_h2) >> 32)});
-  rt.call_virtual(client_chan2, "nativeDispose", "(J)V",
-                  {uint32_t(uint64_t(client_h2)), uint32_t(uint64_t(client_h2) >> 32)});
-  rt.call_static("Landroid/os/MessageQueue;", "nativeDestroy", "(J)V", {mq_lo, mq_hi});
-  CHECK_EQ(bridge::active_input_receivers_count(), 0u);
-  CHECK_EQ(bridge::active_input_receivers_count(), 0u);
+TEST(input_key_code_labels) {
+  CHECK(bridge::key_code_from_label("BACK") == std::optional<int32_t>(4));
+  CHECK(bridge::key_code_from_label("keycode_enter") == std::optional<int32_t>(66));
+  CHECK(bridge::key_code_from_label("CONTEXTUAL_QUERY") == std::optional<int32_t>(341));  // the last of Android 17
+  CHECK(!bridge::key_code_from_label("RETOUR").has_value());
+  CHECK(!bridge::key_code_from_label("KEYCODE_").has_value());
+  CHECK_EQ(bridge::key_code_label(67), std::string("DEL"));
+  CHECK_EQ(bridge::key_code_label(9999), std::string("9999"));
 }
 
+TEST(input_scripts_are_parsed_up_front) {
+  using Kind = backend::InputStep::Kind;
+  std::string error;
+  auto steps = backend::parse_input_script(
+      "after-frames 1; settle 1500\ntap 540 127.5;key back;text Été ; sleep 20;quit", 1080, 1920, &error);
+  CHECK(steps.has_value());
+  CHECK_EQ(steps->size(), size_t(7));
+  CHECK((*steps)[0].kind == Kind::kAfterFrames && (*steps)[0].count == 1u);
+  CHECK((*steps)[1].kind == Kind::kSettle && (*steps)[1].count == 1500u);
+  CHECK((*steps)[2].kind == Kind::kTap && (*steps)[2].x == 540.0f && (*steps)[2].y == 127.5f);
+  CHECK((*steps)[3].kind == Kind::kKey && (*steps)[3].key_code == 4);
+  CHECK((*steps)[4].kind == Kind::kText && (*steps)[4].text == u"Été");
+  CHECK((*steps)[5].kind == Kind::kSleep && (*steps)[5].count == 20u);
+  CHECK((*steps)[6].kind == Kind::kQuit);
+  auto fails = [&](const char* script, const char* why) {
+    std::string e;
+    bool failed = !backend::parse_input_script(script, 1080, 1920, &e).has_value();
+    return failed && e.find(why) != std::string::npos;
+  };
+  CHECK(fails("tap 1080 10", "hors de l'écran"));
+  CHECK(fails("tap 10", "attendu « tap X Y »"));
+  CHECK(fails("key RETOUR", "touche inconnue"));
+  CHECK(fails("key 0", "touche inconnue"));
+  CHECK(fails("swipe 1 2", "étape inconnue"));
+  CHECK(fails("after-frames 1; text", "étape 2"));
+  CHECK(fails(" ; \n", "vide"));
+}
 
+// The display (1080 x 1920) in a square window: bands on the sides, the
+// window's pixels mapped back to the display's, presses in the bands ignored.
+TEST(input_letterbox_maps_window_pixels_to_the_display) {
+  backend::Box image = backend::fit_letterbox({0, 0, 800, 800}, 1080, 1920);
+  CHECK(image == (backend::Box{175, 0, 625, 800}));
+  auto centre = backend::window_to_image(image, 1080, 1920, 400, 400);
+  CHECK(centre.has_value());
+  CHECK(centre->x > 539.0f && centre->x < 542.0f && centre->y > 959.0f && centre->y < 962.0f);
+  CHECK(!backend::window_to_image(image, 1080, 1920, 100, 400).has_value());  // left band
+  auto corner = backend::window_to_image(image, 1080, 1920, 624, 799);
+  CHECK(corner.has_value() && corner->x <= 1079.0f && corner->y <= 1919.0f);
+  // Dragged out of the image, a finger stays on its edge.
+  CHECK(backend::window_to_image_clamped(image, 1080, 1920, 900, -50) == (backend::ImagePoint{1079.0f, 0.0f}));
+  // At scale 1, the identity.
+  backend::Box same = backend::fit_letterbox({0, 0, 1080, 1920}, 1080, 1920);
+  CHECK(backend::window_to_image(same, 1080, 1920, 37, 1200) == std::optional<backend::ImagePoint>({37.0f, 1200.0f}));
+}

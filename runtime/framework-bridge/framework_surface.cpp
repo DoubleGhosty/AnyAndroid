@@ -20,7 +20,7 @@
 
 #include "common/clock.h"
 #include "framework-bridge/handles.h"
-#include "framework-bridge/motion_event.h"
+#include "framework-bridge/input_dispatcher.h"
 #include "include/core/SkBitmap.h"
 #include "include/core/SkCanvas.h"
 #include "include/core/SkColor.h"
@@ -75,40 +75,25 @@ struct Receiver {
 };
 
 // android.view.InputChannel: one end of a window's input connection. Both ends
-// share the connection token (an android.os.Binder).
-struct InputReceiver;
-
-struct Channel : std::enable_shared_from_this<Channel> {
+// share the connection token (an android.os.Binder) and the connection the
+// input dispatcher (input_dispatcher.cpp) publishes events on.
+struct Channel {
   std::mutex lock;
   std::string name;
   std::shared_ptr<rt::GlobalRef> token;  // created on first request, shared by dups and the peer
-  std::weak_ptr<Channel> peer;
-  std::weak_ptr<InputReceiver> receiver;
+  uint64_t connection = 0;               // shared by the pair, 0 for none
 };
 
-// android.view.InputEventReceiver: receives a channel's events on a Looper.
-struct QueuedInputEvent {
-  int32_t seq = 0;
-  std::shared_ptr<MotionEvent> motion;
-  struct Key {
-    int32_t device_id = 0;
-    int32_t key_code = 0;
-    int32_t meta_state = 0;
-    bool down = false;
-    int64_t time = 0;
-  };
-  std::optional<Key> key;
-};
-
-struct InputReceiver : std::enable_shared_from_this<InputReceiver> {
-  std::mutex lock;
+// android.view.InputEventReceiver: reads a channel's events on a Looper; the
+// input dispatcher knows it by its handle.
+struct InputReceiver {
   std::shared_ptr<Channel> channel;
-  int64_t queue = 0;                        // MessageQueue.mPtr
-  std::shared_ptr<rt::GlobalRef> receiver;  // WeakReference<InputEventReceiver>
-  std::deque<QueuedInputEvent> pending_events;
-  std::map<int32_t, bool> in_flight;        // seq -> handled
-  bool dispatch_scheduled = false;
 };
+
+uint64_t next_connection_id() {
+  static std::atomic<uint64_t> next{1};
+  return next.fetch_add(1);
+}
 
 // Listeners of a transaction: TransactionCommittedListener and the
 // Consumer<TransactionStats> of addTransactionCompletedListener.
@@ -268,87 +253,6 @@ void deliver_vsync(Runtime& rt, int64_t handle, int64_t timestamp) {
   if (data.get() != kNull) fill_vsync_data(rt, data.get(), timestamp, frame);
   rt.call_virtual(receiver.get(), "dispatchVsync", "(JJI)V",
                   {uint32_t(uint64_t(timestamp)), uint32_t(uint64_t(timestamp) >> 32), 0, 0, uint32_t(frame)});
-}
-
-static std::mutex active_receiver_lock;
-static std::vector<std::weak_ptr<InputReceiver>> s_active_receivers;
-static rt::Runtime* s_active_runtime = nullptr;
-
-void register_active_input_receiver(const std::shared_ptr<InputReceiver>& recv) {
-  std::lock_guard<std::mutex> guard(active_receiver_lock);
-  s_active_receivers.erase(
-      std::remove_if(s_active_receivers.begin(), s_active_receivers.end(),
-                     [&](const std::weak_ptr<InputReceiver>& wp) {
-                       auto sp = wp.lock();
-                       return !sp || sp == recv;
-                     }),
-      s_active_receivers.end());
-  s_active_receivers.push_back(recv);
-}
-
-void unregister_active_input_receiver(const std::shared_ptr<InputReceiver>& recv) {
-  std::lock_guard<std::mutex> guard(active_receiver_lock);
-  s_active_receivers.erase(
-      std::remove_if(s_active_receivers.begin(), s_active_receivers.end(),
-                     [&](const std::weak_ptr<InputReceiver>& wp) {
-                       auto sp = wp.lock();
-                       return !sp || sp == recv;
-                     }),
-      s_active_receivers.end());
-}
-
-std::shared_ptr<InputReceiver> get_active_input_receiver() {
-  std::lock_guard<std::mutex> guard(active_receiver_lock);
-  while (!s_active_receivers.empty()) {
-    if (auto sp = s_active_receivers.back().lock()) {
-      return sp;
-    }
-    s_active_receivers.pop_back();
-  }
-  return nullptr;
-}
-
-void deliver_input_events(Runtime& rt, std::shared_ptr<InputReceiver> recv) {
-  std::vector<QueuedInputEvent> to_dispatch;
-  std::shared_ptr<rt::GlobalRef> weak_ref;
-  {
-    std::lock_guard<std::mutex> guard(recv->lock);
-    recv->dispatch_scheduled = false;
-    while (!recv->pending_events.empty()) {
-      to_dispatch.push_back(std::move(recv->pending_events.front()));
-      recv->pending_events.pop_front();
-    }
-    weak_ref = recv->receiver;
-  }
-  if (!weak_ref || weak_ref->get() == kNull) return;
-  Handle java_recv = Handle(rt.call_virtual(weak_ref->get(), "get", "()Ljava/lang/Object;"));
-  if (java_recv == kNull) return;
-
-  for (const auto& ev : to_dispatch) {
-    Handle java_event = kNull;
-    if (ev.motion) {
-      java_event = obtain_motion_event(rt, *ev.motion);
-    } else if (ev.key) {
-      java_event = obtain_key_event(rt, ev.key->device_id, ev.key->key_code, ev.key->meta_state,
-                                    ev.key->down, ev.key->time);
-    }
-    if (java_event == kNull) continue;
-    rt.call_virtual(java_recv, "dispatchInputEvent", "(ILandroid/view/InputEvent;)V",
-                    {uint32_t(ev.seq), java_event});
-  }
-}
-
-void schedule_dispatch(Runtime& rt, std::shared_ptr<InputReceiver> recv) {
-  int64_t queue_ptr = 0;
-  {
-    std::lock_guard<std::mutex> guard(recv->lock);
-    if (recv->dispatch_scheduled || recv->pending_events.empty()) return;
-    recv->dispatch_scheduled = true;
-    queue_ptr = recv->queue;
-  }
-  post_queue_callback(rt, queue_ptr, 0, [recv](Runtime& rt2) {
-    deliver_input_events(rt2, recv);
-  });
 }
 
 std::shared_ptr<Transaction> transaction(Runtime& rt, int64_t h) {
@@ -792,6 +696,12 @@ void bind_layer_property(rt::NativeRegistry& r, const char* cls, const char* nam
 
 }  // namespace
 
+uint64_t input_channel_connection(Runtime& rt, Handle input_channel) {
+  if (input_channel == kNull) return 0;
+  auto c = channels().get(long_field(rt, input_channel, "mPtr"));
+  return c ? c->connection : 0;
+}
+
 void set_frame_listener(std::function<void(const PostedFrame&)> listener) {
   std::lock_guard<std::mutex> guard(frame_listener_lock);
   frame_listener_slot() =
@@ -855,13 +765,12 @@ void register_framework_surface(rt::NativeRegistry& r) {
     server->name = name + " (server)";
     client->name = name + " (client)";
     client->token = server->token = std::make_shared<rt::GlobalRef>(rt, construct(rt, "Landroid/os/Binder;", "()V", {}));
-    server->peer = client;
-    client->peer = server;
+    client->connection = server->connection = next_connection_id();
     int64_t handles[2] = {channels().add(server), channels().add(client)};
     Handle arr = rt.new_array("[J", 2);
     std::memcpy(rt.array(arr, "long[]").data.data(), handles, sizeof handles);
     return arr;
-  });
+  }, S::kPartial, "canal logique : les événements viennent du répartiteur d'entrées");
   // Instance natives from here: argument 0 is the InputChannel.
   r.bind(ic, "nativeDup", "(J)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     return rt::ret_long(channels().add(channel(rt, a.i64(1))));
@@ -906,55 +815,39 @@ void register_framework_surface(rt::NativeRegistry& r) {
     return 0;
   });
 
-  // InputEventReceiver: bound to a channel and a Looper (J8).
+  // InputEventReceiver (android_view_InputEventReceiver.cpp): bound to a
+  // channel and a Looper, whose thread reads the events the input dispatcher
+  // publishes on the channel's connection.
   const char* ier = "Landroid/view/InputEventReceiver;";
   r.bind(ier, "nativeInit", "(Ljava/lang/ref/WeakReference;Landroid/view/InputChannel;Landroid/os/MessageQueue;)J",
          [](Runtime& rt, NativeArgs& a) -> uint64_t {
-           if (a.h(0) == kNull || a.h(1) == kNull || a.h(2) == kNull) rt.throw_npe("InputEventReceiver.nativeInit");
-           rt::Object& mq = rt.nonnull(a.h(2), "MessageQueue");
-           rt::Field* ptr = find_field(mq.klass, "mPtr", "J");
-           if (!ptr) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] MessageQueue sans mPtr");
-           auto chan = channel(rt, long_field(rt, a.h(1), "mPtr"));
+           if (a.h(0) == kNull) rt.throw_npe("receiver");
+           if (a.h(1) == kNull) rt.throw_npe("inputChannel");
+           if (a.h(2) == kNull) rt.throw_new("Ljava/lang/RuntimeException;", "MessageQueue is not initialized.");
            auto recv = std::make_shared<InputReceiver>();
-           recv->channel = chan;
-           recv->receiver = std::make_shared<rt::GlobalRef>(rt, a.h(0));
-           recv->queue = int64_t(uint64_t(mq.fields.at(ptr->slot)) | (uint64_t(mq.fields.at(ptr->slot + 1)) << 32));
-           int64_t h = input_receivers().add(recv);
-           {
-             std::lock_guard<std::mutex> guard(chan->lock);
-             chan->receiver = recv;
-           }
-           register_active_input_receiver(recv);
-           return rt::ret_long(h);
-         });
-  r.bind(ier, "nativeDispose", "(J)V", [](Runtime&, NativeArgs& a) -> uint64_t {
-    auto recv = input_receivers().get(a.i64(0));
-    if (recv) {
-      unregister_active_input_receiver(recv);
-      if (recv->channel) {
-        std::lock_guard<std::mutex> guard(recv->channel->lock);
-        recv->channel->receiver.reset();
-      }
-    }
-    input_receivers().remove(a.i64(0));
+           recv->channel = channel(rt, long_field(rt, a.h(1), "mPtr"));
+           uint64_t connection = recv->channel->connection;
+           int64_t queue_ptr = long_field(rt, a.h(2), "mPtr");
+           int64_t handle = input_receivers().add(std::move(recv));
+           if (connection != 0) input_receiver_attached(rt, handle, connection, a.h(0), queue_ptr);
+           return rt::ret_long(handle);
+         }, S::kPartial, "événements du répartiteur d'entrées, sans socket");
+  r.bind(ier, "nativeDispose", "(JZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (input_receivers().remove(a.i64(0))) input_receiver_disposed(rt, a.i64(0));
     return 0;
   });
+  // InputConsumer::sendFinishedSignal: the dispatcher learns the outcome.
   r.bind(ier, "nativeFinishInputEvent", "(JIZ)V", [](Runtime&, NativeArgs& a) -> uint64_t {
-    auto recv = input_receivers().get(a.i64(0));
-    if (recv) {
-      std::lock_guard<std::mutex> guard(recv->lock);
-      recv->in_flight[a.i32(2)] = a.z(3);
-    }
+    input_receiver_finished(a.i64(0), uint32_t(a.i32(2)), a.i32(3) != 0);
     return 0;
   });
-  r.bind(ier, "nativeConsumeBatchedInputEvents", "(JJ)Z", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
-  r.bind(ier, "nativeProbablyHasInput", "(J)Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    auto recv = input_receivers().get(a.i64(0));
-    if (!recv) return 0;
-    std::lock_guard<std::mutex> guard(recv->lock);
-    return rt::ret_bool(!recv->pending_events.empty());
+  // The frame consumes the batched moves (all of them: no resampling).
+  r.bind(ier, "nativeConsumeBatchedInputEvents", "(JJ)Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_bool(input_receiver_consume_batch(rt, a.i64(0), a.i64(2)));
+  }, S::kPartial, "lot de mouvements consommé en entier, sans rééchantillonnage");
+  r.bind(ier, "nativeProbablyHasInput", "(J)Z", [](Runtime&, NativeArgs& a) -> uint64_t {
+    return rt::ret_bool(input_receiver_probably_has_input(a.i64(0)));
   });
-  r.bind(ier, "nativeReportTimeline", "(JIJJ)V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
   r.bind(ier, "nativeDump", "(JLjava/lang/String;)Ljava/lang/String;", [](Runtime& rt, NativeArgs&) -> uint64_t {
     return rt.new_string_utf8("");
   });
@@ -963,6 +856,8 @@ void register_framework_surface(rt::NativeRegistry& r) {
     if (!recv) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] InputEventReceiver invalide");
     return channel_token(rt, *recv->channel);
   });
+
+  register_input_windows(r);
 
   const char* sc = "Landroid/view/SurfaceControl;";
   static const int64_t layer_free = register_free_function([](int64_t h) { layers().remove(h); });
@@ -1172,141 +1067,6 @@ void register_framework_surface(rt::NativeRegistry& r) {
   });
   r.bind(fence, "nGetFd", "(J)I", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_int(-1); },
          S::kPartial, "barrière sans descripteur");
-}
-
-void set_active_runtime(rt::Runtime* rt) {
-  std::lock_guard<std::mutex> guard(active_receiver_lock);
-  s_active_runtime = rt;
-}
-
-size_t active_input_receivers_count() {
-  std::lock_guard<std::mutex> guard(active_receiver_lock);
-  size_t count = 0;
-  for (const auto& wp : s_active_receivers) {
-    if (!wp.expired()) ++count;
-  }
-  return count;
-}
-
-int32_t next_input_seq() {
-  static std::atomic<int32_t> counter{1};
-  int32_t seq = counter.fetch_add(1);
-  return seq <= 0 ? 1 : seq;
-}
-
-bool post_channel_motion_event(Runtime& rt, int64_t channel_handle, const MotionEvent& event) {
-  auto ch = channels().get(channel_handle);
-  if (!ch) return false;
-  std::shared_ptr<InputReceiver> target_receiver;
-  {
-    std::lock_guard<std::mutex> guard(ch->lock);
-    target_receiver = ch->receiver.lock();
-    if (!target_receiver) {
-      if (auto p = ch->peer.lock()) {
-        std::lock_guard<std::mutex> pguard(p->lock);
-        target_receiver = p->receiver.lock();
-      }
-    }
-  }
-  if (!target_receiver) return false;
-  int32_t seq = next_input_seq();
-  {
-    std::lock_guard<std::mutex> guard(target_receiver->lock);
-    QueuedInputEvent qe;
-    qe.seq = seq;
-    qe.motion = std::make_shared<MotionEvent>(event);
-    target_receiver->pending_events.push_back(std::move(qe));
-  }
-  schedule_dispatch(rt, target_receiver);
-  return true;
-}
-
-bool post_channel_key_event(Runtime& rt, int64_t channel_handle, int32_t device_id, int32_t key_code,
-                            int32_t meta_state, bool down, int64_t time) {
-  auto ch = channels().get(channel_handle);
-  if (!ch) return false;
-  std::shared_ptr<InputReceiver> target_receiver;
-  {
-    std::lock_guard<std::mutex> guard(ch->lock);
-    target_receiver = ch->receiver.lock();
-    if (!target_receiver) {
-      if (auto p = ch->peer.lock()) {
-        std::lock_guard<std::mutex> pguard(p->lock);
-        target_receiver = p->receiver.lock();
-      }
-    }
-  }
-  if (!target_receiver) return false;
-  int32_t seq = next_input_seq();
-  {
-    std::lock_guard<std::mutex> guard(target_receiver->lock);
-    QueuedInputEvent qe;
-    qe.seq = seq;
-    QueuedInputEvent::Key k;
-    k.device_id = device_id;
-    k.key_code = key_code;
-    k.meta_state = meta_state;
-    k.down = down;
-    k.time = time;
-    qe.key = k;
-    target_receiver->pending_events.push_back(std::move(qe));
-  }
-  schedule_dispatch(rt, target_receiver);
-  return true;
-}
-
-bool post_window_motion_event(const MotionEvent& event) {
-  std::shared_ptr<InputReceiver> recv = get_active_input_receiver();
-  rt::Runtime* rt = nullptr;
-  {
-    std::lock_guard<std::mutex> guard(active_receiver_lock);
-    rt = s_active_runtime;
-  }
-  if (!recv || !rt) return false;
-  int32_t seq = next_input_seq();
-  {
-    std::lock_guard<std::mutex> guard(recv->lock);
-    QueuedInputEvent qe;
-    qe.seq = seq;
-    qe.motion = std::make_shared<MotionEvent>(event);
-    recv->pending_events.push_back(std::move(qe));
-  }
-  schedule_dispatch(*rt, recv);
-  return true;
-}
-
-bool post_window_key_event(int32_t device_id, int32_t key_code, int32_t meta_state, bool down, int64_t time) {
-  std::shared_ptr<InputReceiver> recv = get_active_input_receiver();
-  rt::Runtime* rt = nullptr;
-  {
-    std::lock_guard<std::mutex> guard(active_receiver_lock);
-    rt = s_active_runtime;
-  }
-  if (!recv || !rt) return false;
-  int32_t seq = next_input_seq();
-  {
-    std::lock_guard<std::mutex> guard(recv->lock);
-    QueuedInputEvent qe;
-    qe.seq = seq;
-    QueuedInputEvent::Key k;
-    k.device_id = device_id;
-    k.key_code = key_code;
-    k.meta_state = meta_state;
-    k.down = down;
-    k.time = time;
-    qe.key = k;
-    recv->pending_events.push_back(std::move(qe));
-  }
-  schedule_dispatch(*rt, recv);
-  return true;
-}
-
-bool post_window_touch(int32_t action, float x, float y, int64_t down_time, int64_t event_time) {
-  return post_window_motion_event(make_touch_event(action, x, y, down_time, event_time));
-}
-
-bool post_window_key(int32_t device_id, int32_t key_code, int32_t meta_state, bool down, int64_t time) {
-  return post_window_key_event(device_id, key_code, meta_state, down, time);
 }
 
 }  // namespace aa::bridge

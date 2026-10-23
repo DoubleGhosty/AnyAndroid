@@ -203,19 +203,9 @@ rt::Handle obtain_motion_event(rt::Runtime& rt, const MotionEvent& event);
 // android_view_MotionEvent_getNativePtr: the event of a Java MotionEvent
 // (nullptr for null or a recycled one).
 std::shared_ptr<MotionEvent> motion_event_of(rt::Runtime& rt, rt::Handle event);
-// Creates a single-pointer touch MotionEvent with default screen settings.
-MotionEvent make_touch_event(int32_t action, float x, float y, int64_t down_time, int64_t event_time);
 // android_view_KeyEvent_obtainAsCopy: a Java KeyEvent (KeyEvent.obtain()).
 rt::Handle obtain_key_event(rt::Runtime& rt, int32_t device_id, int32_t key_code, int32_t meta_state, bool down,
                             int64_t time);
-// Input event delivery to the active window or channel (framework_surface.cpp).
-void set_active_runtime(rt::Runtime* rt);
-bool post_window_motion_event(const MotionEvent& event);
-bool post_window_key_event(int32_t device_id, int32_t key_code, int32_t meta_state, bool down, int64_t time);
-bool post_channel_motion_event(rt::Runtime& rt, int64_t channel_handle, const MotionEvent& event);
-bool post_channel_key_event(rt::Runtime& rt, int64_t channel_handle, int32_t device_id, int32_t key_code,
-                            int32_t meta_state, bool down, int64_t time);
-size_t active_input_receivers_count();
 void register_appmem_natives(rt::NativeRegistry& r);
 void register_resource_natives(rt::NativeRegistry& r);
 // Android system properties of the emulated device (build.prop and

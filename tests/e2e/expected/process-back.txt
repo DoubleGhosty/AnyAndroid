@@ -1,0 +1,14 @@
+démarrage : ActivityThread.main
+processus attaché : com.anyandroid.samples.basic
+application : android.app.Application
+cycle : MainActivity.onCreate
+cycle : MainActivity.onStart
+cycle : MainActivity.onResume
+activité au premier plan
+entrée : appui sur la touche BACK → traité
+entrée : relâchement de la touche BACK → traité
+cycle : MainActivity.onPause
+cycle : MainActivity.onStop
+cycle : MainActivity.onDestroy
+pile d'activités vide
+boucle principale quittée

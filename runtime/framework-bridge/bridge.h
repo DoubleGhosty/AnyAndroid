@@ -135,6 +135,63 @@ struct PostedFrame {
 // Called on the posting thread for every frame; none by default (the frames
 // are then not copied).
 void set_frame_listener(std::function<void(const PostedFrame&)> listener);
+
+// --- Input from the host (J8 of ADR-006) --------------------------------------
+//
+// The host's events reach the application's windows as Android's
+// InputDispatcher delivers them (input_dispatcher.cpp): the inject functions
+// may be called from any host thread and return at once; a dispatcher thread
+// routes each event to a window of the window manager's list (kept by the
+// host's WindowService) and hands it to that window's InputEventReceiver on
+// its Looper. Touches and scrolls go to the topmost touchable window under
+// the point, keys and text to the focused window (the topmost focusable one).
+// Coordinates are display pixels; each window gets them in its own space.
+// Event times come from the common monotonic clock (common/clock.h), the one
+// of SystemClock.uptimeMillis.
+
+// MotionEvent.ACTION_* of a touch.
+enum class TouchAction : int32_t { kDown = 0, kUp = 1, kMove = 2, kCancel = 3 };
+// One finger of a touchscreen (SOURCE_TOUCHSCREEN, TOOL_TYPE_FINGER); the
+// events of a gesture keep the time of its ACTION_DOWN.
+void inject_touch(TouchAction action, float x, float y);
+// A key of the virtual keyboard (device -1): KeyEvent.KEYCODE_*, META_* state,
+// repeat count of an auto-repeated ACTION_DOWN.
+void inject_key(int32_t key_code, bool down, int32_t meta_state = 0, int32_t repeat = 0);
+// Typed text (UTF-16), as the key strokes of the virtual keyboard's key
+// character map (Virtual.kcm); characters no key types arrive as a KeyEvent
+// ACTION_MULTIPLE with KEYCODE_UNKNOWN and the characters, as Android does.
+void inject_text(std::u16string text);
+// A mouse wheel at (x, y): MotionEvent ACTION_SCROLL (SOURCE_MOUSE) with
+// AXIS_HSCROLL (+ right) and AXIS_VSCROLL (+ up), in notches.
+void inject_scroll(float x, float y, float horizontal, float vertical);
+
+// An event as the dispatcher delivered it.
+struct InputEventInfo {
+  enum class Type { kTouch, kKey, kCharacters, kScroll } type = Type::kKey;
+  int32_t action = 0;                                // MotionEvent or KeyEvent action
+  float x = 0, y = 0;                                // touch, scroll: display pixels
+  float horizontal = 0, vertical = 0;                // scroll
+  int32_t key_code = 0, meta_state = 0, repeat = 0;  // key
+  std::u16string characters;                         // ACTION_MULTIPLE
+};
+// The fate of an event: finished by its window (InputEventReceiver
+// .finishInputEvent's `handled`), or dropped, never finished by a window
+// (`reason` in French).
+struct InputFinished {
+  uint32_t seq = 0;  // the connection's sequence number; 0 when dropped before
+  bool handled = false;
+  bool dropped = false;
+  std::string reason;
+  std::string window;  // name of the target window, if any
+  InputEventInfo event;
+};
+// Called once per injected event (focus changes are not reported), on the
+// window's Looper thread or the dispatcher's; none by default.
+void set_input_finished_listener(std::function<void(const InputFinished&)> listener);
+// Waits until every injected event is finished or dropped; false on timeout.
+bool wait_for_input_idle(int64_t timeout_ms);
+// The event in a few French words ("appui 540,127", "appui sur la touche BACK").
+std::string describe_input_event(const InputEventInfo& event);
 // A PNG read by the decoder of ImageDecoder (framework_images.cpp): width x
 // height pixels 0xAARRGGBB, unpremultiplied, rows packed. False when the data
 // is not a PNG it reads. For the host: frames written as PNG read back.
@@ -145,12 +202,6 @@ struct DecodedPng {
 bool decode_png_pixels(const uint8_t* data, size_t size, DecodedPng& out);
 // Opaque sun.misc.Unsafe offset of an instance field slot (Field.getOffset()).
 int64_t unsafe_field_offset(uint32_t slot);
-
-// Window input delivery (J8): touch and keyboard events dispatched to the
-// active window's InputEventReceiver on its Looper.
-void set_active_runtime(rt::Runtime* rt);
-bool post_window_touch(int32_t action, float x, float y, int64_t down_time, int64_t event_time);
-bool post_window_key(int32_t device_id, int32_t key_code, int32_t meta_state, bool down, int64_t time);
 
 // Helpers shared with the lifecycle module.
 ActivityPeer* activity_peer(rt::Runtime& rt, rt::Handle activity);

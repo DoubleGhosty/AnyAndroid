@@ -13,9 +13,7 @@ import android.view.InputChannel;
 import android.view.SurfaceControl;
 import android.view.WindowManager;
 import android.view.WindowRelayoutResult;
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 /**
@@ -59,15 +57,15 @@ public final class WindowService extends IWindowManager.Stub {
   }
 
   /**
-   * The application's window session (ADR-006 J5, J9). Manages the z-order, geometry
-   * and input channel pairs for both the main activity and secondary windows (dialogs, popups).
+   * The application's window session (ADR-006 J5, J9): its windows, their frames (a dialog or a
+   * popup by its gravity and size) and their input channels, real pairs whose window manager's
+   * end goes to {@link InputWindows} (J8).
    */
   private static final class WindowSession extends IWindowSession.Stub {
     private static final class WindowRecord {
       final IWindow window;
       final WindowManager.LayoutParams attrs = new WindowManager.LayoutParams();
       final Rect frame = new Rect();
-      InputChannel serverChannel;
 
       WindowRecord(IWindow window, WindowManager.LayoutParams a) {
         this.window = window;
@@ -76,7 +74,6 @@ public final class WindowService extends IWindowManager.Stub {
     }
 
     private final Map<IBinder, WindowRecord> windows = new HashMap<>();
-    private final List<InputChannel> serverChannels = new ArrayList<>();
 
     @Override
     public int addToDisplayAsUser(IWindow window, WindowManager.LayoutParams attrs, int viewVisibility, int displayId,
@@ -89,10 +86,8 @@ public final class WindowService extends IWindowManager.Stub {
       fillFrames(rec, attrs, 0, 0, outResult);
       if (outInputChannel != null) {
         InputChannel[] pair = InputChannel.openInputChannelPair(String.valueOf(window));
-        rec.serverChannel = pair[0];
-        synchronized (serverChannels) {
-          serverChannels.add(pair[0]);
-        }
+        // Input (J8): the window joins the dispatcher's list with the server end.
+        InputWindows.add(window, attrs, viewVisibility, pair[0], outResult.frames.frame);
         pair[1].copyTo(outInputChannel);
       }
       return ADD_FLAG_IN_TOUCH_MODE | ADD_FLAG_APP_VISIBLE;  // ADD_OKAY (0) with these flags
@@ -112,6 +107,9 @@ public final class WindowService extends IWindowManager.Stub {
       if (outRelayoutResult != null) {
         fillFrames(rec, attrs, requestedWidth, requestedHeight, outRelayoutResult);
       }
+      // Input (J8): attributes, visibility and frame of the window for the dispatcher.
+      InputWindows.update(window, attrs, viewVisibility,
+          outRelayoutResult != null ? outRelayoutResult.frames.frame : null);
       return 0;
     }
 
@@ -119,21 +117,18 @@ public final class WindowService extends IWindowManager.Stub {
     public void relayoutAsync(IWindow window, WindowManager.LayoutParams attrs, int requestedWidth,
         int requestedHeight, int viewVisibility, int flags, int seq, int lastSyncSeqId,
         SurfaceControl outSurfaceControl) {
-      relayout(window, attrs, requestedWidth, requestedHeight, viewVisibility, flags, seq, lastSyncSeqId, outSurfaceControl, null);
+      relayout(window, attrs, requestedWidth, requestedHeight, viewVisibility, flags, seq, lastSyncSeqId,
+          outSurfaceControl, null);
     }
 
+    /** The window goes away, and its input channel (J8). */
     @Override
     public void remove(IBinder clientToken) {
       if (clientToken == null) return;
-      WindowRecord rec;
       synchronized (windows) {
-        rec = windows.remove(clientToken);
+        windows.remove(clientToken);
       }
-      if (rec != null && rec.serverChannel != null) {
-        try {
-          rec.serverChannel.dispose();
-        } catch (Throwable ignored) {}
-      }
+      InputWindows.remove(clientToken);
     }
   }
 

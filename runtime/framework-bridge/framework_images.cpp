@@ -513,6 +513,21 @@ void register_bitmap(rt::NativeRegistry& r) {
            return create_bitmap_object(rt, handle, width, height, 0, is_mutable, kNull, kNull);
          });
 
+  // Gainmaps (HDR) are not kept: a bitmap never has one. Canvas(Bitmap)
+  // clears it before drawing into the bitmap (RippleDrawable's mask).
+  r.bind(bm, "nativeSetGainmap", "(JJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    bitmap(rt, a.i64(0));
+    return 0;
+  }, S::kPartial, "pas de gainmap (HDR) : ignorée");
+  r.bind(bm, "nativeHasGainmap", "(J)Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    bitmap(rt, a.i64(0));
+    return rt::ret_bool(false);
+  });
+  r.bind(bm, "nativeExtractGainmap", "(J)Landroid/graphics/Gainmap;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    bitmap(rt, a.i64(0));
+    return rt::ret_obj(kNull);
+  });
+
   r.bind(bm, "nativeRowBytes", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto b = bitmap(rt, a.i64(0));
     std::lock_guard<std::mutex> guard(b->lock);

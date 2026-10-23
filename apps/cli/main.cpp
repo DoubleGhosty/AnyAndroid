@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <cstdio>
 #include <filesystem>
@@ -14,8 +16,11 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "apk-inspector/apk.h"
@@ -29,6 +34,7 @@
 #include "dex-engine/runtime.h"
 #include "framework-bridge/bridge.h"
 #include "headless/headless_backend.h"
+#include "headless/input_script.h"
 #include "image/aosp.h"
 #include "image/filesystem.h"
 #include "resources/asset_manager.h"
@@ -88,9 +94,13 @@ void usage() {
       "      --profile : à la fin, les méthodes les plus coûteuses (instructions, appels) sur stderr.\n"
       "      --trace-services : écrit sur stdout chaque appel du framework aux services de l'hôte.\n"
       "      --frame-out <fichier.png> : écrit chaque image publiée par une fenêtre (la dernière reste).\n"
-      "      --window [--title <texte>] : montre l'écran dans une fenêtre Windows interactive (clics/glisser\n"
-      "        souris = tactile, clavier = KeyEvent, Échap = retour arrière / KEYCODE_BACK) ; la fermer\n"
-      "        termine le processus.\n"
+      "      --window [--title <texte>] : montre l'écran de l'appareil dans une fenêtre Windows (images\n"
+      "        publiées par le vrai framework) ; la souris et le clavier en sont les entrées (clic :\n"
+      "        toucher, molette : défilement, Échap : retour) ; la fermer termine le processus.\n"
+      "      --input \"<étapes>\" : entrées scriptées, étapes séparées par ';' ou des retours à la ligne :\n"
+      "        after-frames N (attend N images publiées), tap X Y, key NOM|CODE, text <caractères>,\n"
+      "        sleep MS, settle MS (attend la fin des événements puis MS ms sans nouvelle image), quit.\n"
+      "      --trace-input : écrit sur stdout une ligne par événement d'entrée terminé.\n"
       "  libcore natives --bootclasspath <dossier> [--libcore-only] [--all] [--core]\n"
       "      Couverture des méthodes natives de la libcore par AnyAndroid ; --core liste les membres\n"
       "      des classes du cœur de la VM référencés mais absents.\n"
@@ -138,7 +148,8 @@ bool parse_args(const std::vector<std::string>& argv, Args& a) {
   static const std::set<std::string> with_value = {"--log-level", "--log-file", "--disasm", "--activity",
                                                    "--script",    "--do",       "--max-instructions", "--top", "--output",
                                                    "--partition", "--bootclasspath", "--system-image", "--data-dir", "--host-dex",
-                                                   "--get",       "--locale",   "--density", "--frame-out", "--title"};
+                                                   "--get",       "--locale",   "--density", "--frame-out", "--title",
+                                                   "--input"};
   for (size_t i = 1; i < argv.size(); ++i) {
     const std::string& s = argv[i];
     if (a.command.empty() && !text::starts_with(s, "--")) {
@@ -508,10 +519,61 @@ int cmd_run(const Args& a) {
   return code;
 }
 
+// The display of the emulated device (DisplayService of the host code).
+constexpr int32_t kDisplayWidth = 1080, kDisplayHeight = 1920;
+// How long an input script's `after-frames` waits.
+constexpr int64_t kInputFramesTimeoutSeconds = 240;
+
+// Frames posted since the start, for the input script (`after-frames`). Shared
+// with the script's thread, which may outlive cmd_exec.
+struct FrameCounter {
+  std::mutex lock;
+  std::condition_variable posted;
+  uint64_t count = 0;
+};
+
+// `exec --input`: the script runs on its own thread, the events going
+// through the bridge's input dispatcher; `quit` ends the process.
+void start_input_script(std::vector<backend::InputStep> steps, std::shared_ptr<FrameCounter> frames) {
+  std::thread([steps = std::move(steps), frames] {
+    backend::InputScriptHooks hooks;
+    hooks.wait_for_frames = [frames](uint64_t n) {
+      std::unique_lock<std::mutex> guard(frames->lock);
+      return frames->posted.wait_for(guard, std::chrono::seconds(kInputFramesTimeoutSeconds),
+                                     [&] { return frames->count >= n; });
+    };
+    hooks.wait_for_quiet_frames = [frames](uint64_t quiet_ms) {
+      auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kInputFramesTimeoutSeconds);
+      std::unique_lock<std::mutex> guard(frames->lock);
+      while (std::chrono::steady_clock::now() < deadline) {
+        uint64_t seen = frames->count;
+        auto changed = [&] { return frames->count != seen; };
+        if (!frames->posted.wait_for(guard, std::chrono::milliseconds(quiet_ms), changed)) return true;
+      }
+      return false;
+    };
+    hooks.quit = [](int code) {
+      std::fflush(nullptr);
+      ExitProcess(UINT(code));
+    };
+    hooks.error = [](const std::string& message) { err(message); };
+    backend::run_input_script(steps, hooks);
+  }).detach();
+}
+
 int cmd_exec(const Args& a) {
   if (a.positional.size() < 2) {
     usage();
     return kUsage;
+  }
+  std::optional<std::vector<backend::InputStep>> input_steps;
+  if (a.has("--input")) {
+    std::string why;
+    input_steps = backend::parse_input_script(a.get("--input"), kDisplayWidth, kDisplayHeight, &why);
+    if (!input_steps) {
+      err(why);
+      return kUsage;
+    }
   }
   const std::string& file = a.positional[0];
   std::string cls = a.positional[1];
@@ -595,7 +657,7 @@ int cmd_exec(const Args& a) {
   std::shared_ptr<backend::FrameWindow> screen;
   if (a.has("--window")) {
     std::u16string title = text::utf8_to_utf16(a.has("--title") ? a.get("--title") : "AnyAndroid — " + package);
-    screen = std::make_shared<backend::FrameWindow>(title, 1080, 1920);
+    screen = std::make_shared<backend::FrameWindow>(title, kDisplayWidth, kDisplayHeight);
     if (!screen->ok()) {
       err("fenêtre impossible à créer (pas de bureau ?)");
       return kUsage;
@@ -604,21 +666,33 @@ int cmd_exec(const Args& a) {
       std::fflush(nullptr);
       ExitProcess(0);
     });
-    bridge::set_active_runtime(&runtime);
-    screen->set_on_touch([](int32_t action, float x, float y, int64_t down_time, int64_t event_time) {
-      bridge::post_window_touch(action, x, y, down_time, event_time);
-    });
-    screen->set_on_key([](int32_t device_id, int32_t key_code, int32_t meta_state, bool down, int64_t time) {
-      bridge::post_window_key(device_id, key_code, meta_state, down, time);
-    });
+    // The window's mouse and keyboard are the device's input (J8).
+    screen->set_input({
+        [](int32_t action, float x, float y) { bridge::inject_touch(bridge::TouchAction(action), x, y); },
+        [](float x, float y, float h, float v) { bridge::inject_scroll(x, y, h, v); },
+        [](int32_t code, bool down, int32_t meta, int32_t repeat) { bridge::inject_key(code, down, meta, repeat); },
+        [](std::u16string typed) { bridge::inject_text(std::move(typed)); }});
   }
-  if (a.has("--frame-out") || screen) {
+  auto frames = std::make_shared<FrameCounter>();
+  if (a.has("--frame-out") || screen || input_steps) {
     fs::path frame_path = a.has("--frame-out") ? path_from_utf8(a.get("--frame-out")) : fs::path();
-    bridge::set_frame_listener([frame_path, window = screen](const bridge::PostedFrame& f) {
+    bridge::set_frame_listener([frame_path, window = screen, frames](const bridge::PostedFrame& f) {
       if (!frame_path.empty()) write_frame_png(frame_path, f);
       if (window && f.pixels) window->present(f.width, f.height, f.pixels->data());
+      {
+        std::lock_guard<std::mutex> guard(frames->lock);
+        frames->count++;
+      }
+      frames->posted.notify_all();
     });
   }
+  if (a.has("--trace-input")) {
+    bridge::set_input_finished_listener([](const bridge::InputFinished& r) {
+      std::string outcome = r.dropped ? "abandonné (" + r.reason + ")" : r.handled ? "traité" : "non traité";
+      out("entrée : " + bridge::describe_input_event(r.event) + " → " + outcome + "\n");
+    });
+  }
+  if (input_steps) start_input_script(std::move(*input_steps), frames);
   if (!boot.dex.empty()) {
     std::string bcp;
     for (const auto& p : boot.device_paths) bcp += (bcp.empty() ? "" : ":") + p;

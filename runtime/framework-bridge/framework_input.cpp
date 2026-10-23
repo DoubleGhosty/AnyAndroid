@@ -4,7 +4,8 @@
 // libinput (key_character_map.h). Key code labels are the KEYCODE_ constants
 // of the framework's own KeyEvent class. The host's input service loads the
 // key character maps of /system/usr/keychars as system_server's InputReader
-// does (aa.host.services.InputService.nativeLoadKeyCharacterMap).
+// does (aa.host.services.InputService.nativeLoadKeyCharacterMap); the virtual
+// keyboard's map is kept for the input dispatcher, which types text with it.
 #include <atomic>
 #include <map>
 #include <memory>
@@ -14,10 +15,13 @@
 #include <vector>
 
 #include "common/clock.h"
+#include "common/log.h"
 #include "common/text.h"
 #include "framework-bridge/handles.h"
+#include "framework-bridge/input_dispatcher.h"
 #include "framework-bridge/internal.h"
 #include "framework-bridge/key_character_map.h"
+#include "framework-bridge/motion_event.h"
 #include "vfs/vfs.h"
 
 namespace aa::bridge {
@@ -97,13 +101,6 @@ std::u16string chars_of(Runtime& rt, Handle array) {
   return out;
 }
 
-// InputEvent::nextId: ids of events made by this process (IdGenerator,
-// source OTHER in the top two bits).
-int32_t next_event_id() {
-  static std::atomic<uint32_t> counter{1};
-  return int32_t((3u << 30) | (counter.fetch_add(1) & 0x3FFFFFFFu));
-}
-
 }  // namespace
 
 // android_view_KeyEvent_obtainAsCopy: KeyEvent.obtain(id, downTime, eventTime,
@@ -117,12 +114,39 @@ rt::Handle obtain_key_event(rt::Runtime& rt, int32_t device_id, int32_t key_code
   uint32_t t_lo = uint32_t(uint64_t(time)), t_hi = uint32_t(uint64_t(time) >> 32);
   return rt::Handle(rt.call_static("Landroid/view/KeyEvent;", "obtain",
                                    "(IJJIIIIIIIII[BLjava/lang/String;)Landroid/view/KeyEvent;",
-                                   {uint32_t(next_event_id()), t_lo, t_hi, t_lo, t_hi, uint32_t(down ? 0 : 1),
+                                   {uint32_t(next_input_event_id()), t_lo, t_hi, t_lo, t_hi, uint32_t(down ? 0 : 1),
                                     uint32_t(key_code), 0, uint32_t(meta_state), uint32_t(device_id), 0, 0,
                                     uint32_t(kSourceKeyboard), uint32_t(kInvalidDisplay), hmac, rt::kNull}));
 }
 
 namespace {
+constexpr char kVirtualKeyboardMap[] = "/system/usr/keychars/Virtual.kcm";
+constexpr int32_t kVirtualKeyboard = -1;  // KeyCharacterMap.VIRTUAL_KEYBOARD
+
+// The virtual keyboard's map once loaded, by the input service or by
+// virtual_key_character_map: one map for both.
+std::mutex virtual_map_lock;
+std::shared_ptr<const KeyCharacterMap>& virtual_map_slot() {
+  static auto* slot = new std::shared_ptr<const KeyCharacterMap>;  // never destroyed
+  return *slot;
+}
+
+// KeyCharacterMap::load of a base map of the system image: *readable is
+// false when the file cannot be read; null with the parser's message in
+// *error when it is malformed.
+std::shared_ptr<const KeyCharacterMap> load_base_map(Runtime& rt, const std::string& path, bool* readable,
+                                                     std::string* error) {
+  std::vector<uint8_t> bytes;
+  try {
+    bytes = libcore_vfs().read_file(path, 1u << 20);
+  } catch (const vfs::VfsError&) {
+    *readable = false;
+    return nullptr;
+  }
+  *readable = true;
+  std::string_view contents(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+  return KeyCharacterMap::load_contents(path, contents, KeyCharacterMap::Format::kBase, lookup_of(rt), error);
+}
 
 void set_int_field(Runtime& rt, Handle obj, const char* name, int32_t v) {
   rt::Object& o = rt.nonnull(obj, name);
@@ -247,17 +271,22 @@ void register_key_character_map(rt::NativeRegistry& r) {
          "(ILjava/lang/String;)Landroid/view/KeyCharacterMap;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
            if (a.h(1) == kNull) rt.throw_npe("path");
            std::string path = rt.string_utf8(a.h(1));
-           std::vector<uint8_t> bytes;
-           try {
-             bytes = libcore_vfs().read_file(path, 1u << 20);
-           } catch (const vfs::VfsError&) {
-             return rt::ret_obj(kNull);
+           const bool virtual_keyboard = a.i32(0) == kVirtualKeyboard && path == kVirtualKeyboardMap;
+           std::shared_ptr<const KeyCharacterMap> map;
+           if (virtual_keyboard) {
+             std::lock_guard<std::mutex> guard(virtual_map_lock);
+             map = virtual_map_slot();
            }
-           std::string error;
-           auto map = KeyCharacterMap::load_contents(path, std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()),
-                                                     KeyCharacterMap::Format::kBase, lookup_of(rt), &error);
            if (!map) {
-             rt.throw_new("Ljava/lang/IllegalArgumentException;", "[AnyAndroid] " + error);
+             bool readable = false;
+             std::string error;
+             map = load_base_map(rt, path, &readable, &error);
+             if (!readable) return rt::ret_obj(kNull);
+             if (!map) rt.throw_new("Ljava/lang/IllegalArgumentException;", "[AnyAndroid] " + error);
+             if (virtual_keyboard) {
+               std::lock_guard<std::mutex> guard(virtual_map_lock);
+               if (!virtual_map_slot()) virtual_map_slot() = map;
+             }
            }
            return rt::ret_obj(java_map(rt, a.i32(0), std::move(map)));
          });
@@ -276,10 +305,31 @@ void register_key_event(rt::NativeRegistry& r) {
     auto it = labels.by_label.find(rt.string_utf8(a.h(0)));
     return rt::ret_int(it == labels.by_label.end() ? 0 : it->second);  // AKEYCODE_UNKNOWN
   });
-  r.bind(ke, "nativeNextId", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_int(next_event_id()); });
+  // InputEvent::nextId, shared with MotionEvent and the input dispatcher.
+  r.bind(ke, "nativeNextId", "()I", [](Runtime&, NativeArgs&) -> uint64_t {
+    return rt::ret_int(next_input_event_id());
+  });
 }
 
 }  // namespace
+
+std::shared_ptr<const KeyCharacterMap> virtual_key_character_map(Runtime& rt) {
+  {
+    std::lock_guard<std::mutex> guard(virtual_map_lock);
+    if (virtual_map_slot()) return virtual_map_slot();
+  }
+  bool readable = false;
+  std::string error;
+  auto map = load_base_map(rt, kVirtualKeyboardMap, &readable, &error);
+  if (!map) {
+    log::warn("input", readable ? "carte de touches du clavier virtuel invalide : " + error
+                                : "carte de touches du clavier virtuel illisible : " + std::string(kVirtualKeyboardMap));
+    return nullptr;
+  }
+  std::lock_guard<std::mutex> guard(virtual_map_lock);
+  if (!virtual_map_slot()) virtual_map_slot() = map;
+  return virtual_map_slot();
+}
 
 void register_framework_input(rt::NativeRegistry& r) {
   register_key_character_map(r);

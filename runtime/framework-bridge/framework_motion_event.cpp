@@ -578,22 +578,6 @@ std::shared_ptr<MotionEvent> motion_event_of(Runtime& rt, Handle event) {
   return events().get(get_long(rt, rt.nonnull(event, "MotionEvent"), "mNativePtr"));
 }
 
-MotionEvent make_touch_event(int32_t action, float x, float y, int64_t down_time, int64_t event_time) {
-  PointerProperties prop{0, kToolTypeFinger};
-  PointerCoords c;
-  c.set_axis_value(kAxisX, x);
-  c.set_axis_value(kAxisY, y);
-  c.set_axis_value(kAxisPressure, (action == kMotionActionUp || action == kMotionActionCancel) ? 0.0f : 1.0f);
-  MotionEvent e;
-  static std::atomic<uint32_t> counter{1};
-  int32_t event_id = int32_t((3u << 30) | (counter.fetch_add(1) & 0x3FFFFFFFu));
-  e.initialize(event_id, 0, kSourceTouchscreen, 0, {}, action, 0, 0, 0, 0,
-               (action == kMotionActionDown || action == kMotionActionMove) ? 1 : 0,
-               0, {}, 1.0f, 1.0f, kInvalidCursorPosition, kInvalidCursorPosition, {}, down_time,
-               event_time, 1, &prop, &c);
-  return e;
-}
-
 void register_framework_motion_event(rt::NativeRegistry& r) {
   register_lifecycle(r);
   register_parcel(r);

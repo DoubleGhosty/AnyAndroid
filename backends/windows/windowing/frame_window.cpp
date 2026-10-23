@@ -1,9 +1,11 @@
 #include "windows/windowing/frame_window.h"
 
+#include <windowsx.h>
+
 #include <algorithm>
 
-#include "common/clock.h"
 #include "common/text.h"
+#include "windows/windowing/letterbox.h"
 
 namespace aa::backend {
 
@@ -33,86 +35,42 @@ void enable_dpi_awareness() {
 // The largest w x h rectangle of the frame's aspect ratio within `area`,
 // centred.
 RECT fit(const RECT& area, int32_t w, int32_t h) {
-  int aw = area.right - area.left, ah = area.bottom - area.top;
-  if (w <= 0 || h <= 0 || aw <= 0 || ah <= 0) return RECT{area.left, area.top, area.left, area.top};
-  int dw = aw, dh = int(int64_t(aw) * h / w);
-  if (dh > ah) {
-    dh = ah;
-    dw = int(int64_t(ah) * w / h);
-  }
-  int x = area.left + (aw - dw) / 2, y = area.top + (ah - dh) / 2;
-  return RECT{x, y, x + dw, y + dh};
+  Box b = fit_letterbox(Box{area.left, area.top, area.right, area.bottom}, w, h);
+  return RECT{b.left, b.top, b.right, b.bottom};
 }
 
-int32_t win32_vk_to_android_keycode(WPARAM vk) {
+Box box_of(const RECT& r) { return Box{r.left, r.top, r.right, r.bottom}; }
+
+// Android key codes of the special keys (KeyEvent.KEYCODE_*); 0 for the others.
+int32_t android_key_code(UINT vk) {
   switch (vk) {
-    case VK_BACK: return 67;       // KEYCODE_DEL
-    case VK_TAB: return 61;        // KEYCODE_TAB
-    case VK_RETURN: return 66;     // KEYCODE_ENTER
-    case VK_ESCAPE: return 4;      // KEYCODE_BACK
-    case VK_SPACE: return 62;      // KEYCODE_SPACE
-    case VK_PRIOR: return 92;      // KEYCODE_PAGE_UP
-    case VK_NEXT: return 93;       // KEYCODE_PAGE_DOWN
-    case VK_END: return 123;       // KEYCODE_MOVE_END
-    case VK_HOME: return 122;      // KEYCODE_MOVE_HOME
-    case VK_LEFT: return 21;       // KEYCODE_DPAD_LEFT
-    case VK_UP: return 19;         // KEYCODE_DPAD_UP
-    case VK_RIGHT: return 22;      // KEYCODE_DPAD_RIGHT
-    case VK_DOWN: return 20;       // KEYCODE_DPAD_DOWN
-    case VK_DELETE: return 112;    // KEYCODE_FORWARD_DEL
-    case VK_SHIFT:
-    case VK_LSHIFT: return 59;     // KEYCODE_SHIFT_LEFT
-    case VK_RSHIFT: return 60;     // KEYCODE_SHIFT_RIGHT
-    case VK_CONTROL:
-    case VK_LCONTROL: return 113;  // KEYCODE_CTRL_LEFT
-    case VK_RCONTROL: return 114;  // KEYCODE_CTRL_RIGHT
-    case VK_MENU:
-    case VK_LMENU: return 57;      // KEYCODE_ALT_LEFT
-    case VK_RMENU: return 58;      // KEYCODE_ALT_RIGHT
-    case VK_LWIN: return 117;      // KEYCODE_META_LEFT
-    case VK_RWIN: return 118;      // KEYCODE_META_RIGHT
-    case VK_CAPITAL: return 115;   // KEYCODE_CAPS_LOCK
-    case VK_SCROLL: return 116;    // KEYCODE_SCROLL_LOCK
-    case VK_NUMLOCK: return 143;   // KEYCODE_NUM_LOCK
-    case VK_MULTIPLY: return 155;  // KEYCODE_NUMPAD_MULTIPLY
-    case VK_ADD: return 157;       // KEYCODE_NUMPAD_ADD
-    case VK_SUBTRACT: return 156;  // KEYCODE_NUMPAD_SUBTRACT
-    case VK_DECIMAL: return 158;   // KEYCODE_NUMPAD_DOT
-    case VK_DIVIDE: return 154;    // KEYCODE_NUMPAD_DIVIDE
-    case VK_OEM_1: return 74;      // KEYCODE_SEMICOLON (;)
-    case VK_OEM_PLUS: return 70;   // KEYCODE_EQUALS (=)
-    case VK_OEM_COMMA: return 55;  // KEYCODE_COMMA (,)
-    case VK_OEM_MINUS: return 69;  // KEYCODE_MINUS (-)
-    case VK_OEM_PERIOD: return 56; // KEYCODE_PERIOD (.)
-    case VK_OEM_2: return 76;      // KEYCODE_SLASH (/)
-    case VK_OEM_3: return 68;      // KEYCODE_GRAVE (`)
-    case VK_OEM_4: return 71;      // KEYCODE_LEFT_BRACKET ([)
-    case VK_OEM_5: return 73;      // KEYCODE_BACKSLASH (\)
-    case VK_OEM_6: return 72;      // KEYCODE_RIGHT_BRACKET (])
-    case VK_OEM_7: return 75;      // KEYCODE_APOSTROPHE (')
-    default:
-      if (vk >= '0' && vk <= '9') return 7 + int32_t(vk - '0');
-      if (vk >= 'A' && vk <= 'Z') return 29 + int32_t(vk - 'A');
-      if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) return 144 + int32_t(vk - VK_NUMPAD0);
-      return 0;
+    case VK_RETURN: return 66;   // ENTER
+    case VK_BACK: return 67;     // DEL
+    case VK_ESCAPE: return 4;    // BACK
+    case VK_UP: return 19;       // DPAD_UP
+    case VK_DOWN: return 20;     // DPAD_DOWN
+    case VK_LEFT: return 21;     // DPAD_LEFT
+    case VK_RIGHT: return 22;    // DPAD_RIGHT
+    case VK_TAB: return 61;      // TAB
+    case VK_DELETE: return 112;  // FORWARD_DEL
+    case VK_HOME: return 122;    // MOVE_HOME
+    case VK_END: return 123;     // MOVE_END
+    case VK_PRIOR: return 92;    // PAGE_UP
+    case VK_NEXT: return 93;     // PAGE_DOWN
+    default: return 0;
   }
 }
 
-int32_t get_win32_meta_state() {
+// KeyEvent.META_* of the modifiers held: Shift, Ctrl and Alt, left and right.
+int32_t meta_state() {
+  auto held = [](int vk) { return (GetKeyState(vk) & 0x8000) != 0; };
   int32_t meta = 0;
-  if (GetKeyState(VK_SHIFT) & 0x8000) meta |= 0x01;
-  if (GetKeyState(VK_LSHIFT) & 0x8000) meta |= 0x40;
-  if (GetKeyState(VK_RSHIFT) & 0x8000) meta |= 0x80;
-  if (GetKeyState(VK_CONTROL) & 0x8000) meta |= 0x1000;
-  if (GetKeyState(VK_LCONTROL) & 0x8000) meta |= 0x2000;
-  if (GetKeyState(VK_RCONTROL) & 0x8000) meta |= 0x4000;
-  if (GetKeyState(VK_MENU) & 0x8000) meta |= 0x02;
-  if (GetKeyState(VK_LMENU) & 0x8000) meta |= 0x10;
-  if (GetKeyState(VK_RMENU) & 0x8000) meta |= 0x20;
-  if ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000) meta |= 0x10000;
-  if (GetKeyState(VK_CAPITAL) & 0x0001) meta |= 0x100000;
-  if (GetKeyState(VK_NUMLOCK) & 0x0001) meta |= 0x200000;
-  if (GetKeyState(VK_SCROLL) & 0x0001) meta |= 0x400000;
+  if (held(VK_LSHIFT)) meta |= 0x1 | 0x40;      // META_SHIFT_ON | META_SHIFT_LEFT_ON
+  if (held(VK_RSHIFT)) meta |= 0x1 | 0x80;      // META_SHIFT_RIGHT_ON
+  if (held(VK_LCONTROL)) meta |= 0x1000 | 0x2000;  // META_CTRL_ON | META_CTRL_LEFT_ON
+  if (held(VK_RCONTROL)) meta |= 0x1000 | 0x4000;  // META_CTRL_RIGHT_ON
+  if (held(VK_LMENU)) meta |= 0x2 | 0x10;       // META_ALT_ON | META_ALT_LEFT_ON
+  if (held(VK_RMENU)) meta |= 0x2 | 0x20;       // META_ALT_RIGHT_ON
   return meta;
 }
 
@@ -140,14 +98,133 @@ void FrameWindow::set_on_close(std::function<void()> fn) {
   on_close_ = std::move(fn);
 }
 
-void FrameWindow::set_on_touch(TouchCallback fn) {
+void FrameWindow::set_input(FrameInput input) {
   std::lock_guard<std::mutex> guard(lock_);
-  on_touch_ = std::move(fn);
+  input_ = std::move(input);
 }
 
-void FrameWindow::set_on_key(KeyCallback fn) {
+FrameWindow::FrameInput FrameWindow::input() {
   std::lock_guard<std::mutex> guard(lock_);
-  on_key_ = std::move(fn);
+  return input_;
+}
+
+RECT FrameWindow::image_rect(int32_t* width, int32_t* height) {
+  RECT client;
+  GetClientRect(hwnd_, &client);
+  std::lock_guard<std::mutex> guard(lock_);
+  *width = frame_width_ > 0 ? frame_width_ : display_width_;
+  *height = frame_height_ > 0 ? frame_height_ : display_height_;
+  return fit(client, *width, *height);
+}
+
+// The left button is a finger on the image (captured while it is down, so
+// that a drag out of the window keeps the gesture); the wheel scrolls at the
+// pointer. Presses in the bands around the image are ignored.
+bool FrameWindow::handle_mouse(UINT msg, WPARAM wp, LPARAM lp) {
+  FrameInput in = input();
+  int32_t w = 0, h = 0;
+  RECT image = image_rect(&w, &h);
+  switch (msg) {
+    case WM_LBUTTONDOWN: {
+      auto p = window_to_image(box_of(image), w, h, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+      if (!p || !in.touch) return true;
+      SetCapture(hwnd_);
+      finger_down_ = true;
+      finger_x_ = p->x;
+      finger_y_ = p->y;
+      in.touch(0, p->x, p->y);
+      return true;
+    }
+    case WM_MOUSEMOVE: {
+      if (!finger_down_ || !in.touch) return true;
+      ImagePoint p = window_to_image_clamped(box_of(image), w, h, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+      if (p.x == finger_x_ && p.y == finger_y_) return true;
+      finger_x_ = p.x;
+      finger_y_ = p.y;
+      in.touch(2, p.x, p.y);
+      return true;
+    }
+    case WM_LBUTTONUP: {
+      if (!finger_down_) return true;
+      ImagePoint p = window_to_image_clamped(box_of(image), w, h, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+      finger_down_ = false;  // before ReleaseCapture's WM_CAPTURECHANGED
+      ReleaseCapture();
+      if (in.touch) in.touch(1, p.x, p.y);
+      return true;
+    }
+    case WM_CAPTURECHANGED:
+      // The capture lost while the button is down: the gesture is cancelled.
+      if (finger_down_) {
+        finger_down_ = false;
+        if (in.touch) in.touch(3, finger_x_, finger_y_);
+      }
+      return true;
+    case WM_MOUSEWHEEL:
+    case WM_MOUSEHWHEEL: {
+      POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};  // screen coordinates
+      ScreenToClient(hwnd_, &pt);
+      auto p = window_to_image(box_of(image), w, h, pt.x, pt.y);
+      if (!p || !in.scroll) return true;
+      float notches = float(GET_WHEEL_DELTA_WPARAM(wp)) / float(WHEEL_DELTA);
+      if (msg == WM_MOUSEWHEEL) {
+        in.scroll(p->x, p->y, 0.0f, notches);
+      } else {
+        in.scroll(p->x, p->y, notches, 0.0f);
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+// The special keys as Android keys (auto-repeat counted), printable
+// characters as text: WM_CHAR gives them as the keyboard layout types them.
+bool FrameWindow::handle_key(UINT msg, WPARAM wp, LPARAM lp) {
+  FrameInput in = input();
+  switch (msg) {
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN: {
+      int32_t code = android_key_code(UINT(wp));
+      if (code == 0 || !in.key) return false;
+      bool repeated = (lp & (1 << 30)) != 0;  // the key was already down
+      int32_t& repeat = keys_held_[UINT(wp)];
+      repeat = repeated ? repeat + 1 : 0;
+      in.key(code, true, meta_state(), repeat);
+      return msg == WM_KEYDOWN;  // system keys keep their default handling (Alt+F4...)
+    }
+    case WM_KEYUP:
+    case WM_SYSKEYUP: {
+      int32_t code = android_key_code(UINT(wp));
+      if (code == 0 || !in.key) return false;
+      keys_held_.erase(UINT(wp));
+      in.key(code, false, meta_state(), 0);
+      return msg == WM_KEYUP;
+    }
+    case WM_KILLFOCUS:
+      // Keys held when the window loses the keyboard: released.
+      for (const auto& [vk, repeat] : keys_held_) {
+        if (in.key) in.key(android_key_code(vk), false, 0, 0);
+      }
+      keys_held_.clear();
+      return false;
+    case WM_CHAR: {
+      wchar_t c = wchar_t(wp);
+      if (c >= 0xD800 && c <= 0xDBFF) {
+        high_surrogate_ = c;
+        return true;
+      }
+      std::u16string text;
+      if (c >= 0xDC00 && c <= 0xDFFF) {
+        if (high_surrogate_ != 0) text = {char16_t(high_surrogate_), char16_t(c)};
+      } else if (c >= 0x20 && c != 0x7F) {  // control characters come as keys
+        text = {char16_t(c)};
+      }
+      high_surrogate_ = 0;
+      if (!text.empty() && in.text) in.text(std::move(text));
+      return true;
+    }
+  }
+  return false;
 }
 
 void FrameWindow::present(int32_t width, int32_t height, const uint32_t* rgba) {
@@ -228,6 +305,7 @@ LRESULT CALLBACK FrameWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 }
 
 LRESULT FrameWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
+  if (handle_mouse(msg, wp, lp) || handle_key(msg, wp, lp)) return 0;
   switch (msg) {
     case kFrameMsg:
       InvalidateRect(hwnd_, nullptr, FALSE);
@@ -245,152 +323,6 @@ LRESULT FrameWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
       SetWindowPos(hwnd_, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top,
                    SWP_NOZORDER | SWP_NOACTIVATE);
       return 0;
-    }
-    case WM_LBUTTONDOWN: {
-      SetCapture(hwnd_);
-      touching_ = true;
-      int x = static_cast<short>(LOWORD(lp));
-      int y = static_cast<short>(HIWORD(lp));
-      RECT client;
-      GetClientRect(hwnd_, &client);
-      TouchCallback on_touch;
-      {
-        std::lock_guard<std::mutex> guard(lock_);
-        RECT image = fit(client, display_width_, display_height_);
-        int iw = std::max(1, int(image.right - image.left));
-        int ih = std::max(1, int(image.bottom - image.top));
-        float dx = float(x - image.left) * float(display_width_) / float(iw);
-        float dy = float(y - image.top) * float(display_height_) / float(ih);
-        dx = std::clamp(dx, 0.0f, float(display_width_ - 1));
-        dy = std::clamp(dy, 0.0f, float(display_height_ - 1));
-        last_x_ = dx;
-        last_y_ = dy;
-        down_time_ = clock::monotonic_nanos();
-        on_touch = on_touch_;
-      }
-      if (on_touch) on_touch(0, last_x_, last_y_, down_time_, down_time_);
-      return 0;
-    }
-    case WM_MOUSEMOVE: {
-      if (!touching_) return 0;
-      int x = static_cast<short>(LOWORD(lp));
-      int y = static_cast<short>(HIWORD(lp));
-      RECT client;
-      GetClientRect(hwnd_, &client);
-      TouchCallback on_touch;
-      int64_t now = clock::monotonic_nanos();
-      {
-        std::lock_guard<std::mutex> guard(lock_);
-        RECT image = fit(client, display_width_, display_height_);
-        int iw = std::max(1, int(image.right - image.left));
-        int ih = std::max(1, int(image.bottom - image.top));
-        float dx = float(x - image.left) * float(display_width_) / float(iw);
-        float dy = float(y - image.top) * float(display_height_) / float(ih);
-        dx = std::clamp(dx, 0.0f, float(display_width_ - 1));
-        dy = std::clamp(dy, 0.0f, float(display_height_ - 1));
-        last_x_ = dx;
-        last_y_ = dy;
-        on_touch = on_touch_;
-      }
-      if (on_touch) on_touch(2, last_x_, last_y_, down_time_, now);
-      return 0;
-    }
-    case WM_LBUTTONUP: {
-      if (!touching_) return 0;
-      touching_ = false;
-      ReleaseCapture();
-      int x = static_cast<short>(LOWORD(lp));
-      int y = static_cast<short>(HIWORD(lp));
-      RECT client;
-      GetClientRect(hwnd_, &client);
-      TouchCallback on_touch;
-      int64_t now = clock::monotonic_nanos();
-      {
-        std::lock_guard<std::mutex> guard(lock_);
-        RECT image = fit(client, display_width_, display_height_);
-        int iw = std::max(1, int(image.right - image.left));
-        int ih = std::max(1, int(image.bottom - image.top));
-        float dx = float(x - image.left) * float(display_width_) / float(iw);
-        float dy = float(y - image.top) * float(display_height_) / float(ih);
-        dx = std::clamp(dx, 0.0f, float(display_width_ - 1));
-        dy = std::clamp(dy, 0.0f, float(display_height_ - 1));
-        last_x_ = dx;
-        last_y_ = dy;
-        on_touch = on_touch_;
-      }
-      if (on_touch) on_touch(1, last_x_, last_y_, down_time_, now);
-      return 0;
-    }
-    case WM_CAPTURECHANGED: {
-      if (touching_ && reinterpret_cast<HWND>(lp) != hwnd_) {
-        touching_ = false;
-        int64_t now = clock::monotonic_nanos();
-        TouchCallback on_touch;
-        {
-          std::lock_guard<std::mutex> guard(lock_);
-          on_touch = on_touch_;
-        }
-        if (on_touch) on_touch(3, last_x_, last_y_, down_time_, now);
-      }
-      return 0;
-    }
-    case WM_KEYDOWN: {
-      int32_t key_code = win32_vk_to_android_keycode(wp);
-      if (key_code != 0) {
-        int32_t meta = get_win32_meta_state();
-        int64_t now = clock::monotonic_nanos();
-        KeyCallback on_key;
-        {
-          std::lock_guard<std::mutex> guard(lock_);
-          on_key = on_key_;
-        }
-        if (on_key) on_key(0, key_code, meta, true, now);
-      }
-      return 0;
-    }
-    case WM_KEYUP: {
-      int32_t key_code = win32_vk_to_android_keycode(wp);
-      if (key_code != 0) {
-        int32_t meta = get_win32_meta_state();
-        int64_t now = clock::monotonic_nanos();
-        KeyCallback on_key;
-        {
-          std::lock_guard<std::mutex> guard(lock_);
-          on_key = on_key_;
-        }
-        if (on_key) on_key(0, key_code, meta, false, now);
-      }
-      return 0;
-    }
-    case WM_SYSKEYDOWN: {
-      if (wp == VK_F4) break;
-      int32_t key_code = win32_vk_to_android_keycode(wp);
-      if (key_code != 0) {
-        int32_t meta = get_win32_meta_state();
-        int64_t now = clock::monotonic_nanos();
-        KeyCallback on_key;
-        {
-          std::lock_guard<std::mutex> guard(lock_);
-          on_key = on_key_;
-        }
-        if (on_key) on_key(0, key_code, meta, true, now);
-      }
-      break;
-    }
-    case WM_SYSKEYUP: {
-      if (wp == VK_F4) break;
-      int32_t key_code = win32_vk_to_android_keycode(wp);
-      if (key_code != 0) {
-        int32_t meta = get_win32_meta_state();
-        int64_t now = clock::monotonic_nanos();
-        KeyCallback on_key;
-        {
-          std::lock_guard<std::mutex> guard(lock_);
-          on_key = on_key_;
-        }
-        if (on_key) on_key(0, key_code, meta, false, now);
-      }
-      break;
     }
     case WM_CLOSE: {
       std::function<void()> on_close;

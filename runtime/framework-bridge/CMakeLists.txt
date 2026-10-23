@@ -18,6 +18,8 @@ add_library(aa_bridge STATIC
   framework_surface.cpp
   framework_text.cpp
   framework_vector_drawable.cpp
+  input_dispatcher.cpp
+  input_routing.cpp
   key_character_map.cpp
   motion_event.cpp
   framework_natives.cpp

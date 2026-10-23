@@ -48,23 +48,23 @@ le nombre de fichiers, et ne montent qu'avec une preuve sur le vrai framework ou
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
 | G2    | Vraie libcore d'AOSP (Android 17)                           | 93 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART ([ADR-004](adr/ADR-004-libcore-aosp.md)). Ajouts du 17 octobre encore **à vérifier** sur la vraie libcore : E/S scatter-gather, `MethodHandle` polymorphique, annotations, fuseaux horaires |
-| G3    | Vrai `framework.jar` et une application AOSP affichée       | 78 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md). J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel) ; J8 en cours (l'écran est dans une fenêtre Win32, le clic dans la vraie application reste à démontrer) ; J9 en cours (code poussé le 17 octobre, non vérifié sur le vrai framework) ; J10 à faire ; J3 en cours |
+| G3    | Vrai `framework.jar` et une application AOSP affichée       | 82 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md). J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK jusqu'à `onDestroy`, prouvés par des tests e2e) ; J9 en cours (code poussé le 17 octobre, à vérifier sur le vrai framework) ; J10 à faire ; J3 en cours |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire : architecture proposée dans l'[ADR-009](adr/ADR-009-couche-native-elf.md) (chargeur ELF x86_64, bionic, JNI) |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
-| **Total** | **Android natif sur Windows**                          | **≈ 48 %** | Pondéré par l'effort : G0 5 %, G1 10 %, G2 10 %, G3 30 %, G4 25 %, G5 20 % |
+| **Total** | **Android natif sur Windows**                          | **≈ 49 %** | Pondéré par l'effort : G0 5 %, G1 10 %, G2 10 %, G3 30 %, G4 25 %, G5 20 % |
 
 ```
 G0 ██████████ 100 %
 G1 ██████████ 100 %
 G2 █████████░  93 %
-G3 ████████░░  78 %
+G3 ████████░░  82 %
 G4 ░░░░░░░░░░   0 %
 G5 ░░░░░░░░░░   0 %
    ───────────────
-   █████░░░░░ ≈ 48 % vers « Android natif sur Windows »
+   █████░░░░░ ≈ 49 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 37 suites de tests et 194 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 39 suites de tests et 196 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.
@@ -289,32 +289,39 @@ mots, espacements) et celle du scaler FreeType de Skia sont réécrites d'après
 **J7 atteint : moteur 2D logiciel complet sur le Skia d'Android.** Les natives de dessin reprennent `SkiaCanvas` de HWUI
 sur un `SkCanvas` posé sur les pixels des bitmaps et des tampons de fenêtre (RGBA prémultiplié,
 l'ordre d'Android) ; les polices du moteur de texte deviennent des `SkTypeface` FreeType comme
-dans `MinikinFontSkia` ([ADR-008](adr/ADR-008-moteur-2d.md)). Sont pleinement branchés :
+dans `MinikinFontSkia` ([ADR-008](adr/ADR-008-moteur-2d.md)). Ajoutés le 17 octobre, couverts par des tests unitaires mais pas encore exercés par une vraie
+application :
 - `RenderNode` avec calcul exact de la matrice 2D affine et des rotations 3D par caméra `Sk3DView` (`rotationX`, `rotationY`, `rotationZ`, `camera_distance`) pour `nGetTransformMatrix` et `nGetInverseTransformMatrix` ;
 - tracé direct de glyphes `BaseCanvas.nDrawGlyphs` avec `SkTextBlob` et `SkTypeface` ;
 - AGSL complet : `RuntimeShader` et `RuntimeColorFilter` avec compilation de shaders personnalisés, mise à jour des variables d'uniforme (scalaires, vecteurs, tableaux, couleurs, entiers) et liaison des enfants shaders et filtres de couleur.
 
-**J8 atteint : l'écran dans une fenêtre Win32 et pipeline d'entrées.** `exec --window` montre les
-images publiées par le vrai framework dans une fenêtre Win32 (mise à l'échelle avec les
-proportions de l'écran, sur son propre fil) ; la fermer termine le processus, comme Android le tue.
-`ProcessLauncher` laisse l'application tourner (`--until-resumed` pour les tests). Le pipeline
-d'entrées complet est en place :
-- service `input` (`IInputManager`) décrivant le clavier virtuel avec le `Virtual.kcm` de l'image,
-  lu par le port du `KeyCharacterMap` de libinput (syntaxe `.kcm`, modificateurs, recouvrements, `Parcel`) ;
-- natives de `KeyCharacterMap` et `KeyEvent` branchées ;
-- natives de `MotionEvent` (52 méthodes de l'AOSP 17, portage C++ pur de libinput et `ui::Transform`) ;
-- paires d'`InputChannel` avec passage par `Parcel` et liaison token/receiver ;
-- natives d'`InputEventReceiver` (`nativeInit`, `nativeDispose`, `nativeFinishInputEvent`, `nativeProbablyHasInput`, `nativeConsumeBatchedInputEvents`, `nativeReportTimeline`, `nativeDump`) ;
-- boucle de message thread-safe réveillant le `Looper` (`NativeQueue` protégée par verrou pour les
-  messages Win32) et aiguillage des événements vers le thread principal Android ;
-- capture et conversion Win32 vers Android dans `FrameWindow` (`WM_LBUTTONDOWN`, `WM_MOUSEMOVE`,
-  `WM_LBUTTONUP` vers `MotionEvent` tactile ; `WM_KEYDOWN`, `WM_KEYUP`, `WM_SYSKEYDOWN`, `WM_SYSKEYUP` vers `KeyEvent` avec
-  conversion VK vers `KEYCODE_*` et état des modificateurs) ;
-- câblage dans `main.cpp` vers `bridge::post_window_touch` et `bridge::post_window_key`.
+**J8 fait : l'écran dans une fenêtre Win32, et les entrées jusqu'au vrai framework.** `exec
+--window` montre les images publiées par le vrai framework dans une fenêtre Win32 (mise à
+l'échelle avec les proportions de l'écran, sur son propre fil) ; la fermer termine le processus.
+La souris et le clavier de la fenêtre atteignent l'application comme sur un téléphone :
+- un **répartiteur d'entrées** (`input_dispatcher.cpp`) reproduit InputDispatcher : les fils de
+  l'hôte déposent les événements dans une file protégée ; un fil répartiteur, qui ne prend le
+  verrou global que le temps de les remettre, choisit la fenêtre comme InputDispatcher (le toucher
+  à la fenêtre visible et touchable la plus haute sous le point, une fenêtre de toast
+  `NOT_TOUCHABLE` ne volant jamais un clic ; les touches et le texte à la fenêtre qui a le focus)
+  et les publie sur le canal de la fenêtre, avec sa transformation. La liste des fenêtres vient du
+  service `window` de l'hôte (`InputWindows`, ordre z des types de fenêtres d'Android) ;
+- le `Looper` de la fenêtre lit son canal comme `NativeInputEventReceiver` : vrais `MotionEvent`
+  et `KeyEvent`, `InputEventReceiver.dispatchInputEvent` (statique dans Android 17), mouvements
+  regroupés jusqu'à l'image suivante, fin des événements (`finishInputEvent`) rapportée ;
+- `FrameWindow` : bouton gauche = doigt (capture, conversion par le cadre de l'image, appuis dans
+  les bandes ignorés), molette = `ACTION_SCROLL`, touches spéciales (Entrée, Retour arrière,
+  Échap = BACK, flèches…), caractères tapés (`WM_CHAR`, toute disposition de clavier) convertis en
+  frappes du `Virtual.kcm` de l'image ou en `ACTION_MULTIPLE` ;
+- `exec --input "<étapes>"` (appuis, touches, texte, attentes d'images et de stabilisation) et
+  `--trace-input` rendent les tests déterministes.
 
-**Suite prévue, dans l'ordre** :
-1. G4 : code natif (chargeur ELF x86_64 + bionic avec processus hôte isolé, résolution JNI et `JNI_OnLoad`).
-2. G5 : services Google (microG, puis GApps).
+Preuves : `e2e-process-input` (deux clics sur le bouton de l'exemple : `View.onClick` du vrai
+framework, le libellé devient « Clics : 2 », sondes de pixels), `e2e-process-back` (BACK :
+`onPause`, `onStop`, `onDestroy`, puis fin du processus), chaque test lancé trois fois à
+l'identique ; et deux vrais clics de souris dans la fenêtre Win32 (sous Xvfb) donnent la même
+image. Le clic joue un son (`View.playSoundEffect`) : le service `audio` répond comme
+`AudioService`, sans sortie audio.
 
 **À savoir pour la suite** :
 - dans le bac à sable `/data`, `unlink` et `rename` d'un fichier ouvert suivent Linux (nom libéré
@@ -354,12 +361,11 @@ Le plan de G3 est fixé par [ADR-006](adr/ADR-006-demarrage-applications.md) : p
 `system_server`, des services système locaux en Java (javac + D8) appelés sans `Parcel`, et les
 vrais gestionnaires d'`ActivityThread`.
 
-1. **J8 : les entrées dans la vraie application** : un clic dans la fenêtre doit atteindre `View.onClick` de l'exemple, et Retour doit terminer l'activité ; les deux seront prouvés par un test e2e (image et trace).
-2. **J9 : toasts, dialogues et navigation**, vérifiés sur le vrai framework : service `notification` et `ToastPresenter`, compositeur de plusieurs fenêtres, pile d'activités du code poussé le 17 octobre.
-3. **Vérifier les ajouts G2 du 17 octobre** sur la vraie libcore et réparer la CI Windows.
-4. **J10** : une vraie application AOSP affichée et utilisable.
-5. **G4** : chargeur ELF et bionic, pour les applications avec du code natif (`.so` x86_64), selon l'[ADR-009](adr/ADR-009-couche-native-elf.md).
-6. **G5** : microG (démarrage de GmsCore avec les mêmes services), puis les GApps.
+1. **J9 : toasts, dialogues et navigation**, vérifiés sur le vrai framework : service `notification` et `ToastPresenter`, compositeur de plusieurs fenêtres, pile d'activités du code poussé le 17 octobre.
+2. **Vérifier les ajouts G2 du 17 octobre** sur la vraie libcore et réparer la CI Windows.
+3. **J10** : une vraie application AOSP affichée et utilisable.
+4. **G4** : chargeur ELF et bionic, pour les applications avec du code natif (`.so` x86_64), selon l'[ADR-009](adr/ADR-009-couche-native-elf.md).
+5. **G5** : microG (démarrage de GmsCore avec les mêmes services), puis les GApps.
 
 ## Règles que le projet s'impose
 

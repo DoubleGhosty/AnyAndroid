@@ -20,7 +20,8 @@ add_executable(aa_unit_tests
   unit/test_skia.cpp
   unit/test_text.cpp)
 target_include_directories(aa_unit_tests PRIVATE unit)
-target_link_libraries(aa_unit_tests PRIVATE aa_tooling aa_bridge aa_dex aa_apk aa_image aa_vfs aa_regex aa_text aa_skia)
+target_link_libraries(aa_unit_tests PRIVATE aa_tooling aa_bridge aa_dex aa_apk aa_image aa_vfs aa_regex aa_text aa_skia
+                      aa_backend_headless)
 add_test(NAME unit COMMAND aa_unit_tests)
 # Every HandleTable has its own kind tag (framework-bridge/handles.h).
 add_test(NAME handle-kinds COMMAND ${CMAKE_COMMAND} -DROOT=${PROJECT_SOURCE_DIR}
@@ -150,6 +151,22 @@ if(AA_LIBCORE_DIR)
               "300,127,#D6D7D7" "544,125,#30323A" "540,1000,#EDEDF6"
         ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
              ${S}/basic-activity.apk aa.host.ProcessLauncher com.anyandroid.samples.basic --until-resumed)
+      # J8 (input scripts: steps on separate lines, ';' being CMake's list
+      # separator): two taps on the button reach View.onClick through the input
+      # dispatcher; the label reads "Clics : 2" (the "2": ink at 40,98 and
+      # 43,98, background at 42,92 where a "1" has ink).
+      aa_e2e(process-input CODE 0 GOLDEN process-input.txt
+        FRAME 1080x1920 "540,28,#1A1B20" "40,98,#787A84" "43,98,#787A84" "42,92,#EDEDF6" "300,127,#D6D7D7"
+        ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
+             --trace-input
+             --input "after-frames 1\nsettle 1500\ntap 540 127\nsettle 1500\ntap 540 127\nsettle 1500\nquit"
+             ${S}/basic-activity.apk aa.host.ProcessLauncher com.anyandroid.samples.basic)
+      # J8: BACK finishes the only activity (onPause, onStop, onDestroy), then
+      # the process ends, no home screen to return to.
+      aa_e2e(process-back CODE 0 GOLDEN process-back.txt
+        ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
+             --trace-input --input "after-frames 1\nsettle 1500\nkey BACK\nsettle 3000\nquit"
+             ${S}/basic-activity.apk aa.host.ProcessLauncher com.anyandroid.samples.basic)
     endif()
     # G3 entry point: utility classes of the real framework.jar.
     aa_e2e(framework-demo CODE 0 GOLDEN framework-demo.txt

@@ -113,8 +113,8 @@ G4 code natif (chargeur ELF + bionic), G5 microG puis GApps. Le plan de G3 (ADR-
 outillage et chargeurs (faits), J3 services système v1 (en cours), J4 démarrage direct jusqu'à
 `onResume` (fait), J5 démarrage par les vrais gestionnaires d'`ActivityThread` (fait),
 J6 texte et J7 rendu logiciel (faits pour l'application d'exemple), **J8 fenêtre Win32 et
-entrées (en cours : l'écran est dans la fenêtre, le clic réel reste à prouver)**, J9 navigation,
-toasts et dialogues (en cours, non vérifié), J10 une vraie application AOSP (à faire).
+entrées (fait : clics, touches et BACK prouvés par des e2e)**, J9 navigation, toasts et dialogues
+(en cours, à vérifier), J10 une vraie application AOSP (à faire).
 
 ## 5. Mettre en place l'environnement
 
@@ -163,9 +163,10 @@ ninja -C build
 WINEDEBUG=-all ctest --test-dir build -j8 --output-on-failure
 WINEDEBUG=-all wine build/tests/aa_unit_tests.exe [filtre]   # tests unitaires seuls, filtre par nom
 ```
-État au 2026-10-23 : **37 suites, toutes vertes sous wine** (dont `e2e-launch` et
-`e2e-process-launch`), **194 tests unitaires** ; la CI Windows (27 suites) échoue sur
-`gc_cleaners_and_reference_queue` (§13).
+État au 2026-10-23 : **39 suites, toutes vertes sous wine** (dont `e2e-launch`,
+`e2e-process-launch`, `e2e-process-input` et `e2e-process-back`), **196 tests unitaires**. La CI
+Windows (27 suites) ne démarrait plus le 23 octobre : toutes les exécutions échouaient en quelques
+secondes sans journal, un problème du compte GitHub Actions et non du code.
 Avec `-DAA_R8_JAR` le code d'hôte Java est construit et les suites `host-probe`,
 `host-services` et `launch` s'ajoutent (elles exigent aussi `AA_SYSTEM_IMAGE`).
 
@@ -215,10 +216,11 @@ Fait et vérifié (voir STATUS.md pour le détail) :
 - **G3/J7 (fait)** : moteur 2D logiciel avec `SkiaCanvas` HWUI sur Skia AOSP et dessin dans la surface.
   Rotations 3D de `RenderNode` avec projection de caméra `Sk3DView` (`rotateX`, `rotateY`, `rotateZ`),
   tracé direct de glyphes `BaseCanvas.nDrawGlyphs`, et AGSL complet (`RuntimeShader` et `RuntimeColorFilter`).
-- **G3/J8 (en cours)** : affichage dans une fenêtre Win32 (`exec --window`), service `input`,
-  natives `KeyCharacterMap`, `KeyEvent`, `MotionEvent` (portage libinput, 52 natives),
-  `InputChannel`, `InputEventReceiver` ; la saisie Win32 est branchée mais aucun test ne prouve
-  encore qu'un clic atteint `View.onClick` dans la vraie application.
+- **G3/J8 (fait)** : affichage dans une fenêtre Win32 (`exec --window`) ; répartiteur d'entrées
+  (`input_dispatcher.cpp`, `input_routing.cpp`) fidèle à InputDispatcher, avec la liste des
+  fenêtres tenue par l'hôte (`InputWindows`) ; natives `KeyCharacterMap`, `KeyEvent`,
+  `MotionEvent`, `InputChannel`, `InputEventReceiver` ; scripts d'entrées (`exec --input`,
+  `--trace-input`). Tests `e2e-process-input` (deux clics, « Clics : 2 ») et `e2e-process-back`.
 - **G3/J9 (en cours, non vérifié)** : pile d'activités (`ActivityTaskService`), fenêtres
   secondaires (`WindowService`), compositeur de plusieurs surfaces, poussés le 17 octobre sans
   exécution du vrai framework (signatures corrigées par `c1ebbc4`).
@@ -243,20 +245,19 @@ Fait et vérifié (voir STATUS.md pour le détail) :
 
 ## 9. Prochaines étapes, dans l'ordre
 
-1. **J8 : prouver les entrées** : un test e2e où un clic dans la vraie application change le
-   libellé (« Clics : 2 », sondes de pixels) et où Retour termine l'activité ; routage des
-   événements par fenêtre comme InputDispatcher (cadre et drapeaux), pas « au dernier récepteur ».
-2. **J9 : toasts, dialogues, navigation**, vérifiés sur le vrai framework (service
+1. **J9 : toasts, dialogues, navigation**, vérifiés sur le vrai framework (service
    `notification` et `ToastPresenter`, compositeur, pile d'activités).
-3. **Réparer la CI Windows** et vérifier les ajouts G2 du 17 octobre sur la vraie libcore.
-4. **J10** : une vraie application AOSP (comme `Music`) affichée et utilisable. Les motifs de
+2. **Vérifier les ajouts G2 du 17 octobre** sur la vraie libcore (E/S scatter-gather,
+   `MethodHandle`, annotations, fuseaux horaires) ; relancer la CI Windows dès que le compte
+   GitHub Actions fonctionne.
+3. **J10** : une vraie application AOSP (comme `Music`) affichée et utilisable. Les motifs de
    césure `.hyb` et le pilotage déterministe des tests sont à concevoir sur l'horloge commune
    (`common/clock.h`).
-5. **G4 : code natif** : chargeur ELF et bionic. L'[évaluation d'ANDROWIN](evaluations/ANDROWIN.md)
+4. **G4 : code natif** : chargeur ELF et bionic. L'[évaluation d'ANDROWIN](evaluations/ANDROWIN.md)
    décrit ntdroid (ART réel dans un processus Windows par interception d'appels système) : c'est
    la référence pour un **processus hôte isolé** dédié au code natif ; l'option « ART réel à la
    place de notre interpréteur » est archivée.
-6. **G5 : microG** (démarrer GmsCore avec nos services : comptes, `GoogleApiAvailability`), puis
+5. **G5 : microG** (démarrer GmsCore avec nos services : comptes, `GoogleApiAvailability`), puis
    les GApps dans les limites du §2.1.
 
 ## 10. Savoir-faire technique
@@ -356,9 +357,15 @@ mal passé, pour que cela ne se reproduise pas (les règles correspondantes sont
    échoue sous Windows, pas sous wine) et personne ne l'a relue après le push. La cause était une
    aide de test (`scrub_stack`) que GCC supprimait entièrement : avec GCC 15, une copie périmée
    d'une poignée sur la pile retenait l'objet.
-7. **Approximations à la place d'Android.** Focus et entrées donnés au dernier récepteur créé
-   (une fenêtre de toast volerait les clics) au lieu du routage d'InputDispatcher par cadre et
-   par drapeaux ; assombrissement `FLAG_DIM_BEHIND` fixé à 60 % au lieu de `dimAmount`.
+7. **Approximations et API d'une autre version d'Android.** Focus et entrées donnés au dernier
+   récepteur créé (une fenêtre de toast volerait les clics) au lieu du routage d'InputDispatcher
+   par cadre et par drapeaux ; assombrissement `FLAG_DIM_BEHIND` fixé à 60 % au lieu de
+   `dimAmount`. Surtout, le pipeline d'entrées appelait `dispatchInputEvent(int, InputEvent)`
+   comme méthode d'instance, alors qu'Android 17 la déclare `static (WeakReference, int,
+   InputEvent)`, et liait `InputEventReceiver.nativeDispose` en `(J)V` au lieu de `(JZ)V` : aucun
+   événement ne pouvait atteindre la vraie application. Son test unitaire passait parce que son
+   récepteur smali reproduisait l'ancienne API. Il manquait aussi le service `audio` : le premier
+   vrai clic aurait planté l'application (`View.playSoundEffect`).
 8. **Commits trop gros et mal formés.** `54d8b88` mélange pile d'activités, fenêtres, focus,
    compositeur, documentation et chiffres d'avancement. Sept messages sont sans accents, l'un
    commence par un BOM (`ff677b9`), et treize des quatorze n'ont pas les lignes d'attribution.
