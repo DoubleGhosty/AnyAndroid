@@ -1054,20 +1054,42 @@ int32_t Vfs::open(std::string_view path, int32_t flags, uint32_t mode) {
     auto st = l.mount->lstat(l.rel);
     if (st && st->type == NodeType::kSymlink) throw VfsError{kELOOP, p};
   }
-  Fd entry;
-  entry.file = std::shared_ptr<OpenFile>(l.mount->open(l.rel, flags, mode));
-  entry.flags = flags;
-  entry.path = p;
-  int32_t fd = 3;
-  while (fds_.count(fd)) ++fd;
+  auto entry = std::make_shared<Fd>();
+  entry->file = std::shared_ptr<OpenFile>(l.mount->open(l.rel, flags, mode));
+  entry->flags = flags;
+  entry->path = p;
+  int32_t fd = lowest_free_fd();
   fds_[fd] = std::move(entry);
   return fd;
+}
+
+int32_t Vfs::lowest_free_fd() const {
+  int32_t fd = 3;
+  while (fds_.count(fd)) ++fd;
+  return fd;
+}
+
+int32_t Vfs::dup(int32_t fd) {
+  std::shared_ptr<Fd> description = fds_.count(fd) ? fds_.at(fd) : nullptr;
+  if (!description) throw VfsError{kEBADF, "fd " + std::to_string(fd)};
+  if (fds_.size() >= kMaxOpenFiles) throw VfsError{kEMFILE, description->path};
+  int32_t copy = lowest_free_fd();
+  fds_[copy] = std::move(description);
+  return copy;
+}
+
+void Vfs::dup2(int32_t fd, int32_t newfd) {
+  auto it = fds_.find(fd);
+  if (it == fds_.end() || newfd < 3) throw VfsError{kEBADF, "fd " + std::to_string(fd)};
+  if (newfd == fd) return;
+  if (!fds_.count(newfd) && fds_.size() >= kMaxOpenFiles) throw VfsError{kEMFILE, it->second->path};
+  fds_[newfd] = it->second;  // the previous file of newfd is closed with its last descriptor
 }
 
 Vfs::Fd& Vfs::fd_entry(int32_t fd) {
   auto it = fds_.find(fd);
   if (it == fds_.end()) throw VfsError{kEBADF, "fd " + std::to_string(fd)};
-  return it->second;
+  return *it->second;
 }
 
 void Vfs::close(int32_t fd) {

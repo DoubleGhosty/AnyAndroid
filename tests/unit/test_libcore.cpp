@@ -860,20 +860,20 @@ TEST(libcore_timezone_memory_and_residual_posix) {
   uint64_t b = native_call(rt, tz_mem, "peekByte", "(J)B", {uint32_t(addr), uint32_t(addr >> 32)});
   CHECK_EQ(int8_t(b), 0x7A);
 
-  // pokeInt and peekInt (native order)
-  native_call(rt, tz_mem, "pokeInt", "(JI)V", {uint32_t(addr), uint32_t(addr >> 32), 0x12345678});
-  uint64_t i_val = native_call(rt, tz_mem, "peekInt", "(J)I", {uint32_t(addr), uint32_t(addr >> 32)});
+  // pokeIntNative and peekIntNative (native order)
+  native_call(rt, tz_mem, "pokeIntNative", "(JI)V", {uint32_t(addr), uint32_t(addr >> 32), 0x12345678});
+  uint64_t i_val = native_call(rt, tz_mem, "peekIntNative", "(J)I", {uint32_t(addr), uint32_t(addr >> 32)});
   CHECK_EQ(uint32_t(i_val), 0x12345678u);
 
   // peekInt with swap (Big-Endian swapped)
   uint64_t i_swap = native_call(rt, tz_mem, "peekInt", "(JZ)I", {uint32_t(addr), uint32_t(addr >> 32), 1});
   CHECK_EQ(uint32_t(i_swap), 0x78563412u);
 
-  // pokeLong and peekLong
+  // pokeLongNative and peekLongNative
   uint64_t long_val = 0x0102030405060708ULL;
-  native_call(rt, tz_mem, "pokeLong", "(JJ)V",
+  native_call(rt, tz_mem, "pokeLongNative", "(JJ)V",
               {uint32_t(addr), uint32_t(addr >> 32), uint32_t(long_val), uint32_t(long_val >> 32)});
-  uint64_t l_read = native_call(rt, tz_mem, "peekLong", "(J)J", {uint32_t(addr), uint32_t(addr >> 32)});
+  uint64_t l_read = native_call(rt, tz_mem, "peekLongNative", "(J)J", {uint32_t(addr), uint32_t(addr >> 32)});
   CHECK_EQ(l_read, long_val);
 
   // peekShort and pokeShort with swap
@@ -883,7 +883,7 @@ TEST(libcore_timezone_memory_and_residual_posix) {
 
   bridge::native_free(rt, addr);
 
-  // 2. Test FileDispatcherImpl lock0, release0, duplicateForMapping0
+  // 2. Test FileDispatcherImpl lock0, release0
   const char* fdi = "Lsun/nio/ch/FileDispatcherImpl;";
   rt::Handle dummy_fd = rt.alloc(rt.find_class("Ljava/io/FileDescriptor;"));
   rt.object(dummy_fd)->fields.at(rt.find_class("Ljava/io/FileDescriptor;")->declared_field("descriptor", "I")->slot) = 1;
@@ -895,11 +895,7 @@ TEST(libcore_timezone_memory_and_residual_posix) {
   native_call(rt, fdi, "release0", "(Ljava/io/FileDescriptor;JJ)V",
               {dummy_fd, 0, 0, 100, 0});
 
-  uint64_t dup_fd = native_call(rt, fdi, "duplicateForMapping0", "(Ljava/io/FileDescriptor;)Ljava/io/FileDescriptor;",
-                                {dummy_fd});
-  CHECK_EQ(dup_fd, dummy_fd);
-
-  // 3. Test libcore.io.Linux residual natives: prctl, getpgid, flock
+  // 3. Test libcore.io.Linux residual natives: prctl, getpgid, umaskImpl
   const char* lx = "Llibcore/io/Linux;";
   rt::Handle lx_inst = rt.alloc(rt.find_class(lx));
 
@@ -909,6 +905,9 @@ TEST(libcore_timezone_memory_and_residual_posix) {
   uint64_t pgid_res = native_call(rt, lx, "getpgid", "(I)I", {lx_inst, 0});
   CHECK(pgid_res != 0);
 
-  native_call(rt, lx, "flock", "(Ljava/io/FileDescriptor;I)V", {lx_inst, dummy_fd, 2});
+  // umask(2) answers the previous mask; an application process starts with 077.
+  uint64_t old_mask = native_call(rt, lx, "umaskImpl", "(I)I", {lx_inst, 022});
+  CHECK_EQ(old_mask, 077u);
+  CHECK_EQ(native_call(rt, lx, "umaskImpl", "(I)I", {lx_inst, uint32_t(old_mask)}), 022u);
 }
 

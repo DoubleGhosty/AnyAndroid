@@ -404,10 +404,6 @@ void register_file_dispatcher(rt::NativeRegistry& r) {
            if (fd > 2) io_call(rt, [&] { return fstat_fd(fd); });
            return 0;
          }, S::kStub, "libération de verrou de canal");
-  r.bind(fdi, "duplicateForMapping0", "(Ljava/io/FileDescriptor;)Ljava/io/FileDescriptor;",
-         [](Runtime&, NativeArgs& a) -> uint64_t {
-           return a.raw(0);
-         }, S::kStub);
 
   const char* fci = "Lsun/nio/ch/FileChannelImpl;";
   // initIDs: the allocation granularity of mappings (the page size).

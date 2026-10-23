@@ -127,8 +127,13 @@ class Vfs {
   void set_mtime(std::string_view path, int64_t seconds);
   bool writable(std::string_view path);
 
-  // File descriptors (3 and above; 0-2 are the standard streams).
+  // File descriptors (3 and above; 0-2 are the standard streams). As in
+  // POSIX, descriptors made by dup and dup2 share one open file description:
+  // the file, its offset and its status flags.
   int32_t open(std::string_view path, int32_t flags, uint32_t mode);
+  int32_t dup(int32_t fd);
+  // newfd (3 and above) refers to fd's open file description, closed first if open.
+  void dup2(int32_t fd, int32_t newfd);
   void close(int32_t fd);
   bool is_open(int32_t fd) const { return fds_.count(fd) != 0; }
   size_t read(int32_t fd, std::span<uint8_t> out);
@@ -153,6 +158,7 @@ class Vfs {
     Mount* mount;
     std::string rel;
   };
+  // An open file description, shared by the descriptors dup made.
   struct Fd {
     std::shared_ptr<OpenFile> file;
     uint64_t pos = 0;
@@ -162,9 +168,10 @@ class Vfs {
   Located locate(const std::string& resolved);
   bool mount_ancestor(const std::string& resolved) const;  // strict parent of a mount point
   Fd& fd_entry(int32_t fd);
+  int32_t lowest_free_fd() const;
 
   std::map<std::string, std::unique_ptr<Mount>, std::greater<>> mounts_;  // longest prefix first
-  std::map<int32_t, Fd> fds_;
+  std::map<int32_t, std::shared_ptr<Fd>> fds_;
 };
 
 // Standard layout of an Android process: base layer (system image or a

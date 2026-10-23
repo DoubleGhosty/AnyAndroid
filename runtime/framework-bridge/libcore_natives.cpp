@@ -8,6 +8,7 @@
 // streams, a fixed Android-like environment and fixed identity values; no
 // host file, environment variable or user name is exposed.
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -937,7 +938,12 @@ void register_os(rt::NativeRegistry& r) {
   r.bind(lx, "nativeGetpid", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_int(int32_t(GetCurrentProcessId())); });
   r.bind(lx, "nativeGettid", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_int(int32_t(GetCurrentThreadId())); });
   r.bind(lx, "nativeGetppid", "()I", ident(1));
-  r.bind(lx, "nativeUmaskImpl", "(I)I", ident(077), S::kPartial, "masque fixe, sans effet");
+  // umask(2): the previous mask; an application process starts with zygote's 077. Files of the
+  // VFS keep their own permissions: the mask is only remembered.
+  r.bind(lx, "umaskImpl", "(I)I", [](Runtime&, NativeArgs& a) -> uint64_t {
+    static std::atomic<int32_t> mask{077};
+    return rt::ret_int(mask.exchange(a.i32(1) & 0777));
+  }, S::kPartial, "masque retenu, sans effet sur les permissions du VFS");
   // fdsan (descriptor ownership tags): no tagging on Windows.
   r.bind(lx, "android_fdsan_exchange_owner_tag", "(Ljava/io/FileDescriptor;JJ)V",
          [](Runtime&, NativeArgs&) -> uint64_t { return 0; }, S::kPartial, "fdsan sans objet");
@@ -946,7 +952,7 @@ void register_os(rt::NativeRegistry& r) {
   r.bind(lx, "android_fdsan_get_tag_type", "(J)Ljava/lang/String;", [](Runtime& rt, NativeArgs&) -> uint64_t {
     return rt.new_string_utf8("none");
   }, S::kStub, "fdsan sans objet");
-  r.bind(lx, "nativeAndroid_fdsan_get_tag_value", "(J)J", [](Runtime&, NativeArgs&) -> uint64_t { return 0; },
+  r.bind(lx, "android_fdsan_get_tag_value", "(J)J", [](Runtime&, NativeArgs&) -> uint64_t { return 0; },
          S::kStub, "fdsan sans objet");
   r.bind(lx, "getpwuid", "(I)Landroid/system/StructPasswd;", [](Runtime& rt, NativeArgs&) -> uint64_t {
     throw_errno(rt, "getpwuid", kENOENT);

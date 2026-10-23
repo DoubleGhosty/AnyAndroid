@@ -1353,6 +1353,28 @@ TEST(vfs_sandboxed_data_areas) {
   v->close(ap);
   CHECK_EQ(str(v->read_file("/data/local/tmp/b.bin")), std::string("0123!"));
 
+  // dup and dup2 share the open file description: one offset, one file. The
+  // copy takes the lowest free descriptor, and closing it leaves the original open.
+  int32_t src = v->open("/data/local/tmp/b.bin", vfs::kO_RDWR, 0);
+  int32_t copy = v->dup(src);
+  CHECK_EQ(copy, src + 1);
+  CHECK_EQ(v->read(src, two), size_t(2));
+  CHECK_EQ(v->lseek(copy, 0, 1), int64_t(2));
+  CHECK_EQ(v->read(copy, two), size_t(2));
+  CHECK_EQ(str(two), std::string("23"));
+  v->close(copy);
+  CHECK_EQ(v->lseek(src, 0, 1), int64_t(4));
+  int32_t other = v->open("/data/local/tmp/a.txt", vfs::kO_RDONLY, 0);
+  CHECK_EQ(other, copy);  // the freed number is reused
+  v->dup2(src, other);
+  CHECK_EQ(v->fstat(other).size, uint64_t(5));
+  CHECK_EQ(v->lseek(other, 1, 0), int64_t(1));
+  CHECK_EQ(v->lseek(src, 0, 1), int64_t(1));
+  CHECK_EQ(vfs_errno([&] { v->dup2(src, 2); }), vfs::kEBADF);
+  CHECK_EQ(vfs_errno([&] { v->dup(other + 1); }), vfs::kEBADF);
+  v->close(other);
+  v->close(src);
+
   // Directories.
   v->mkdir("/data/local/tmp/d", 0700);
   CHECK_EQ(vfs_errno([&] { v->mkdir("/data/local/tmp/d", 0700); }), vfs::kEEXIST);

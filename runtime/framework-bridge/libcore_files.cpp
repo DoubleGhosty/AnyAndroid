@@ -8,6 +8,7 @@
 #include <cstring>
 #include <io.h>
 #include <new>
+#include <string_view>
 #include <vector>
 
 #ifdef _WIN32
@@ -523,94 +524,38 @@ void register_linux(rt::NativeRegistry& r) {
     bool w = fd > 2 && guarded(rt, "fstatvfs", [&] { return the_vfs().writable(the_vfs().fd_path(fd)); });
     return struct_statvfs(rt, w);
   }, S::kPartial, "valeurs de capacité fixes");
-  r.bind(lx, "fcntlVoid", "(Ljava/io/FileDescriptor;I)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    int32_t fd = fd_of(rt, a.h(1));
-    int32_t cmd = a.i32(2);
-    if (cmd == 1) return 0;  // F_GETFD: no FD_CLOEXEC bookkeeping
+  // fcntl(2) of the commands that read a descriptor's state; the argument of
+  // fcntlInt is ignored for them, as by the kernel.
+  auto fcntl_get = [](Runtime& rt, int32_t fd, int32_t cmd) -> uint64_t {
+    if (cmd == 1) return 0;  // F_GETFD: no FD_CLOEXEC bookkeeping (libcore opens without O_CLOEXEC)
     if (cmd == 3) {          // F_GETFL
       if (fd >= 0 && fd <= 2) return rt::ret_int(fd == 0 ? vfs::kO_RDONLY : vfs::kO_WRONLY);
       return rt::ret_int(guarded(rt, "fcntl", [&] { return the_vfs().open_flags(fd); }));
     }
     throw_errno(rt, "fcntl", vfs::kEINVAL);
+  };
+  r.bind(lx, "fcntlVoid", "(Ljava/io/FileDescriptor;I)I", [fcntl_get](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return fcntl_get(rt, fd_of(rt, a.h(1)), a.i32(2));
   }, S::kPartial, "F_GETFD et F_GETFL");
-  r.bind(lx, "fcntlInt", "(Ljava/io/FileDescriptor;II)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+  r.bind(lx, "fcntlInt", "(Ljava/io/FileDescriptor;II)I", [fcntl_get](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t cmd = a.i32(2);
     if (cmd == 2 || cmd == 4) return 0;  // F_SETFD, F_SETFL: accepted without effect
-    throw_errno(rt, "fcntl", vfs::kEINVAL);
-  }, S::kPartial, "F_SETFD et F_SETFL sans effet");
+    return fcntl_get(rt, fd_of(rt, a.h(1)), cmd);
+  }, S::kPartial, "F_GETFD et F_GETFL ; F_SETFD et F_SETFL sans effet");
 
-  // Verrous de fichiers fcntlFlock et flock
-  r.bind(lx, "fcntlFlock", "(Ljava/io/FileDescriptor;ILandroid/system/StructFlock;)I",
-         [](Runtime& rt, NativeArgs& a) -> uint64_t {
-           int32_t fd = fd_of(rt, a.h(1));
-           int32_t cmd = a.i32(2);
-           Handle flock_h = a.h(3);
-           if (fd > 2) guarded(rt, "fcntlFlock", [&] { return fstat_fd(fd); });
-           if (flock_h != kNull) {
-             rt::Object& fo = rt.nonnull(flock_h, "StructFlock");
-             // F_GETLK: aucun conflit dans notre bac à sable -> F_UNLCK (2)
-             if (cmd == 5 /* F_GETLK */ || cmd == 12 /* F_GETLK64 */) {
-               rt::Field* type_f = find_field(fo.klass, "l_type", "S");
-               if (type_f) fo.fields.at(type_f->slot) = 2; // F_UNLCK
-             }
-           }
-           return 0;
-         }, S::kPartial, "verrous de fichier en mémoire simulés");
-
-  r.bind(lx, "flock", "(Ljava/io/FileDescriptor;I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+  // ioctl(fd, cmd, &arg), the int argument returned (Linux_ioctlInt):
+  // FIONREAD, the bytes left to read, is what IoBridge.available asks.
+  r.bind(lx, "ioctlInt", "(Ljava/io/FileDescriptor;I)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(1));
-    if (fd > 2) guarded(rt, "flock", [&] { return fstat_fd(fd); });
-    return 0;
-  }, S::kStub, "verrou flock accepté sans effet");
-
-  // ioctlInt (FIONREAD)
-  r.bind(lx, "ioctlInt", "(Ljava/io/FileDescriptor;ILandroid/util/MutableInt;)I",
-         [](Runtime& rt, NativeArgs& a) -> uint64_t {
-           int32_t fd = fd_of(rt, a.h(1));
-           int32_t cmd = a.i32(2);
-           Handle out_h = a.h(3);
-           constexpr int32_t kFionread = 0x541B;
-           int32_t avail = 0;
-           if (cmd == kFionread) {
-             if (fd > 2) {
-               avail = guarded(rt, "ioctl", [&] {
-                 int64_t pos = the_vfs().lseek(fd, 0, 1);
-                 int64_t left = int64_t(the_vfs().fstat(fd).size) - pos;
-                 return int32_t(std::clamp<int64_t>(left, 0, INT32_MAX));
-               });
-             }
-           }
-           if (out_h != kNull) {
-             rt::Object& mo = rt.nonnull(out_h, "MutableInt");
-             rt::Field* vf = find_field(mo.klass, "value", "I");
-             if (vf) mo.fields.at(vf->slot) = uint32_t(avail);
-           }
-           return 0;
-         }, S::kPartial, "FIONREAD sur le VFS");
-
-  // Horloges et temps système
-  r.bind(lx, "clock_gettime", "(I)Landroid/system/StructTimespec;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    int32_t clock_id = a.i32(1);
-    int64_t nanos = (clock_id == 0 /* CLOCK_REALTIME */)
-                        ? int64_t(aa::clock::unix_millis()) * 1000000LL
-                        : aa::clock::monotonic_nanos();
-    int64_t sec = nanos / 1000000000LL;
-    int64_t nsec = nanos % 1000000000LL;
-    std::vector<uint32_t> args;
-    push_long(args, sec);
-    push_long(args, nsec);
-    return construct(rt, "Landroid/system/StructTimespec;", "(JJ)V", args);
-  });
-
-  r.bind(lx, "gettimeofday", "()Landroid/system/StructTimeval;", [](Runtime& rt, NativeArgs&) -> uint64_t {
-    int64_t millis = aa::clock::unix_millis();
-    int64_t sec = millis / 1000LL;
-    int64_t usec = (millis % 1000LL) * 1000LL;
-    std::vector<uint32_t> args;
-    push_long(args, sec);
-    push_long(args, usec);
-    return construct(rt, "Landroid/system/StructTimeval;", "(JJ)V", args);
-  });
+    constexpr int32_t kFionread = 0x541B;
+    if (a.i32(2) != kFionread) throw_errno(rt, "ioctl", vfs::kENOTTY);
+    if (fd >= 0 && fd <= 2) return 0;  // nothing waiting on the standard streams
+    return rt::ret_int(guarded(rt, "ioctl", [&] {
+      int64_t pos = the_vfs().lseek(fd, 0, 1);
+      int64_t left = int64_t(the_vfs().fstat(fd).size) - pos;
+      return int32_t(std::clamp<int64_t>(left, 0, INT32_MAX));
+    }));
+  }, S::kPartial, "FIONREAD sur le VFS");
 
   // Contrôle de processus
   r.bind(lx, "prctl", "(IJJJJ)I", [](Runtime&, NativeArgs&) -> uint64_t {
@@ -634,11 +579,10 @@ void register_linux(rt::NativeRegistry& r) {
   r.bind(lx, "dup", "(Ljava/io/FileDescriptor;)Ljava/io/FileDescriptor;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(1));
     if (fd >= 0 && fd <= 2) return new_file_descriptor(rt, fd);
-    std::string path = guarded(rt, "dup", [&] { return the_vfs().fd_path(fd); });
-    int32_t flags = guarded(rt, "dup", [&] { return the_vfs().open_flags(fd); });
-    int32_t new_fd = guarded(rt, "dup", [&] { return the_vfs().open(path, flags, 0); });
+    // La copie partage la description ouverte (position, drapeaux d'état), comme dup(2).
+    int32_t new_fd = guarded(rt, "dup", [&] { return the_vfs().dup(fd); });
     return new_file_descriptor(rt, new_fd);
-  }, S::kPartial, "duplication de descripteur virtuel");
+  }, S::kPartial, "descripteurs 0 à 2 rendus tels quels");
 
   r.bind(lx, "dup2", "(Ljava/io/FileDescriptor;I)Ljava/io/FileDescriptor;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(1));
@@ -646,14 +590,12 @@ void register_linux(rt::NativeRegistry& r) {
     if (target_fd < 0) throw_errno(rt, "dup2", vfs::kEBADF);
     if (fd == target_fd) return a.raw(1);
     if (fd >= 0 && fd <= 2) return new_file_descriptor(rt, target_fd);
-    std::string path = guarded(rt, "dup2", [&] { return the_vfs().fd_path(fd); });
-    int32_t flags = guarded(rt, "dup2", [&] { return the_vfs().open_flags(fd); });
     guarded(rt, "dup2", [&] {
-      the_vfs().close(target_fd);
-      return the_vfs().open(path, flags, 0);
+      the_vfs().dup2(fd, target_fd);
+      return 0;
     });
     return new_file_descriptor(rt, target_fd);
-  }, S::kPartial, "duplication dup2");
+  }, S::kPartial, "cible 0 à 2 refusée (EBADF)");
 }
 
 // java.io.FileInputStream natives (instance methods on the stream's `fd`).
@@ -939,28 +881,6 @@ void register_libcore_memory(rt::NativeRegistry& r) {
       poke<uint64_t>(rt, a.i64(0), uint64_t(a.i64(2)), false);
       return 0;
     });
-    // Scalar overloads without swap (direct equivalents)
-    r.bind(mem, "peekShort", "(J)S", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-      return uint32_t(int32_t(peek<int16_t>(rt, a.i64(0), false)));
-    });
-    r.bind(mem, "pokeShort", "(JS)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-      poke<uint16_t>(rt, a.i64(0), uint16_t(a.raw(2)), false);
-      return 0;
-    });
-    r.bind(mem, "peekInt", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-      return peek<uint32_t>(rt, a.i64(0), false);
-    });
-    r.bind(mem, "pokeInt", "(JI)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-      poke<uint32_t>(rt, a.i64(0), a.raw(2), false);
-      return 0;
-    });
-    r.bind(mem, "peekLong", "(J)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-      return peek<uint64_t>(rt, a.i64(0), false);
-    });
-    r.bind(mem, "pokeLong", "(JJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-      poke<uint64_t>(rt, a.i64(0), uint64_t(a.i64(2)), false);
-      return 0;
-    });
     // peek/poke<Type>(long address[, value], boolean swap) intrinsics
     const char* note = "accès direct à la mémoire native émulée";
     r.intrinsic(mem, "peekShort", "(JZ)S", [](Runtime& rt, NativeArgs& a) -> uint64_t {
@@ -984,6 +904,8 @@ void register_libcore_memory(rt::NativeRegistry& r) {
       poke<uint64_t>(rt, a.i64(0), uint64_t(a.i64(2)), a.z(4));
       return 0;
     }, note);
+    // libcore.io.Memory only: the i18n module's copy has no memmove nor bulk copies.
+    if (std::string_view(mem) != "Llibcore/io/Memory;") continue;
     // memmove
     r.bind(mem, "memmove", "(Ljava/lang/Object;ILjava/lang/Object;IJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
       int64_t count = a.i64(4);
