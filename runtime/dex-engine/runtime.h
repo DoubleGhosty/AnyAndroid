@@ -153,24 +153,34 @@ struct ThrowablePeer final : NativePeer {
   }
 };
 
-// Encoded annotation (visibility 1 = RUNTIME, 2 = SYSTEM) read from DEX.
+// An annotation_item read from a DEX file: visibility (0 build, 1 runtime,
+// 2 system), type, and its elements in the file's order (sorted by name).
 struct EncodedAnnotation {
   uint8_t visibility = 0;
   std::string type_descriptor;
-  std::unordered_map<std::string, dex::EncodedValue> elements;
+  std::vector<std::pair<std::string, dex::EncodedValue>> elements;
   const dex::DexFile* dex = nullptr;
+  const dex::EncodedValue* element(std::string_view name) const;
+};
+
+// An annotation_set_item, in the file's order (sorted by type index).
+struct AnnotationSet {
+  std::vector<EncodedAnnotation> items;
+  // The annotation of this type and visibility, or nullptr.
+  const EncodedAnnotation* find(std::string_view descriptor, uint8_t visibility) const;
 };
 
 struct FieldAnnotations {
   std::vector<std::string> signature;  // dalvik.annotation.Signature
-  std::unordered_map<std::string, EncodedAnnotation> annotations;
+  AnnotationSet annotations;
 };
 
 struct MethodAnnotations {
   std::vector<std::string> signature;       // dalvik.annotation.Signature
   std::vector<std::string> throws_classes;  // dalvik.annotation.Throws (class descriptors)
-  std::unordered_map<std::string, EncodedAnnotation> annotations;
-  std::vector<std::unordered_map<std::string, EncodedAnnotation>> parameter_annotations;
+  AnnotationSet annotations;
+  // The parameter annotations item, absent (empty) when the method has none.
+  std::vector<AnnotationSet> parameter_annotations;
 };
 
 struct ClassAnnotations {
@@ -182,7 +192,7 @@ struct ClassAnnotations {
   std::optional<uint32_t> enclosing_method;  // EnclosingMethod: method index in the class's DEX
   std::vector<std::string> member_classes;   // MemberClasses (descriptors)
   std::vector<std::string> signature;        // dalvik.annotation.Signature
-  std::unordered_map<std::string, EncodedAnnotation> annotations;
+  AnnotationSet annotations;
 };
 
 struct Field {

@@ -65,6 +65,20 @@ std::string Class::java_name() const {
   return java(descriptor);
 }
 
+const dex::EncodedValue* EncodedAnnotation::element(std::string_view name) const {
+  for (const auto& [n, v] : elements) {
+    if (n == name) return &v;
+  }
+  return nullptr;
+}
+
+const EncodedAnnotation* AnnotationSet::find(std::string_view descriptor, uint8_t visibility) const {
+  for (const auto& a : items) {
+    if (a.type_descriptor == descriptor && a.visibility == visibility) return &a;
+  }
+  return nullptr;
+}
+
 const MethodAnnotations& Method::annotations() {
   if (!annotations_) {
     if (owner) const_cast<Class*>(owner)->annotations();
@@ -105,54 +119,45 @@ void Class::load_annotations() {
       ea.visibility = a.visibility;
       ea.type_descriptor = dex.type_descriptor(a.type_idx);
       ea.dex = &dex;
-      for (const auto& [n, v] : a.elements) {
-        ea.elements.emplace(dex.string(n), v);
-      }
+      for (const auto& [n, v] : a.elements) ea.elements.emplace_back(dex.string(n), v);
     };
 
     using V = dex::EncodedValue;
 
     // 1. Class annotations
     for (const dex::Annotation& a : dir.class_annotations) {
-      if (a.visibility != 1 && a.visibility != 2) continue;
       EncodedAnnotation ea;
       parse_anno(a, ea);
       const std::string& type = ea.type_descriptor;
       if (a.visibility == 2) {
         if (type == "Ldalvik/annotation/InnerClass;") {
           out.inner = true;
-          auto it = ea.elements.find("name");
-          out.anonymous = (it == ea.elements.end() || it->second.type == V::kNull);
-          if (it != ea.elements.end() && it->second.type == V::kString && it->second.bits < dex.num_strings()) {
-            out.inner_name = dex.string(uint32_t(it->second.bits));
+          const V* name = ea.element("name");
+          out.anonymous = !name || name->type == V::kNull;
+          if (name && name->type == V::kString && name->bits < dex.num_strings()) {
+            out.inner_name = dex.string(uint32_t(name->bits));
           }
-          auto itf = ea.elements.find("accessFlags");
-          if (itf != ea.elements.end() && itf->second.type == V::kInt) {
-            out.inner_flags = int32_t(itf->second.bits);
-          }
+          const V* flags = ea.element("accessFlags");
+          if (flags && flags->type == V::kInt) out.inner_flags = int32_t(flags->bits);
         } else if (type == "Ldalvik/annotation/EnclosingClass;") {
-          auto it = ea.elements.find("value");
-          if (it != ea.elements.end() && it->second.type == V::kType && it->second.bits < dex.num_types()) {
-            out.enclosing_class = dex.type_descriptor(uint32_t(it->second.bits));
-          }
+          const V* v = ea.element("value");
+          if (v && v->type == V::kType && v->bits < dex.num_types()) out.enclosing_class = dex.type_descriptor(uint32_t(v->bits));
         } else if (type == "Ldalvik/annotation/EnclosingMethod;") {
-          auto it = ea.elements.find("value");
-          if (it != ea.elements.end() && it->second.type == V::kMethod && it->second.bits < dex.num_methods()) {
-            out.enclosing_method = uint32_t(it->second.bits);
-          }
+          const V* v = ea.element("value");
+          if (v && v->type == V::kMethod && v->bits < dex.num_methods()) out.enclosing_method = uint32_t(v->bits);
         } else if (type == "Ldalvik/annotation/MemberClasses;") {
-          auto it = ea.elements.find("value");
-          if (it != ea.elements.end() && it->second.type == V::kArray) {
-            for (const V& e : it->second.array) {
+          const V* v = ea.element("value");
+          if (v && v->type == V::kArray) {
+            for (const V& e : v->array) {
               if (e.type == V::kType && e.bits < dex.num_types()) {
                 out.member_classes.push_back(dex.type_descriptor(uint32_t(e.bits)));
               }
             }
           }
         } else if (type == "Ldalvik/annotation/Signature;") {
-          auto it = ea.elements.find("value");
-          if (it != ea.elements.end() && it->second.type == V::kArray) {
-            for (const V& e : it->second.array) {
+          const V* v = ea.element("value");
+          if (v && v->type == V::kArray) {
+            for (const V& e : v->array) {
               if (e.type == V::kString && e.bits < dex.num_strings()) {
                 out.signature.push_back(dex.string(uint32_t(e.bits)));
               }
@@ -160,7 +165,7 @@ void Class::load_annotations() {
           }
         }
       }
-      out.annotations.emplace(type, std::move(ea));
+      out.annotations.items.push_back(std::move(ea));
     }
 
     // 2. Field annotations
@@ -172,21 +177,20 @@ void Class::load_annotations() {
       if (!f) continue;
       if (!f->annotations_) f->annotations_ = std::make_unique<FieldAnnotations>();
       for (const dex::Annotation& a : fa.annotations) {
-        if (a.visibility != 1 && a.visibility != 2) continue;
         EncodedAnnotation ea;
         parse_anno(a, ea);
         const std::string& type = ea.type_descriptor;
         if (a.visibility == 2 && type == "Ldalvik/annotation/Signature;") {
-          auto it = ea.elements.find("value");
-          if (it != ea.elements.end() && it->second.type == V::kArray) {
-            for (const V& e : it->second.array) {
+          const V* v = ea.element("value");
+          if (v && v->type == V::kArray) {
+            for (const V& e : v->array) {
               if (e.type == V::kString && e.bits < dex.num_strings()) {
                 f->annotations_->signature.push_back(dex.string(uint32_t(e.bits)));
               }
             }
           }
         }
-        f->annotations_->annotations.emplace(type, std::move(ea));
+        f->annotations_->annotations.items.push_back(std::move(ea));
       }
     }
 
@@ -199,24 +203,23 @@ void Class::load_annotations() {
       if (!m) continue;
       if (!m->annotations_) m->annotations_ = std::make_unique<MethodAnnotations>();
       for (const dex::Annotation& a : ma.annotations) {
-        if (a.visibility != 1 && a.visibility != 2) continue;
         EncodedAnnotation ea;
         parse_anno(a, ea);
         const std::string& type = ea.type_descriptor;
         if (a.visibility == 2) {
           if (type == "Ldalvik/annotation/Signature;") {
-            auto it = ea.elements.find("value");
-            if (it != ea.elements.end() && it->second.type == V::kArray) {
-              for (const V& e : it->second.array) {
+            const V* v = ea.element("value");
+            if (v && v->type == V::kArray) {
+              for (const V& e : v->array) {
                 if (e.type == V::kString && e.bits < dex.num_strings()) {
                   m->annotations_->signature.push_back(dex.string(uint32_t(e.bits)));
                 }
               }
             }
           } else if (type == "Ldalvik/annotation/Throws;") {
-            auto it = ea.elements.find("value");
-            if (it != ea.elements.end() && it->second.type == V::kArray) {
-              for (const V& e : it->second.array) {
+            const V* v = ea.element("value");
+            if (v && v->type == V::kArray) {
+              for (const V& e : v->array) {
                 if (e.type == V::kType && e.bits < dex.num_types()) {
                   m->annotations_->throws_classes.push_back(dex.type_descriptor(uint32_t(e.bits)));
                 }
@@ -224,7 +227,7 @@ void Class::load_annotations() {
             }
           }
         }
-        m->annotations_->annotations.emplace(type, std::move(ea));
+        m->annotations_->annotations.items.push_back(std::move(ea));
       }
     }
 
@@ -239,10 +242,9 @@ void Class::load_annotations() {
       m->annotations_->parameter_annotations.resize(pa.annotations.size());
       for (size_t p = 0; p < pa.annotations.size(); ++p) {
         for (const dex::Annotation& a : pa.annotations[p]) {
-          if (a.visibility != 1 && a.visibility != 2) continue;
           EncodedAnnotation ea;
           parse_anno(a, ea);
-          m->annotations_->parameter_annotations[p].emplace(ea.type_descriptor, std::move(ea));
+          m->annotations_->parameter_annotations[p].items.push_back(std::move(ea));
         }
       }
     }

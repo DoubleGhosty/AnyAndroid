@@ -480,14 +480,14 @@ TEST(annotations_and_generic_signatures) {
     dex::EncodedValue val_str;
     val_str.type = dex::EncodedValue::kString;
     val_str.bits = 0;  // First string in dex
-    ea.elements["value"] = val_str;
+    ea.elements.emplace_back("value", val_str);
 
     dex::EncodedValue val_id;
     val_id.type = dex::EncodedValue::kInt;
     val_id.bits = 42;
-    ea.elements["id"] = val_id;
+    ea.elements.emplace_back("id", val_id);
 
-    target_cls->mutable_annotations().annotations["LMyAnnotation;"] = ea;
+    target_cls->mutable_annotations().annotations.items.push_back(ea);
     target_cls->mutable_annotations().signature = {"<T:Ljava/lang/Object;>Ljava/lang/Object;"};
 
     // Method annotations
