@@ -2,11 +2,11 @@
   "metadata": {
     "project": "AnyAndroid for Windows",
     "version": "0.1.0",
-    "generated_at": "2026-10-17T22:46:53.473633+00:00",
+    "generated_at": "2026-10-23T08:39:19.889983+00:00",
     "target": "Android natif sur Windows (sans VM ni hyperviseur)"
   },
   "summary": {
-    "overall_percent": 65.0,
+    "overall_percent": 49.0,
     "bridge_percent": 88.0,
     "libcore_percent": 47.2,
     "dalvik_percent": 99.6,
@@ -22,7 +22,7 @@
         "name": "Mesure des écarts (`gaps`) sur de vrais APK",
         "description": "Terminé : GApps d'Android 17 et microG mesurés",
         "progress": 100,
-        "weight": 10,
+        "weight": 5,
         "status": "Terminé : GApps d'Android 17 et microG mesurés",
         "adr": "ADR-002",
         "state": "completed"
@@ -40,30 +40,30 @@
       {
         "id": "G2",
         "name": "Vraie libcore d'AOSP (Android 17)",
-        "description": "Terminé : NIO.2 et `FileChannel` sur VFS, E/S scatter-gather, cycle de vie `Cleaner`/`PhantomReference`, dispatch `MethodHandle` polymorphique, annotations DEX complètes et réflexion générique, timezones et POSIX résiduels (ADR-004)",
-        "progress": 100,
+        "description": "NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART (ADR-004). Ajouts du 17 octobre encore **à vérifier** sur la vraie libcore : E/S scatter-gather, `MethodHandle` polymorphique, annotations, fuseaux horaires",
+        "progress": 93,
         "weight": 10,
-        "status": "Terminé : NIO.2 et `FileChannel` sur VFS, E/S scatter-gather, cycle de vie `Cleaner`/`PhantomReference`, dispatch `MethodHandle` polymorphique, annotations DEX complètes et réflexion générique, timezones et POSIX résiduels (ADR-004)",
+        "status": "NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART (ADR-004). Ajouts du 17 octobre encore **à vérifier** sur la vraie libcore : E/S scatter-gather, `MethodHandle` polymorphique, annotations, fuseaux horaires",
         "adr": "ADR-004",
-        "state": "completed"
+        "state": "in_progress"
       },
       {
         "id": "G3",
         "name": "Vrai `framework.jar` et une application AOSP affichée",
-        "description": "Terminé : plan de l'ADR-006, J0 à J10 terminés (J5 démarrage par les vrais gestionnaires, J6 texte complet FreeType/HarfBuzz, J7 moteur 2D logiciel Skia/AGSL, J8 fenêtre Win32 et entrées, J9 navigation, cycle de vie et compositeur multi-surfaces, J10 application AOSP et pipeline d'entrées interactives)",
-        "progress": 100,
-        "weight": 35,
-        "status": "Terminé : plan de l'ADR-006, J0 à J10 terminés (J5 démarrage par les vrais gestionnaires, J6 texte complet FreeType/HarfBuzz, J7 moteur 2D logiciel Skia/AGSL, J8 fenêtre Win32 et entrées, J9 navigation, cycle de vie et compositeur multi-surfaces, J10 application AOSP et pipeline d'entrées interactives)",
+        "description": "**En cours** : plan de l'ADR-006. J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK jusqu'à `onDestroy`, prouvés par des tests e2e) ; J9 en cours (code poussé le 17 octobre, à vérifier sur le vrai framework) ; J10 à faire ; J3 en cours",
+        "progress": 82,
+        "weight": 30,
+        "status": "**En cours** : plan de l'ADR-006. J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK jusqu'à `onDestroy`, prouvés par des tests e2e) ; J9 en cours (code poussé le 17 octobre, à vérifier sur le vrai framework) ; J10 à faire ; J3 en cours",
         "adr": "ADR-006",
-        "state": "completed"
+        "state": "in_progress"
       },
       {
         "id": "G4",
         "name": "Couche native ELF (bibliothèques `.so` des applications)",
-        "description": "**En cours** / Prochaine priorité : architecture chargeur ELF x86_64, bionic isolée et JNI (ADR-009)",
+        "description": "À faire : architecture proposée dans l'ADR-009 (chargeur ELF x86_64, bionic, JNI)",
         "progress": 0,
         "weight": 25,
-        "status": "**En cours** / Prochaine priorité : architecture chargeur ELF x86_64, bionic isolée et JNI (ADR-009)",
+        "status": "À faire : architecture proposée dans l'ADR-009 (chargeur ELF x86_64, bionic, JNI)",
         "adr": "ADR-009",
         "state": "pending"
       },
@@ -72,13 +72,13 @@
         "name": "Services Google : microG, puis GApps",
         "description": "À faire",
         "progress": 0,
-        "weight": 10,
+        "weight": 20,
         "status": "À faire",
         "adr": "ADR-002",
         "state": "pending"
       }
     ],
-    "overall_percent": 65.0
+    "overall_percent": 49.0
   },
   "bridge": {
     "classes": {
@@ -11135,11 +11135,11 @@
     ]
   },
   "tests": {
-    "total_suites": 37,
-    "passed_suites": 34,
+    "total_suites": 39,
+    "passed_suites": 36,
     "optional_suites": 3,
-    "unit_tests": 194,
-    "e2e_suites": 33,
+    "unit_tests": 196,
+    "e2e_suites": 35,
     "fuzz_suites": 3,
     "percent_core": 100.0,
     "note": "Les 3 tests non passés requièrent une image système AOSP externe (G2/G3 facultatifs hors dépôt)"

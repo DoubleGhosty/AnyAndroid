@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 460" width="1200" height="460" style="background-color:#0d1117; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
 <rect x="0" y="0" width="1200" height="460" fill="#0d1117"/>
 <text x="24" y="32" font-size="18" font-weight="700" fill="#f0f6fc">AnyAndroid for Windows — Carte de Progression</text>
-<text x="24" y="52" font-size="13" fill="#8b949e">Avancement global : <tspan fill="#2ea043" font-weight="600">≈ 65.0%</tspan> | Pont Framework : <tspan fill="#2ea043">88.0%</tspan> (803/912) | Libcore AOSP : <tspan fill="#2ea043">47.2%</tspan> (488/1034) | Dalvik ISA : <tspan fill="#2ea043">99.6%</tspan></text>
+<text x="24" y="52" font-size="13" fill="#8b949e">Avancement global : <tspan fill="#2ea043" font-weight="600">≈ 49.0%</tspan> | Pont Framework : <tspan fill="#2ea043">88.0%</tspan> (803/912) | Libcore AOSP : <tspan fill="#2ea043">47.2%</tspan> (488/1034) | Dalvik ISA : <tspan fill="#2ea043">99.6%</tspan></text>
 <g id="milestones-bar">
 <g><title>G0: Mesure des écarts (`gaps`) sur de vrais APK — 100% (Terminé : GApps d'Android 17 et microG mesurés)</title>
 <rect x="24.0" y="66" width="188.0" height="16" rx="3" fill="#161b22" stroke="#30363d" stroke-width="1"/>
@@ -13,17 +13,17 @@
 <rect x="216.0" y="66" width="188.0" height="16" rx="3" fill="#2ea043"/>
 <text x="222.0" y="78" font-size="10" font-weight="600" fill="#f0f6fc">G1: 100%</text>
 </g>
-<g><title>G2: Vraie libcore d'AOSP (Android 17) — 100% (Terminé : NIO.2 et `FileChannel` sur VFS, E/S scatter-gather, cycle de vie `Cleaner`/`PhantomReference`, dispatch `MethodHandle` polymorphique, annotations DEX complètes et réflexion générique, timezones et POSIX résiduels (ADR-004))</title>
+<g><title>G2: Vraie libcore d'AOSP (Android 17) — 93% (NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART (ADR-004). Ajouts du 17 octobre encore **à vérifier** sur la vraie libcore : E/S scatter-gather, `MethodHandle` polymorphique, annotations, fuseaux horaires)</title>
 <rect x="408.0" y="66" width="188.0" height="16" rx="3" fill="#161b22" stroke="#30363d" stroke-width="1"/>
-<rect x="408.0" y="66" width="188.0" height="16" rx="3" fill="#2ea043"/>
-<text x="414.0" y="78" font-size="10" font-weight="600" fill="#f0f6fc">G2: 100%</text>
+<rect x="408.0" y="66" width="174.8" height="16" rx="3" fill="#d29922"/>
+<text x="414.0" y="78" font-size="10" font-weight="600" fill="#f0f6fc">G2: 93%</text>
 </g>
-<g><title>G3: Vrai `framework.jar` et une application AOSP affichée — 100% (Terminé : plan de l'ADR-006, J0 à J10 terminés (J5 démarrage par les vrais gestionnaires, J6 texte complet FreeType/HarfBuzz, J7 moteur 2D logiciel Skia/AGSL, J8 fenêtre Win32 et entrées, J9 navigation, cycle de vie et compositeur multi-surfaces, J10 application AOSP et pipeline d'entrées interactives))</title>
+<g><title>G3: Vrai `framework.jar` et une application AOSP affichée — 82% (**En cours** : plan de l'ADR-006. J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK jusqu'à `onDestroy`, prouvés par des tests e2e) ; J9 en cours (code poussé le 17 octobre, à vérifier sur le vrai framework) ; J10 à faire ; J3 en cours)</title>
 <rect x="600.0" y="66" width="188.0" height="16" rx="3" fill="#161b22" stroke="#30363d" stroke-width="1"/>
-<rect x="600.0" y="66" width="188.0" height="16" rx="3" fill="#2ea043"/>
-<text x="606.0" y="78" font-size="10" font-weight="600" fill="#f0f6fc">G3: 100%</text>
+<rect x="600.0" y="66" width="154.2" height="16" rx="3" fill="#d29922"/>
+<text x="606.0" y="78" font-size="10" font-weight="600" fill="#f0f6fc">G3: 82%</text>
 </g>
-<g><title>G4: Couche native ELF (bibliothèques `.so` des applications) — 0% (**En cours** / Prochaine priorité : architecture chargeur ELF x86_64, bionic isolée et JNI (ADR-009))</title>
+<g><title>G4: Couche native ELF (bibliothèques `.so` des applications) — 0% (À faire : architecture proposée dans l'ADR-009 (chargeur ELF x86_64, bionic, JNI))</title>
 <rect x="792.0" y="66" width="188.0" height="16" rx="3" fill="#161b22" stroke="#30363d" stroke-width="1"/>
 <text x="798.0" y="78" font-size="10" font-weight="600" fill="#f0f6fc">G4: 0%</text>
 </g>
