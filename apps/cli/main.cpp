@@ -1028,13 +1028,14 @@ int cmd_libcore(const Args& a) {
   }
   // A method of a VM core class that the core itself declares: the libcore
   // bytecode of that method never runs (a method inherited from a superclass
-  // of the core does not count: the class's own bytecode is merged).
+  // of the core does not count: the class's own bytecode is merged; nor does
+  // one marked bytecode_with_libcore, which gives way to that bytecode).
   auto replaced_by_core = [&](const std::string& method) {
     size_t arrow = method.find("->"), paren = method.find('(', arrow);
     std::string cls = method.substr(0, arrow);
     if (!rt::is_vm_core_class(cls)) return false;
     auto l = reg.registry.lookup_method(cls, method.substr(arrow + 2, paren - arrow - 2), method.substr(paren));
-    return l.method && l.declaring && l.declaring->descriptor == cls;
+    return l.method && !l.method->bytecode_with_libcore && l.declaring && l.declaring->descriptor == cls;
   };
   // A method that never runs: replaced by the core, or private or
   // package-private in a VM core class (applications cannot call it) with

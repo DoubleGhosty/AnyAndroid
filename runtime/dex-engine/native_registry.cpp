@@ -45,6 +45,20 @@ ClassBuilder& ClassBuilder::ctor(std::string sig, NativeFn fn, ApiStatus status,
   return *this;
 }
 
+ClassBuilder& ClassBuilder::bytecode_with_libcore(std::initializer_list<std::string_view> names) {
+  for (std::string_view name : names) {
+    bool found = false;
+    for (auto& m : spec_->methods) {
+      if (m.name == name) {
+        m.bytecode_with_libcore = true;
+        found = true;
+      }
+    }
+    if (!found) throw std::logic_error("bytecode_with_libcore : méthode inconnue " + std::string(name));
+  }
+  return *this;
+}
+
 ClassBuilder& ClassBuilder::abstract_method(std::string name, std::string sig) {
   spec_->methods.push_back({std::move(name), std::move(sig), 0x1 | 0x400, nullptr, ApiStatus::kSupported, {}});
   return *this;

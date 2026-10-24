@@ -752,11 +752,65 @@ void register_throwables(NativeRegistry& r) {
   });
 }
 
+// The native side of a Thread: made by the core's constructors, or on first
+// use for a Thread built by libcore's own constructors (with a boot class
+// path), whose state is all in its fields.
 ThreadPeer& thread_peer(Runtime& rt, Handle h) {
   Object& o = rt.nonnull(h, "Thread");
   auto* p = dynamic_cast<ThreadPeer*>(o.peer.get());
-  if (!p) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] Thread non initialisé");
+  if (!p) {
+    if (o.peer) rt.throw_new("Ljava/lang/IllegalStateException;", "[AnyAndroid] Thread non initialisé");
+    auto made = std::make_unique<ThreadPeer>();
+    p = made.get();
+    o.peer = std::move(made);
+  }
   return *p;
+}
+
+// libcore's fields of a Thread: the state the core shares with its bytecode.
+uint32_t& thread_slot(Runtime& rt, Handle t, std::string_view name, std::string_view type) {
+  Field* f = rt.find_class("Ljava/lang/Thread;")->declared_field(name, type);
+  if (!f) rt.throw_new("Ljava/lang/NoSuchFieldError;", std::string(name));
+  return rt.nonnull(t, "Thread").fields.at(f->slot);
+}
+
+int64_t thread_long(Runtime& rt, Handle t, std::string_view name) {
+  uint32_t* low = &thread_slot(rt, t, name, "J");
+  return int64_t(uint64_t(low[0]) | (uint64_t(low[1]) << 32));
+}
+
+void set_thread_long(Runtime& rt, Handle t, std::string_view name, int64_t value) {
+  uint32_t* low = &thread_slot(rt, t, name, "J");
+  low[0] = uint32_t(uint64_t(value));
+  low[1] = uint32_t(uint64_t(value) >> 32);
+}
+
+constexpr std::string_view kStringType = "Ljava/lang/String;";
+constexpr std::string_view kHandlerType = "Ljava/lang/Thread$UncaughtExceptionHandler;";
+constexpr int32_t kNormPriority = 5;
+
+// Thread.nextThreadID and nextThreadNum: libcore's counters when it is there
+// (shared with its own constructors), the core's otherwise.
+int64_t next_thread_id(Runtime& rt) {
+  if (rt.find_static(rt.find_class("Ljava/lang/Thread;"), "nextThreadID", "()J")) {
+    return int64_t(rt.call_static("Ljava/lang/Thread;", "nextThreadID", "()J"));
+  }
+  static std::atomic<int64_t> seq{0};
+  return ++seq;
+}
+
+int32_t next_thread_num(Runtime& rt) {
+  if (rt.find_static(rt.find_class("Ljava/lang/Thread;"), "nextThreadNum", "()I")) {
+    return int32_t(rt.call_static("Ljava/lang/Thread;", "nextThreadNum", "()I"));
+  }
+  static std::atomic<int32_t> counter{0};
+  return counter++;
+}
+
+// Thread.alive() reads nativePeer, which ART sets to its native thread while
+// the thread lives (here: its VmThread).
+void set_native_peer(Runtime& rt, Handle thread, VmThread* t) {
+  set_thread_long(rt, thread, "nativePeer", int64_t(reinterpret_cast<intptr_t>(t)));
 }
 
 void register_thread(NativeRegistry& r) {
@@ -766,81 +820,89 @@ void register_thread(NativeRegistry& r) {
   r.define("Ljava/lang/IllegalMonitorStateException;", "Ljava/lang/RuntimeException;");
 
   auto t = r.define("Ljava/lang/Thread;", "Ljava/lang/Object;", {"Ljava/lang/Runnable;"});
-  // Read and written by libcore's Thread.blockedOn (interruptible channels: FileChannel...);
-  // blockerLock is set for every Thread object (init_thread_object).
+  // libcore's instance fields (Android 17), the whole state of a Thread: its
+  // bytecode reads and writes them (constructors, Thread.Builder,
+  // ThreadContainer, virtual threads, ThreadLocal, LockSupport,
+  // ThreadLocalRandom...), and so do the core's methods.
   t.field("blocker", "Lsun/nio/ch/Interruptible;");
   t.field("blockerLock", "Ljava/lang/Object;");
-  // Read and written directly by libcore's ThreadLocal / InheritableThreadLocal.
   t.field("threadLocals", "Ljava/lang/ThreadLocal$ThreadLocalMap;");
   t.field("inheritableThreadLocals", "Ljava/lang/ThreadLocal$ThreadLocalMap;");
-  // Read and written by libcore's get/setContextClassLoader (java.util.logging, JCA providers).
   t.field("contextClassLoader", "Ljava/lang/ClassLoader;");
-  // Read by libcore's Runtime.addShutdownHook; mirrors ThreadPeer::started.
   t.field("started", "Z");
-  // Written by libcore's setPosixNicenessInternal (Process.setThreadPriority).
   t.field("niceness", "I");
-  // Read by libcore's getThreadGroup; set by the constructors taking a group.
   t.field("group", "Ljava/lang/ThreadGroup;");
-  // Monitor of libcore's join and sleep paths; set for every Thread object.
   t.field("lock", "Ljava/lang/Object;");
-  // Written by libcore's setSystemDaemon (java.lang.Daemons).
   t.field("systemDaemon", "Z");
-  // Accessed through Unsafe.objectFieldOffset by LockSupport (parkBlocker) and
-  // ThreadLocalRandom (seeds): without them, java.util.concurrent's locks and
-  // timed waits fail in their static initializers.
   t.field("parkBlocker", "Ljava/lang/Object;");
   t.field("threadLocalRandomSeed", "J");
   t.field("threadLocalRandomProbe", "I");
   t.field("threadLocalRandomSecondarySeed", "I");
-  // libcore's Thread(ThreadGroup, Runnable, String, long, AccessControlContext,
-  // boolean): the group (the creator's when null) counts one more unstarted
-  // thread, and the creator's inheritable thread locals are copied (init2)
-  // unless inheritThreadLocals is false. The stack size, a hint, is ignored.
-  auto init = [](Runtime& rt, NativeArgs& a, Handle group, Handle target, std::u16string name,
-                 bool inherit) -> uint64_t {
-    auto p = std::make_unique<ThreadPeer>();
-    p->target = target;
-    if (name.empty()) {
-      static std::atomic<int> counter{0};
-      name = u16("Thread-" + std::to_string(counter++));
-    }
-    p->name = std::move(name);
-    if (auto* cur = rt.peer<ThreadPeer>(rt.current_thread_peer())) p->daemon = cur->daemon;
-    a.self().peer = std::move(p);
-    Class* thread = rt.find_class("Ljava/lang/Thread;");
-    if (group != kNull) a.self().fields.at(thread->declared_field("group", "Ljava/lang/ThreadGroup;")->slot) = group;
-    init_thread_object(rt, a.h(0));
-    Field* inheritable = thread->declared_field("inheritableThreadLocals", "Ljava/lang/ThreadLocal$ThreadLocalMap;");
+  t.field("name", std::string(kStringType));
+  t.field("priority", "I");
+  t.field("daemon", "Z");
+  t.field("target", "Ljava/lang/Runnable;");
+  t.field("tid", "J");
+  t.field("stackSize", "J");
+  t.field("stillborn", "Z");
+  t.field("nativePeer", "J");
+  t.field("uncaughtExceptionHandler", std::string(kHandlerType));
+  t.field("inheritedAccessControlContext", "Ljava/security/AccessControlContext;");
+  t.field("cont", "Ljdk/internal/vm/Continuation;");
+  t.field("container", "Ljdk/internal/vm/ThreadContainer;");
+  t.field("headStackableScopes", "Ljdk/internal/vm/StackableScope;");
+  // Without libcore, the constructors do what libcore's Thread(ThreadGroup,
+  // Runnable, String, long, AccessControlContext, boolean) does: the group
+  // (the creator's when null) counts one more unstarted thread, the creator's
+  // daemon status, priority and niceness are copied, and so are its
+  // inheritable thread locals (init2) unless inheritThreadLocals is false.
+  auto init = [](Runtime& rt, NativeArgs& a, Handle group, Handle target, Handle name, bool inherit) -> uint64_t {
+    Handle self = a.h(0);
+    thread_peer(rt, self);
+    if (name == kNull) name = rt.new_string_utf8("Thread-" + std::to_string(next_thread_num(rt)));
+    thread_slot(rt, self, "name", kStringType) = name;
+    thread_slot(rt, self, "target", "Ljava/lang/Runnable;") = target;
+    if (group != kNull) thread_slot(rt, self, "group", "Ljava/lang/ThreadGroup;") = group;
     Handle creator = rt.current_thread_peer();
-    Handle parent_map = creator != kNull ? rt.nonnull(creator, "Thread").fields.at(inheritable->slot) : kNull;
+    thread_slot(rt, self, "priority", "I") = kNormPriority;
+    if (creator != kNull) {
+      thread_slot(rt, self, "daemon", "Z") = thread_slot(rt, creator, "daemon", "Z");
+      thread_slot(rt, self, "priority", "I") = thread_slot(rt, creator, "priority", "I");
+      thread_slot(rt, self, "niceness", "I") = thread_slot(rt, creator, "niceness", "I");
+    }
+    init_thread_object(rt, self);
+    uint32_t& inheritable = thread_slot(rt, self, "inheritableThreadLocals", "Ljava/lang/ThreadLocal$ThreadLocalMap;");
+    Handle parent_map = creator != kNull
+                            ? thread_slot(rt, creator, "inheritableThreadLocals", "Ljava/lang/ThreadLocal$ThreadLocalMap;")
+                            : kNull;
     if (inherit && parent_map != kNull) {
       Class* tl = rt.find_class("Ljava/lang/ThreadLocal;");
       if (Method* copy = rt.find_static(tl, "createInheritedMap",
                                         "(Ljava/lang/ThreadLocal$ThreadLocalMap;)Ljava/lang/ThreadLocal$ThreadLocalMap;")) {
         uint32_t arg = parent_map;
         Handle map = Handle(rt.invoke(copy, &arg, 1));
-        a.self().fields.at(inheritable->slot) = map;
+        inheritable = map;
       }
     }
-    call_thread_group(rt, a.h(0), "addUnstarted", "()V");
+    call_thread_group(rt, self, "addUnstarted", "()V");
+    set_thread_long(rt, self, "tid", next_thread_id(rt));
     return 0;
   };
   // An explicit name may not be null (libcore: "name cannot be null").
   auto name_arg = [](Runtime& rt, NativeArgs& a, int index) {
     if (a.h(index) == kNull) rt.throw_npe("name cannot be null");
-    return a.str(index);
+    return a.h(index);
   };
-  t.ctor("()V", [init](Runtime& rt, NativeArgs& a) { return init(rt, a, kNull, kNull, u"", true); });
-  t.ctor("(Ljava/lang/Runnable;)V", [init](Runtime& rt, NativeArgs& a) { return init(rt, a, kNull, a.h(1), u"", true); });
+  t.ctor("()V", [init](Runtime& rt, NativeArgs& a) { return init(rt, a, kNull, kNull, kNull, true); });
+  t.ctor("(Ljava/lang/Runnable;)V", [init](Runtime& rt, NativeArgs& a) { return init(rt, a, kNull, a.h(1), kNull, true); });
   t.ctor("(Ljava/lang/String;)V", [init, name_arg](Runtime& rt, NativeArgs& a) {
     return init(rt, a, kNull, kNull, name_arg(rt, a, 1), true);
   });
   t.ctor("(Ljava/lang/Runnable;Ljava/lang/String;)V", [init, name_arg](Runtime& rt, NativeArgs& a) {
     return init(rt, a, kNull, a.h(1), name_arg(rt, a, 2), true);
   });
-  // The constructors with a ThreadGroup (java.lang.Daemons uses the system group).
   t.ctor("(Ljava/lang/ThreadGroup;Ljava/lang/Runnable;)V",
-         [init](Runtime& rt, NativeArgs& a) { return init(rt, a, a.h(1), a.h(2), u"", true); });
+         [init](Runtime& rt, NativeArgs& a) { return init(rt, a, a.h(1), a.h(2), kNull, true); });
   t.ctor("(Ljava/lang/ThreadGroup;Ljava/lang/String;)V", [init, name_arg](Runtime& rt, NativeArgs& a) {
     return init(rt, a, a.h(1), kNull, name_arg(rt, a, 2), true);
   });
@@ -854,28 +916,48 @@ void register_thread(NativeRegistry& r) {
     return init(rt, a, a.h(1), a.h(2), name_arg(rt, a, 3), a.z(6));
   });
   t.method("run", "()V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    Handle target = thread_peer(rt, a.h(0)).target;
+    Handle target = thread_slot(rt, a.h(0), "target", "Ljava/lang/Runnable;");
     if (target) rt.call_virtual(target, "run", "()V");
     return 0;
   });
+  // libcore's start(): the group adds the thread, then threadStartFailed if it
+  // cannot start (Thread::CreateNativeThread).
   t.method("start", "()V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    ThreadPeer& p = thread_peer(rt, a.h(0));
-    if (p.started) rt.throw_new("Ljava/lang/IllegalThreadStateException;", "thread déjà démarré");
+    Handle self = a.h(0);
+    ThreadPeer& p = thread_peer(rt, self);
+    uint32_t& started = thread_slot(rt, self, "started", "Z");
+    if (started || p.started) rt.throw_new("Ljava/lang/IllegalThreadStateException;");
+    call_thread_group(rt, self, "add", "(Ljava/lang/Thread;)V");
     p.started = true;
-    for (Class* c = a.self().klass; c; c = c->super) {
-      if (Field* f = c->declared_field("started", "Z"); f && !f->is_static()) {
-        a.self().fields.at(f->slot) = 1;
-        break;
-      }
-    }
-    call_thread_group(rt, a.h(0), "add", "(Ljava/lang/Thread;)V");
+    Handle name = thread_slot(rt, self, "name", kStringType);
     try {
-      p.vm = rt.start_thread(a.h(0), text::utf16_to_utf8(p.name), p.daemon);
+      p.vm = rt.start_thread(self, name ? rt.string_utf8(name) : "", thread_slot(rt, self, "daemon", "Z") != 0);
     } catch (const JavaThrow&) {
-      call_thread_group(rt, a.h(0), "threadStartFailed", "(Ljava/lang/Thread;)V");
+      p.started = false;
+      call_thread_group(rt, self, "threadStartFailed", "(Ljava/lang/Thread;)V");
       throw;
     }
+    set_native_peer(rt, self, p.vm);
+    started = 1;
     if (p.pending_interrupt) rt.interrupt(p.vm);
+    return 0;
+  });
+  // With libcore, its start() calls here (Thread_nativeCreate): the native
+  // thread, named after the Thread, runs Thread.run().
+  r.bind("Ljava/lang/Thread;", "nativeCreate", "(Ljava/lang/Thread;JZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    Handle self = a.h(0);
+    if (self == kNull) rt.throw_npe({});
+    ThreadPeer& p = thread_peer(rt, self);
+    if (p.started) rt.throw_new("Ljava/lang/IllegalThreadStateException;", "Thread already started");
+    p.started = true;
+    Handle name = thread_slot(rt, self, "name", kStringType);
+    try {
+      p.vm = rt.start_thread(self, name ? rt.string_utf8(name) : "", a.z(3));
+    } catch (const JavaThrow&) {
+      p.started = false;
+      throw;
+    }
+    set_native_peer(rt, self, p.vm);
     return 0;
   });
   t.static_method("currentThread", "()Ljava/lang/Thread;", [](Runtime& rt, NativeArgs&) -> uint64_t {
@@ -902,6 +984,9 @@ void register_thread(NativeRegistry& r) {
   t.static_method("holdsLock", "(Ljava/lang/Object;)Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     return ret_bool(rt.holds_lock(a.h(0)));
   });
+  // Without libcore, an interrupt before start() is kept for the thread; with
+  // it, libcore's interrupt() (blocker included) calls interrupt0, which, as
+  // in ART, does nothing to a thread that has not started.
   t.method("interrupt", "()V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     ThreadPeer& p = thread_peer(rt, a.h(0));
     if (p.vm) {
@@ -933,40 +1018,45 @@ void register_thread(NativeRegistry& r) {
     return 0;
   });
   t.method("isAlive", "()Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    ThreadPeer& p = thread_peer(rt, a.h(0));
-    return ret_bool(p.started && p.vm && p.vm->alive);
+    return ret_bool(thread_long(rt, a.h(0), "nativePeer") != 0);
   });
-  t.method("getName", "()Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    return rt.new_string(thread_peer(rt, a.h(0)).name);
-  });
+  // The accessors, as libcore's bytecode writes them over the same fields.
+  t.method("getName", "()Ljava/lang/String;",
+           [](Runtime& rt, NativeArgs& a) -> uint64_t { return thread_slot(rt, a.h(0), "name", kStringType); });
   t.method("setName", "(Ljava/lang/String;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    thread_peer(rt, a.h(0)).name = a.str(1);
+    if (a.h(1) == kNull) rt.throw_npe("name cannot be null");
+    thread_slot(rt, a.h(0), "name", kStringType) = a.h(1);
+    if (VmThread* vt = thread_peer(rt, a.h(0)).vm; vt && vt->alive) vt->name = rt.string_utf8(a.h(1));
     return 0;
   });
-  t.method("getId", "()J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    ThreadPeer& p = thread_peer(rt, a.h(0));
-    return ret_long(p.vm ? int64_t(p.vm->id) : int64_t(a.h(0)));
-  });
+  t.method("getId", "()J", [](Runtime& rt, NativeArgs& a) -> uint64_t { return ret_long(thread_long(rt, a.h(0), "tid")); });
   t.method("setDaemon", "(Z)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    ThreadPeer& p = thread_peer(rt, a.h(0));
-    if (p.started) rt.throw_new("Ljava/lang/IllegalThreadStateException;", "thread déjà démarré");
-    p.daemon = a.z(1);
+    if (thread_long(rt, a.h(0), "nativePeer") != 0) rt.throw_new("Ljava/lang/IllegalThreadStateException;");
+    thread_slot(rt, a.h(0), "daemon", "Z") = a.z(1);
     return 0;
   });
-  t.method("isDaemon", "()Z", [](Runtime& rt, NativeArgs& a) -> uint64_t { return ret_bool(thread_peer(rt, a.h(0)).daemon); });
+  t.method("isDaemon", "()Z",
+           [](Runtime& rt, NativeArgs& a) -> uint64_t { return ret_bool(thread_slot(rt, a.h(0), "daemon", "Z") != 0); });
   t.method("setPriority", "(I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    if (a.i32(1) < 1 || a.i32(1) > 10) rt.throw_new("Ljava/lang/IllegalArgumentException;", "priorité hors de [1, 10]");
-    thread_peer(rt, a.h(0)).priority = a.i32(1);
+    int32_t priority = a.i32(1);
+    if (priority < 1 || priority > 10) {
+      rt.throw_new("Ljava/lang/IllegalArgumentException;", "Priority out of range: " + std::to_string(priority));
+    }
+    thread_slot(rt, a.h(0), "priority", "I") = uint32_t(priority);
     return 0;
   }, ApiStatus::kPartial, "mémorisée, sans effet sur l'ordonnancement (verrou global)");
-  t.method("getPriority", "()I", [](Runtime& rt, NativeArgs& a) -> uint64_t { return ret_int(thread_peer(rt, a.h(0)).priority); });
+  t.method("getPriority", "()I",
+           [](Runtime& rt, NativeArgs& a) -> uint64_t { return ret_int(int32_t(thread_slot(rt, a.h(0), "priority", "I"))); });
   t.method("setUncaughtExceptionHandler", "(Ljava/lang/Thread$UncaughtExceptionHandler;)V",
            [](Runtime& rt, NativeArgs& a) -> uint64_t {
-             thread_peer(rt, a.h(0)).handler = a.h(1);
+             thread_slot(rt, a.h(0), "uncaughtExceptionHandler", kHandlerType) = a.h(1);
              return 0;
            });
   t.method("getUncaughtExceptionHandler", "()Ljava/lang/Thread$UncaughtExceptionHandler;",
-           [](Runtime& rt, NativeArgs& a) -> uint64_t { return thread_peer(rt, a.h(0)).handler; });
+           [](Runtime& rt, NativeArgs& a) -> uint64_t {
+             Handle handler = thread_slot(rt, a.h(0), "uncaughtExceptionHandler", kHandlerType);
+             return handler ? handler : thread_slot(rt, a.h(0), "group", "Ljava/lang/ThreadGroup;");
+           });
   t.static_method("setDefaultUncaughtExceptionHandler", "(Ljava/lang/Thread$UncaughtExceptionHandler;)V",
                   [](Runtime& rt, NativeArgs& a) -> uint64_t {
                     if (a.h(0)) {
@@ -982,9 +1072,22 @@ void register_thread(NativeRegistry& r) {
                     return it == rt.object_cache().end() ? kNull : it->second;
                   });
   t.method("toString", "()Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    ThreadPeer& p = thread_peer(rt, a.h(0));
-    return rt.new_string(u"Thread[" + p.name + u"," + u16(std::to_string(p.priority)) + u",main]");
+    Handle self = a.h(0);
+    Handle name = thread_slot(rt, self, "name", kStringType);
+    std::u16string text = u"Thread[" + (name ? rt.string_value(name) : u"null") + u"," +
+                          u16(std::to_string(int32_t(thread_slot(rt, self, "priority", "I")))) + u",";
+    Handle group = thread_slot(rt, self, "group", "Ljava/lang/ThreadGroup;");
+    if (group != kNull && rt.thread_state(self, thread_slot(rt, self, "started", "Z") != 0) != 5) {  // not TERMINATED
+      text += rt.string_value(Handle(rt.call_virtual(group, "getName", "()Ljava/lang/String;")));
+    }
+    return rt.new_string(text + u"]");
   });
+  // With a boot class path, Android's bytecode of these methods runs, over the
+  // same fields (nativeCreate above for start, nativePeer for isAlive).
+  t.bytecode_with_libcore({"<init>", "run", "start", "join", "isAlive", "interrupt", "getName", "setName", "getId",
+                           "setDaemon", "isDaemon", "setPriority", "getPriority", "setUncaughtExceptionHandler",
+                           "getUncaughtExceptionHandler", "setDefaultUncaughtExceptionHandler",
+                           "getDefaultUncaughtExceptionHandler", "toString"});
 }
 
 void register_references(NativeRegistry& r) {
@@ -1061,7 +1164,18 @@ void init_thread_object(Runtime& rt, Handle thread) {
     Object& parent = rt.nonnull(creator, "Thread");
     if (ccl) o.fields.at(ccl->slot) = parent.fields.at(ccl->slot);
     if (group && o.fields.at(group->slot) == kNull) o.fields.at(group->slot) = parent.fields.at(group->slot);
-  } else if (group && o.fields.at(group->slot) == kNull) {
+  } else {
+    if (creator == thread) {
+      // Thread::CreatePeer for an attached thread: its native name,
+      // NORM_PRIORITY, a thread id, and nativePeer (alive).
+      VmThread* self = rt.current_thread();
+      thread_slot(rt, thread, "name", kStringType) = rt.new_string_utf8(self->name);
+      thread_slot(rt, thread, "daemon", "Z") = self->daemon ? 1 : 0;
+      thread_slot(rt, thread, "priority", "I") = kNormPriority;
+      set_thread_long(rt, thread, "tid", next_thread_id(rt));
+      set_native_peer(rt, thread, self);
+    }
+    if (!group || o.fields.at(group->slot) != kNull) return;
     Class* tg = rt.lookup_class("Ljava/lang/ThreadGroup;");
     Field* main = tg ? tg->declared_field("mainThreadGroup", "Ljava/lang/ThreadGroup;") : nullptr;
     if (main && main->is_static()) {
@@ -1075,6 +1189,15 @@ void init_thread_object(Runtime& rt, Handle thread) {
       }
     }
   }
+}
+
+void thread_destroyed(Runtime& rt, Handle thread) {
+  set_thread_long(rt, thread, "nativePeer", 0);
+  Handle lock = thread_slot(rt, thread, "lock", "Ljava/lang/Object;");
+  if (lock == kNull) return;
+  rt.monitor_enter(lock);
+  rt.monitor_notify(lock, true);
+  rt.monitor_exit(lock);
 }
 
 bool call_thread_group(Runtime& rt, Handle thread, std::string_view name, std::string_view sig) {

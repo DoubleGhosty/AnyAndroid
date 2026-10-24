@@ -270,12 +270,7 @@ void register_system(rt::NativeRegistry& r) {
     if (rt::VmThread* t = rt.thread_of_peer(a.h(0)); t && t->alive) rt.interrupt(t);
     return 0;
   });
-  // Thread::CreateNativeThread: the core's Thread.start() creates the thread.
-  r.bind(th, "nativeCreate", "(Ljava/lang/Thread;JZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    if (a.h(0) == kNull) rt.throw_npe({});
-    rt.call_virtual(a.h(0), "start", "()V");
-    return 0;
-  });
+  // nativeCreate is the core's (core_classes.cpp), next to Thread.start().
   r.bind(th, "setNativeName", "(Ljava/lang/String;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     if (rt::VmThread* t = rt.thread_of_peer(a.h(0)); t && a.h(1) != kNull) t->name = rt.string_utf8(a.h(1));
     return 0;

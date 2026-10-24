@@ -528,6 +528,38 @@ public final class LibcoreProbe {
       return seen[0] + ", priorité " + t.getPriority() + ", " + t.getState() + ", groupe nul " + (t.getThreadGroup() == null)
           + ", fil ordinaire " + seen[1];
     });
+    check("Thread.toString et identifiant", () -> {
+      Thread t = new Thread(() -> {}, "nommé");
+      long id = t.getId();
+      String before = t.toString();
+      t.start();
+      t.join();
+      return before + " puis " + t + ", identifiant stable " + (id == t.getId()) + ", main "
+          + Thread.currentThread().getName() + " " + (Thread.currentThread().getId() > 0);
+    });
+    // Java 21 APIs, reached by reflection: libcore's own constructors and ThreadContainer.
+    check("Thread.ofPlatform", () -> {
+      Class<?> ofPlatform = Class.forName("java.lang.Thread$Builder$OfPlatform");
+      Object builder = Thread.class.getMethod("ofPlatform").invoke(null);
+      builder = ofPlatform.getMethod("name", String.class, long.class).invoke(builder, "plate-", 7L);
+      builder = ofPlatform.getMethod("daemon", boolean.class).invoke(builder, true);
+      builder = ofPlatform.getMethod("priority", int.class).invoke(builder, 3);
+      String[] seen = new String[1];
+      Thread t = (Thread) ofPlatform.getMethod("unstarted", Runnable.class)
+          .invoke(builder, (Runnable) () -> seen[0] = Thread.currentThread().getName());
+      String made = t.getName() + " démon " + t.isDaemon() + " priorité " + t.getPriority() + " " + t.getState();
+      t.start();
+      t.join();
+      return made + ", exécuté par " + seen[0] + ", " + t.getState();
+    });
+    check("Executors.newThreadPerTaskExecutor", () -> {
+      java.util.concurrent.ThreadFactory factory = r -> new Thread(r, "par-tâche");
+      java.util.concurrent.ExecutorService executor = (java.util.concurrent.ExecutorService) java.util.concurrent.Executors.class
+          .getMethod("newThreadPerTaskExecutor", java.util.concurrent.ThreadFactory.class).invoke(null, factory);
+      String name = executor.submit(() -> Thread.currentThread().getName()).get();
+      executor.shutdown();
+      return name + ", terminé " + executor.awaitTermination(10, java.util.concurrent.TimeUnit.SECONDS);
+    });
   }
 
   // --- DEX files in memory (InMemoryDexClassLoader) ----------------------------------------

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <string>
@@ -49,6 +50,10 @@ struct NativeMethodSpec {
   NativeFn fn;            // empty = abstract (interface callback contract)
   ApiStatus status = ApiStatus::kSupported;
   std::string note;
+  // With a boot class path, the boot bytecode that declares this method with
+  // code runs instead (it works on the same fields): the native
+  // implementation serves only without libcore.
+  bool bytecode_with_libcore = false;
 };
 
 struct NativeFieldSpec {
@@ -104,6 +109,9 @@ class ClassBuilder {
                              ApiStatus status = ApiStatus::kSupported, std::string note = {});
   // Instance field stored in the object like a bytecode field (zero-initialised).
   ClassBuilder& field(std::string name, std::string type, uint32_t access = 0);
+  // Marks the methods already declared under these names (every signature)
+  // as serving only without libcore (NativeMethodSpec::bytecode_with_libcore).
+  ClassBuilder& bytecode_with_libcore(std::initializer_list<std::string_view> names);
 
   NativeClassSpec& spec() { return *spec_; }
 

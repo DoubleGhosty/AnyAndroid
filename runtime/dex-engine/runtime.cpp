@@ -4,6 +4,7 @@
 #include <iterator>
 #include <cstdio>
 #include <deque>
+#include <set>
 
 #include "common/bytes.h"
 #include "common/clock.h"
@@ -516,7 +517,32 @@ Class* Runtime::define_from_registry(const NativeClassSpec& spec) {
   if (!spec.super.empty()) cls->super = find_class(spec.super);
   for (const auto& i : spec.interfaces) cls->interfaces.push_back(find_class(i));
   cls->instance_slots = cls->super ? cls->super->instance_slots : 0;
+  // With a boot class path, the methods marked bytecode_with_libcore give way
+  // to the boot bytecode that declares them with code (merge_boot_bytecode).
+  std::set<std::string> deferred;
+  if (boot_mode_) {
+    for (auto& cache : dex_caches_) {
+      if (!cache->boot) break;
+      auto idx = cache->dex->find_class_def(spec.descriptor);
+      if (!idx) continue;
+      const dex::DexFile& dex = *cache->dex;
+      try {
+        dex::ClassData cd = dex.class_data(dex.class_def(*idx));
+        for (const auto* list : {&cd.direct_methods, &cd.virtual_methods}) {
+          for (const auto& em : *list) {
+            if (!em.code_off) continue;
+            const dex::MethodId& mid = dex.method(em.method_idx);
+            deferred.insert(dex.string(mid.name_idx) + dex.proto_signature(mid.proto_idx));
+          }
+        }
+      } catch (const FormatError&) {
+        deferred.clear();  // merge_boot_bytecode reports the malformed class
+      }
+      break;
+    }
+  }
   for (const auto& ms : spec.methods) {
+    if (ms.bytecode_with_libcore && deferred.count(ms.name + ms.signature)) continue;
     auto m = std::make_unique<Method>();
     m->owner = cls.get();
     m->name = ms.name;

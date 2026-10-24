@@ -88,19 +88,12 @@ struct ClassPeer final : NativePeer {
 struct VmThread;
 
 // java.lang.Thread state.
+// The native side of a java.lang.Thread; the rest of its state (name,
+// priority, daemon, target, handler...) is in libcore's fields of the object.
 struct ThreadPeer final : NativePeer {
   VmThread* vm = nullptr;  // set once started (or for attached threads)
-  Handle target = kNull;   // Runnable
-  Handle handler = kNull;  // UncaughtExceptionHandler
-  std::u16string name;
-  bool daemon = false;
   bool started = false;
-  bool pending_interrupt = false;
-  int32_t priority = 5;
-  void trace(std::vector<Handle>& out) const override {
-    out.push_back(target);
-    out.push_back(handler);
-  }
+  bool pending_interrupt = false;  // without libcore: interrupt() before start()
 };
 
 struct Method;
@@ -769,5 +762,8 @@ void init_thread_object(Runtime& rt, Handle thread);
 // bookkeeping of the threads it enumerates (addUnstarted, add,
 // threadStartFailed, threadTerminated). False without a group or method.
 bool call_thread_group(Runtime& rt, Handle thread, std::string_view name, std::string_view sig);
+// Thread::Destroy, as a thread ends: nativePeer cleared (Thread.alive()
+// false), then the waiters on Thread.lock (libcore's join) notified.
+void thread_destroyed(Runtime& rt, Handle thread);
 
 }  // namespace aa::rt

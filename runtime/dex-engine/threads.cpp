@@ -193,9 +193,7 @@ Handle Runtime::current_thread_peer() {
     Handle h = alloc(find_class("Ljava/lang/Thread;"));
     auto p = std::make_unique<ThreadPeer>();
     p->vm = t;
-    p->name = text::utf8_to_utf16(t->name);
     p->started = true;
-    p->daemon = t->daemon;
     object(h)->peer = std::move(p);
     t->peer = h;
     init_thread_object(*this, h);
@@ -234,11 +232,21 @@ void Runtime::thread_main(VmThread* t) {
     try {
       call_virtual(t->peer, "run", "()V");
     } catch (const JavaThrow& e) {
+      // The thread's handler, else the default one: libcore's static field
+      // (Thread.setDefaultUncaughtExceptionHandler), the core's without libcore.
+      Class* thread_class = find_class("Ljava/lang/Thread;");
+      constexpr std::string_view kHandler = "Ljava/lang/Thread$UncaughtExceptionHandler;";
       Handle handler = kNull;
-      if (auto* p = peer<ThreadPeer>(t->peer)) handler = p->handler;
+      if (Field* f = thread_class->declared_field("uncaughtExceptionHandler", kHandler)) {
+        handler = nonnull(t->peer, "Thread").fields.at(f->slot);
+      }
       if (!handler) {
-        auto it = object_cache_.find("thread:default_handler");
-        if (it != object_cache_.end()) handler = it->second;
+        Field* d = thread_class->declared_field("defaultUncaughtExceptionHandler", kHandler);
+        if (d && d->is_static()) {
+          handler = thread_class->statics.at(d->slot);
+        } else if (auto it = object_cache_.find("thread:default_handler"); it != object_cache_.end()) {
+          handler = it->second;
+        }
       }
       if (handler) {
         call_virtual(handler, "uncaughtException", "(Ljava/lang/Thread;Ljava/lang/Throwable;)V", {t->peer, e.exception});
@@ -256,10 +264,16 @@ void Runtime::thread_main(VmThread* t) {
   } catch (const std::exception& e) {
     log::error("threads", "erreur interne dans le thread " + t->name + " : " + e.what());
   }
-  // Thread::Destroy -> RemoveFromThreadGroup, while the thread is still alive.
+  // Thread::Destroy: RemoveFromThreadGroup while the thread is still alive,
+  // then nativePeer cleared and the joiners waiting on Thread.lock notified.
   if (!shutting_down_) {
     try {
       call_thread_group(*this, t->peer, "threadTerminated", "(Ljava/lang/Thread;)V");
+    } catch (const JavaThrow&) {
+    } catch (const ThreadKill&) {
+    }
+    try {
+      thread_destroyed(*this, t->peer);
     } catch (const JavaThrow&) {
     } catch (const ThreadKill&) {
     }
