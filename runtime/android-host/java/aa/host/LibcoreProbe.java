@@ -1081,6 +1081,55 @@ public final class LibcoreProbe {
       Os.close(four);
       return got + ", pair " + peer + ", lecture après fermeture " + end + ", datagrammes " + datagrams;
     });
+    // SCM_RIGHTS (1, not in OsConstants): the receiver's descriptor shares the
+    // sender's open file description, offset included.
+    check("SCM_RIGHTS", () -> {
+      File file = scratch("passe.txt");
+      java.nio.file.Files.write(file.toPath(), "0123456789".getBytes(StandardCharsets.US_ASCII));
+      Field descriptor = FileDescriptor.class.getDeclaredField("descriptor");
+      descriptor.setAccessible(true);
+      StringBuilder out = new StringBuilder();
+      for (int type : new int[] {OsConstants.SOCK_SEQPACKET, OsConstants.SOCK_STREAM, OsConstants.SOCK_DGRAM}) {
+        FileDescriptor opened = Os.open(file.getPath(), OsConstants.O_RDONLY, 0);
+        Os.lseek(opened, 2, OsConstants.SEEK_SET);
+        FileDescriptor one = new FileDescriptor();
+        FileDescriptor two = new FileDescriptor();
+        Os.socketpair(OsConstants.AF_UNIX, type, 0, one, two);
+        byte[] fd = ByteBuffer.allocate(4).order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(descriptor.getInt(opened)).array();
+        android.system.StructCmsghdr rights = new android.system.StructCmsghdr(OsConstants.SOL_SOCKET, 1, fd);
+        Os.sendmsg(one, new android.system.StructMsghdr(null,
+            new ByteBuffer[] {ByteBuffer.wrap("fd".getBytes(StandardCharsets.US_ASCII))},
+            new android.system.StructCmsghdr[] {rights}, 0), 0);
+        send(one, "suite");
+        ByteBuffer in = ByteBuffer.allocate(16);
+        android.system.StructMsghdr msg = new android.system.StructMsghdr(null, new ByteBuffer[] {in}, null, 0);
+        int n = Os.recvmsg(two, msg, 0);
+        android.system.StructCmsghdr got = msg.msg_control[0];
+        FileDescriptor received = new FileDescriptor();
+        descriptor.setInt(received, ByteBuffer.wrap(got.cmsg_data).order(java.nio.ByteOrder.LITTLE_ENDIAN).getInt());
+        String viaReceived = receive(received, 3);
+        String viaOriginal = receive(opened, 3);
+        String next = receive(two, 16);
+        out.append(type == OsConstants.SOCK_SEQPACKET ? "seqpacket" : type == OsConstants.SOCK_STREAM ? "flux" : "datagramme")
+            .append(" ").append(n).append(" octets, niveau ").append(got.cmsg_level).append(" type ").append(got.cmsg_type)
+            .append(", lu ").append(viaReceived).append(" puis ").append(viaOriginal).append(", suivi de ").append(next)
+            .append(" ; ");
+        Os.close(received);
+        Os.close(opened);
+        Os.close(one);
+        Os.close(two);
+      }
+      FileDescriptor a = new FileDescriptor();
+      FileDescriptor b = new FileDescriptor();
+      Os.socketpair(OsConstants.AF_UNIX, OsConstants.SOCK_STREAM, 0, a, b);
+      String bad = errno(() -> String.valueOf(Os.sendmsg(a, new android.system.StructMsghdr(null,
+          new ByteBuffer[] {ByteBuffer.wrap(new byte[] {1})}, new android.system.StructCmsghdr[] {
+              new android.system.StructCmsghdr(OsConstants.SOL_SOCKET, 1, new byte[] {(byte) 0x0f, 0x27, 0, 0})}, 0), 0)));
+      Os.close(a);
+      Os.close(b);
+      file.delete();
+      return out + "descripteur fermé : " + bad;
+    });
     // sun.nio.ch.UnixDomainSockets: no public API of Android 17 reaches it
     // (no SocketChannel.open(UNIX)); its natives are checked by reflection.
     check("UnixDomainSockets par réflexion", () -> {

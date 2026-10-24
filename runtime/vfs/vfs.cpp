@@ -1314,6 +1314,19 @@ void Vfs::set_status_flags(int32_t fd, int32_t flags) {
 }
 std::string Vfs::fd_path(int32_t fd) { return fd_entry(fd).path; }
 
+std::shared_ptr<void> Vfs::description(int32_t fd) {
+  auto it = fds_.find(fd);
+  if (it == fds_.end()) throw VfsError{kEBADF, "fd " + std::to_string(fd)};
+  return it->second;
+}
+
+int32_t Vfs::install_description(std::shared_ptr<void> description) {
+  if (fds_.size() >= kMaxOpenFiles) throw VfsError{kEMFILE, "SCM_RIGHTS"};
+  int32_t fd = lowest_free_fd();
+  fds_[fd] = std::static_pointer_cast<Fd>(description);
+  return fd;
+}
+
 std::shared_ptr<OpenFile> Vfs::open_file(int32_t fd) { return fd_entry(fd).file; }
 
 std::vector<uint8_t> Vfs::read_file(std::string_view path, uint64_t max_size) {

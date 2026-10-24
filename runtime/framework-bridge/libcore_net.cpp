@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -268,6 +269,18 @@ class NetSocket final : public vfs::OpenFile {
   std::string unix_name, unix_peer;
   bool unix_connected = false, unix_listening = false;
   int32_t passcred = 0;
+  // SCM_RIGHTS between connected AF_UNIX sockets: the peer's socket (set by
+  // accept and socketpair), the bytes of the connection sent and taken, and
+  // the open file descriptions passed at a byte offset of the incoming
+  // stream (a record's start for SOCK_SEQPACKET); `outbox` keeps those sent
+  // before the peer accepted the connection.
+  struct Passed {
+    uint64_t at, len;  // the bytes they came with
+    std::vector<std::shared_ptr<void>> files;
+  };
+  std::weak_ptr<NetSocket> unix_peer_socket;
+  uint64_t tx_bytes = 0, rx_bytes = 0;
+  std::deque<Passed> inbox, outbox;
 
  private:
   static uint64_t next_ino() {
@@ -1587,8 +1600,9 @@ SOCKET unix_accept(NetSocket& listener, std::shared_ptr<NetSocket>& client) {
 }
 
 // The socket of a connection unix_accept took: named as the listener, its
-// peer's name the client's.
-std::shared_ptr<NetSocket> unix_accepted(SOCKET c, const NetSocket& listener, const NetSocket& client) {
+// peer's name the client's, linked to it for SCM_RIGHTS (descriptions the
+// client sent before the accept are waiting in its outbox).
+std::shared_ptr<NetSocket> unix_accepted(SOCKET c, const NetSocket& listener, const std::shared_ptr<NetSocket>& client) {
   u_long on = 1;
   ioctlsocket(c, FIONBIO, &on);
   int size = kUnixBuffer;
@@ -1596,8 +1610,12 @@ std::shared_ptr<NetSocket> unix_accepted(SOCKET c, const NetSocket& listener, co
   setsockopt(c, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&size), sizeof size);
   auto sock = std::make_shared<NetSocket>(c, lx::kAfUnix, listener.type, 0, AF_INET);
   sock->unix_name = listener.unix_name;
-  sock->unix_peer = client.unix_name;
+  sock->unix_peer = client->unix_name;
   sock->unix_connected = true;
+  sock->unix_peer_socket = client;
+  client->unix_peer_socket = sock;
+  sock->inbox = std::move(client->outbox);
+  client->outbox.clear();
   return sock;
 }
 
@@ -1650,13 +1668,15 @@ int64_t seq_send(Runtime* rt, NetSocket& s, const WSABUF* bufs, DWORD count) {
     WSASetLastError(failure ? failure : WSAESHUTDOWN);
     return -1;
   }
+  s.tx_bytes += record.size();
   return int64_t(total);
 }
 
 // One SOCK_SEQPACKET record in, whole, or WSAEWOULDBLOCK while it is not all
 // there: the bytes that fit in `bufs`, the rest dropped (`truncated`), as
 // Linux does. 0 at the end of the connection.
-int64_t seq_recv(NetSocket& s, WSABUF* bufs, DWORD count, bool peek, bool& truncated) {
+int64_t seq_recv(NetSocket& s, WSABUF* bufs, DWORD count, bool peek, bool& truncated,
+                 std::vector<std::shared_ptr<void>>* passed) {
   u_long avail = 0;
   if (ioctlsocket(s.handle(), FIONREAD, &avail) == SOCKET_ERROR) return -1;
   uint32_t length = 0;
@@ -1680,31 +1700,106 @@ int64_t seq_recv(NetSocket& s, WSABUF* bufs, DWORD count, bool peek, bool& trunc
     copied += n;
   }
   truncated = copied < length;
+  if (!s.inbox.empty() && s.inbox.front().at == s.rx_bytes) {
+    if (passed) *passed = s.inbox.front().files;
+    if (!peek) s.inbox.pop_front();
+  }
+  if (!peek) s.rx_bytes += record.size();
   return int64_t(copied);
+}
+
+// SCM_RIGHTS of AF_UNIX datagrams: each datagram carries a ticket, 8 bytes
+// ahead of its own, naming the descriptions sent with it (0: none). Tickets
+// of datagrams never received are dropped beyond kMaxTickets, oldest first.
+constexpr size_t kTicketSize = 8, kMaxTickets = 4096;
+struct Tickets {
+  std::mutex lock;
+  uint64_t next = 1;
+  std::map<uint64_t, std::vector<std::shared_ptr<void>>> files;
+};
+
+Tickets& tickets() {
+  static Tickets t;
+  return t;
+}
+
+uint64_t new_ticket(const std::vector<std::shared_ptr<void>>& files) {
+  Tickets& t = tickets();
+  std::lock_guard<std::mutex> guard(t.lock);
+  if (t.files.size() >= kMaxTickets) t.files.erase(t.files.begin());
+  uint64_t ticket = t.next++;
+  t.files[ticket] = files;
+  return ticket;
+}
+
+std::vector<std::shared_ptr<void>> redeem_ticket(uint64_t ticket, bool keep) {
+  Tickets& t = tickets();
+  std::lock_guard<std::mutex> guard(t.lock);
+  auto it = t.files.find(ticket);
+  if (it == t.files.end()) return {};
+  std::vector<std::shared_ptr<void>> files = it->second;
+  if (!keep) t.files.erase(it);
+  return files;
 }
 
 // One receive into `bufs` with the Winsock flags `flags`, AF_UNIX's semantics
 // included: a SOCK_SEQPACKET record whole; a datagram from another program of
-// the host dropped. `from` (with its length) gets the sender of an Internet
-// socket, `unix_from` the name of an AF_UNIX socket's sender. -1 with the
-// Winsock error set on failure; a datagram cut short sets `truncated`.
+// the host dropped; a stream read stopping where descriptions were passed, as
+// Linux's does. `from` (with its length) gets the sender of an Internet
+// socket, `unix_from` the name of an AF_UNIX socket's sender, `passed` the
+// descriptions that came with the bytes (dropped, as Linux closes them, when
+// null). -1 with the Winsock error set on failure; a datagram cut short sets
+// `truncated`.
 int64_t recv_into(NetSocket& s, WSABUF* bufs, DWORD count, int flags, sockaddr_storage* from, int* from_len,
-                  bool& truncated, std::string* unix_from = nullptr) {
+                  bool& truncated, std::string* unix_from = nullptr,
+                  std::vector<std::shared_ptr<void>>* passed = nullptr) {
   truncated = false;
-  if (s.family == lx::kAfUnix && s.type != lx::kSockDgram) {
+  bool peek = (flags & MSG_PEEK) != 0;
+  bool unix_socket = s.family == lx::kAfUnix && s.pipe == NetSocket::Pipe::kNone;
+  if (unix_socket && s.type != lx::kSockDgram) {
     if (unix_from) *unix_from = s.unix_peer;
-    if (s.type == lx::kSockSeqpacket) return seq_recv(s, bufs, count, (flags & MSG_PEEK) != 0, truncated);
+    if (s.type == lx::kSockSeqpacket) return seq_recv(s, bufs, count, peek, truncated, passed);
+    // SOCK_STREAM: a read stops before bytes that came with descriptions and
+    // after them (unix_stream_read_generic: "if (scm.fp) break").
+    uint64_t limit = UINT64_MAX;
+    bool at_hand = !s.inbox.empty() && s.inbox.front().at <= s.rx_bytes;
+    if (at_hand) {
+      const NetSocket::Passed& p = s.inbox.front();
+      limit = p.at + p.len > s.rx_bytes ? p.at + p.len - s.rx_bytes : 1;
+    } else if (!s.inbox.empty()) {
+      limit = s.inbox.front().at - s.rx_bytes;
+    }
+    std::vector<WSABUF> capped;
+    for (DWORD k = 0; k < count && limit > 0; ++k) {
+      WSABUF w = bufs[k];
+      w.len = ULONG(std::min<uint64_t>(w.len, limit));
+      limit -= w.len;
+      capped.push_back(w);
+    }
+    if (capped.empty()) capped.push_back(WSABUF{0, nullptr});
+    DWORD got = 0, f = DWORD(flags);
+    if (WSARecv(s.handle(), capped.data(), DWORD(capped.size()), &got, &f, nullptr, nullptr) == SOCKET_ERROR) return -1;
+    if (got > 0 && at_hand) {
+      if (passed) *passed = s.inbox.front().files;
+      if (!peek) s.inbox.pop_front();
+    }
+    if (!peek) s.rx_bytes += got;
+    return int64_t(got);
   }
-  bool unix_dgram = s.family == lx::kAfUnix && s.type == lx::kSockDgram;
+  bool unix_dgram = unix_socket && s.type == lx::kSockDgram;
   sockaddr_storage source{};
   int source_len = sizeof source;
   sockaddr* name = unix_dgram ? reinterpret_cast<sockaddr*>(&source) : reinterpret_cast<sockaddr*>(from);
   int* name_len = unix_dgram ? &source_len : from_len;
+  uint64_t ticket = 0;
+  std::vector<WSABUF> all;
+  if (unix_dgram) all.push_back(WSABUF{ULONG(kTicketSize), reinterpret_cast<char*>(&ticket)});
+  all.insert(all.end(), bufs, bufs + count);
   size_t total = 0;
-  for (DWORD k = 0; k < count; ++k) total += bufs[k].len;
+  for (const WSABUF& w : all) total += w.len;
   DWORD got = 0, f = DWORD(flags);
   int64_t n;
-  if (WSARecvFrom(s.handle(), bufs, count, &got, &f, name, name_len, nullptr, nullptr) == SOCKET_ERROR) {
+  if (WSARecvFrom(s.handle(), all.data(), DWORD(all.size()), &got, &f, name, name_len, nullptr, nullptr) == SOCKET_ERROR) {
     if (WSAGetLastError() != WSAEMSGSIZE) return -1;
     truncated = true;
     n = int64_t(total);
@@ -1713,8 +1808,8 @@ int64_t recv_into(NetSocket& s, WSABUF* bufs, DWORD count, int flags, sockaddr_s
   }
   if (unix_dgram) {
     std::shared_ptr<NetSocket> sender = unix_by_address(lx::kSockDgram, source);
-    if (!sender) {
-      if (flags & MSG_PEEK) {
+    if (!sender || n < int64_t(kTicketSize)) {
+      if (peek) {
         char c;
         recv(s.handle(), &c, 1, 0);  // takes the peeked datagram away
       }
@@ -1722,18 +1817,67 @@ int64_t recv_into(NetSocket& s, WSABUF* bufs, DWORD count, int flags, sockaddr_s
       return -1;
     }
     if (unix_from) *unix_from = sender->unix_name;
+    if (ticket) {
+      std::vector<std::shared_ptr<void>> files = redeem_ticket(ticket, peek);
+      if (passed) *passed = std::move(files);
+    }
+    n -= int64_t(kTicketSize);
   }
   return n;
 }
 
-// One send of `bufs` (to `to` if not null) with the Winsock flags `flags`; a
-// SOCK_SEQPACKET record whole. -1 with the Winsock error set on failure.
-int64_t send_from(Runtime* rt, NetSocket& s, const WSABUF* bufs, DWORD count, int flags, const Endpoint* to = nullptr) {
-  if (s.family == lx::kAfUnix && s.type == lx::kSockSeqpacket) return seq_send(rt, s, bufs, count);
+// One send of `bufs` (to `to` if not null) with the Winsock flags `flags`, a
+// SOCK_SEQPACKET record whole, with the descriptions `files` passed along
+// (SCM_RIGHTS, AF_UNIX only). -1 with the Winsock error set on failure.
+int64_t send_from(Runtime* rt, NetSocket& s, const WSABUF* bufs, DWORD count, int flags, const Endpoint* to = nullptr,
+                  const std::vector<std::shared_ptr<void>>* files = nullptr) {
+  bool unix_socket = s.family == lx::kAfUnix && s.pipe == NetSocket::Pipe::kNone;
+  if (unix_socket && s.type != lx::kSockDgram) {
+    // Descriptions wait at the offset of the bytes they come with: queued
+    // first, so that a reader never takes these bytes without them.
+    std::deque<NetSocket::Passed>* queue = nullptr;
+    std::shared_ptr<NetSocket> peer = s.unix_peer_socket.lock();
+    size_t total = 0;
+    for (DWORD k = 0; k < count; ++k) total += bufs[k].len;
+    if (files && !files->empty() && (total > 0 || s.type == lx::kSockSeqpacket)) {  // no stream bytes: nothing passed
+      queue = peer ? &peer->inbox : &s.outbox;
+      queue->push_back(NetSocket::Passed{s.tx_bytes, 0, *files});
+    }
+    int64_t n;
+    if (s.type == lx::kSockSeqpacket) {
+      n = seq_send(rt, s, bufs, count);
+    } else {
+      DWORD sent = 0;
+      n = WSASend(s.handle(), const_cast<WSABUF*>(bufs), count, &sent, DWORD(flags), nullptr, nullptr) == SOCKET_ERROR
+              ? -1 : int64_t(sent);
+      if (n > 0) s.tx_bytes += uint64_t(n);
+    }
+    if (n < 0 && queue) {
+      int err = WSAGetLastError();
+      queue->pop_back();
+      WSASetLastError(err);
+    } else if (queue) {
+      queue->back().len = s.type == lx::kSockSeqpacket ? 0 : uint64_t(n);
+    }
+    return n;
+  }
+  uint64_t ticket = 0;
+  std::vector<WSABUF> all;
+  if (unix_socket) {
+    if (files && !files->empty()) ticket = new_ticket(*files);
+    all.push_back(WSABUF{ULONG(kTicketSize), reinterpret_cast<char*>(&ticket)});
+  }
+  all.insert(all.end(), bufs, bufs + count);
   DWORD sent = 0;
-  int rc = WSASendTo(s.handle(), const_cast<WSABUF*>(bufs), count, &sent, DWORD(flags),
+  int rc = WSASendTo(s.handle(), all.data(), DWORD(all.size()), &sent, DWORD(flags),
                      to ? reinterpret_cast<const sockaddr*>(&to->ss) : nullptr, to ? to->len : 0, nullptr, nullptr);
-  return rc == SOCKET_ERROR ? -1 : int64_t(sent);
+  if (rc == SOCKET_ERROR) {
+    int err = WSAGetLastError();
+    if (ticket) redeem_ticket(ticket, false);
+    WSASetLastError(err);
+    return -1;
+  }
+  return unix_socket ? std::max<int64_t>(int64_t(sent) - int64_t(kTicketSize), 0) : int64_t(sent);
 }
 
 WSABUF wsabuf(std::span<const uint8_t> data) {
@@ -1758,6 +1902,94 @@ size_t NetSocket::write(uint64_t, std::span<const uint8_t> data) {
   return size_t(n);
 }
 
+// --- Control messages (SCM_RIGHTS, SCM_CREDENTIALS) of AF_UNIX sockets ---
+
+constexpr int32_t kScmRights = 1, kScmCredentials = 2, kScmMaxFd = 253, kMsgCtrunc = 0x8;
+constexpr std::string_view kStructCmsghdr = "Landroid/system/StructCmsghdr;";
+
+// The control messages of a sendmsg on an AF_UNIX socket (__scm_send):
+// SCM_RIGHTS's descriptions (EBADF for a descriptor not open, EINVAL beyond
+// 253), SCM_CREDENTIALS, which must be the process's own (EPERM). Any other
+// message: EINVAL.
+std::vector<std::shared_ptr<void>> unix_control(Runtime& rt, Handle control) {
+  std::vector<std::shared_ptr<void>> files;
+  if (control == kNull) return files;
+  uint32_t count = rt.array(control, "StructCmsghdr[]").length;
+  for (uint32_t i = 0; i < count; ++i) {
+    Handle cmsg;
+    std::memcpy(&cmsg, &rt.array(control, "StructCmsghdr[]").data[size_t(i) * 4], 4);
+    if (cmsg == kNull) rt.throw_npe({});
+    int32_t level = int32_t(field_of(rt, cmsg, kStructCmsghdr, "cmsg_level", "I"));
+    int32_t type = int32_t(field_of(rt, cmsg, kStructCmsghdr, "cmsg_type", "I"));
+    Handle data = field_of(rt, cmsg, kStructCmsghdr, "cmsg_data", "[B");
+    if (data == kNull) rt.throw_npe({});
+    rt::ArrayObject& bytes = rt.array(data, "byte[]");
+    if (level != lx::kSolSocket) throw_errno(rt, "sendmsg", lx::kEINVAL);
+    if (type == kScmRights) {
+      if (bytes.length == 0 || bytes.length % 4 != 0 || files.size() + bytes.length / 4 > size_t(kScmMaxFd)) {
+        throw_errno(rt, "sendmsg", lx::kEINVAL);
+      }
+      for (uint32_t k = 0; k < bytes.length; k += 4) {
+        int32_t fd = 0;
+        std::memcpy(&fd, bytes.data.data() + k, 4);
+        try {
+          files.push_back(libcore_vfs().description(fd));
+        } catch (const vfs::VfsError&) {
+          throw_errno(rt, "sendmsg", lx::kEBADF);
+        }
+      }
+    } else if (type == kScmCredentials) {
+      if (bytes.length != 12) throw_errno(rt, "sendmsg", lx::kEINVAL);
+      uint32_t cred[3];
+      std::memcpy(cred, bytes.data.data(), sizeof cred);
+      if (cred[0] != uint32_t(GetCurrentProcessId()) || cred[1] != uint32_t(kAppUid) || cred[2] != uint32_t(kAppUid)) {
+        throw_errno(rt, "sendmsg", lx::kEPERM);
+      }
+    } else {
+      throw_errno(rt, "sendmsg", lx::kEINVAL);
+    }
+  }
+  return files;
+}
+
+Handle new_cmsg(Runtime& rt, int32_t type, const void* data, size_t size) {
+  rt::GlobalRef bytes(rt, rt.new_array("[B", int32_t(size)));
+  if (size) std::memcpy(rt.array(bytes.get(), "byte[]").data.data(), data, size);
+  return construct(rt, kStructCmsghdr, "(II[B)V", {uint32_t(lx::kSolSocket), uint32_t(type), bytes.get()});
+}
+
+// The control messages a recvmsg on an AF_UNIX socket returns
+// (msgcontrolToStructCmsghdrArray): the passed descriptions installed as
+// new descriptors (MSG_CTRUNC, the rest closed, when the table is full), and
+// the sender's credentials with SO_PASSCRED. msg_control is left alone when
+// there are none.
+int32_t unix_control_out(Runtime& rt, NetSocket& s, Handle msg, const std::vector<std::shared_ptr<void>>& passed) {
+  int32_t flags = 0;
+  std::vector<int32_t> fds;
+  for (const auto& d : passed) {
+    try {
+      fds.push_back(libcore_vfs().install_description(d));
+    } catch (const vfs::VfsError&) {
+      flags |= kMsgCtrunc;
+      break;
+    }
+  }
+  std::vector<rt::GlobalRef> cmsgs;
+  if (!fds.empty()) cmsgs.emplace_back(rt, new_cmsg(rt, kScmRights, fds.data(), fds.size() * 4));
+  if (s.passcred) {
+    uint32_t cred[3] = {uint32_t(GetCurrentProcessId()), uint32_t(kAppUid), uint32_t(kAppUid)};
+    cmsgs.emplace_back(rt, new_cmsg(rt, kScmCredentials, cred, sizeof cred));
+  }
+  if (cmsgs.empty()) return flags;
+  Handle array = rt.new_array("[Landroid/system/StructCmsghdr;", int32_t(cmsgs.size()));
+  for (size_t i = 0; i < cmsgs.size(); ++i) {
+    Handle h = cmsgs[i].get();
+    std::memcpy(&rt.array(array, "StructCmsghdr[]").data[i * 4], &h, 4);
+  }
+  field_of(rt, msg, kStructMsghdr, "msg_control", "[Landroid/system/StructCmsghdr;") = array;
+  return flags;
+}
+
 // recvmsg(2) into a StructMsghdr: msg_name filled with the sender,
 // msg_flags with MSG_TRUNC for a datagram cut short; no ancillary data.
 // `throwing`: recvmsg (ErrnoException, SocketException when a close is
@@ -1778,10 +2010,11 @@ int32_t recv_message(Runtime& rt, Handle java_fd, Handle msg, int32_t flags, boo
   int len = sizeof ss;
   bool truncated = false;
   std::string unix_from;
+  std::vector<std::shared_ptr<void>> passed;
   auto call = [&]() -> int64_t {
     len = sizeof ss;
     return recv_into(*s, bufs.data(), DWORD(bufs.size()), win_msg_flags(flags), name != kNull ? &ss : nullptr,
-                     name != kNull ? &len : nullptr, truncated, &unix_from);
+                     name != kNull ? &len : nullptr, truncated, &unix_from, &passed);
   };
   bool dontwait = (flags & lx::kMsgDontwait) != 0;
   int64_t n;
@@ -1809,7 +2042,9 @@ int32_t recv_message(Runtime& rt, Handle java_fd, Handle msg, int32_t flags, boo
     }
   }
   constexpr int32_t kMsgTrunc = 0x20;
-  field_of(rt, msg, kStructMsghdr, "msg_flags", "I") = uint32_t(truncated ? kMsgTrunc : 0);
+  int32_t msg_flags = truncated ? kMsgTrunc : 0;
+  if (s->family == lx::kAfUnix) msg_flags |= unix_control_out(rt, *s, msg, passed);
+  field_of(rt, msg, kStructMsghdr, "msg_flags", "I") = uint32_t(msg_flags);
   return int32_t(n);
 }
 
@@ -2485,7 +2720,7 @@ void register_nio_net(rt::NativeRegistry& r) {
            if (n == kIosThrown) throw_io_errno(rt, err);
            if (n < 0) return rt::ret_int(int32_t(n));
            int32_t newfd = -1;
-           if (int32_t e = install_fd(unix_accepted(c, *s, *peer), newfd)) throw_io_errno(rt, e);
+           if (int32_t e = install_fd(unix_accepted(c, *s, peer), newfd)) throw_io_errno(rt, e);
            set_descriptor(rt, a.h(1), newfd);
            Handle array = a.h(2);
            if (array == kNull) rt.throw_npe({});
@@ -3101,7 +3336,7 @@ void register_libcore_net(rt::NativeRegistry& r) {
                c = unix_accept(*s, peer);
                return c == INVALID_SOCKET ? -1 : 0;
              });
-             auto sock = unix_accepted(c, *s, *peer);
+             auto sock = unix_accepted(c, *s, peer);
              if (Handle address = a.h(2); address != kNull) {
                if (!is_unix_socket_address(rt, address)) {
                  rt.throw_new("Ljava/lang/IllegalArgumentException;", "sockaddrToInetAddress unsupported ss_family: 1");
@@ -3440,6 +3675,8 @@ void register_libcore_net(rt::NativeRegistry& r) {
     auto first = std::make_shared<NetSocket>(one, lx::kAfUnix, type, 0, AF_INET);
     auto second = std::make_shared<NetSocket>(two, lx::kAfUnix, type, 0, AF_INET);
     bool nonblocking = (a.i32(2) & lx::kSockNonblock) != 0;
+    first->unix_peer_socket = second;
+    second->unix_peer_socket = first;
     for (const auto& sock : {first, second}) {
       unix_attach(sock);  // known ports: their datagrams are the process's own
       sock->nonblocking = nonblocking;
@@ -3667,8 +3904,11 @@ void register_libcore_net(rt::NativeRegistry& r) {
     auto bufs = message_buffers(rt, msg, false);
     auto s = socket_arg(rt, a.h(1), "sendmsg");
     Handle control = field_of(rt, msg, "Landroid/system/StructMsghdr;", "msg_control", "[Landroid/system/StructCmsghdr;");
-    if (control != kNull && rt.array(control, "StructCmsghdr[]").length > 0) {
-      throw_errno(rt, "sendmsg", lx::kEOPNOTSUPP);  // no ancillary data (SCM_RIGHTS, IP_PKTINFO...) here
+    std::vector<std::shared_ptr<void>> files;
+    if (s->family == lx::kAfUnix) {
+      files = unix_control(rt, control);
+    } else if (control != kNull && rt.array(control, "StructCmsghdr[]").length > 0) {
+      throw_errno(rt, "sendmsg", lx::kEOPNOTSUPP);  // no IP_PKTINFO, IP_TTL... on Internet sockets here
     }
     Handle name = field_of(rt, msg, "Landroid/system/StructMsghdr;", "msg_name", "Ljava/net/SocketAddress;");
     Endpoint to;
@@ -3680,10 +3920,10 @@ void register_libcore_net(rt::NativeRegistry& r) {
     int64_t n = retry(rt, *s, fd, "sendmsg", POLLWRNORM, s->sndtimeo_us, (flags & lx::kMsgDontwait) != 0, false, true,
                       [&]() -> int64_t {
                         return send_from(&rt, *s, bufs.data(), DWORD(bufs.size()), win_msg_flags(flags),
-                                         name != kNull ? &to : nullptr);
+                                         name != kNull ? &to : nullptr, &files);
                       });
     return rt::ret_int(int32_t(n));
-  }, S::kPartial, "sans message de contrôle");
+  }, S::kPartial, "messages de contrôle d'AF_UNIX seulement (SCM_RIGHTS, SCM_CREDENTIALS)");
 
   register_nio_net(r);
   register_epoll(r);

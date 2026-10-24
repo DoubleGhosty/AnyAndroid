@@ -80,4 +80,5 @@ AF_UNIX abstrait, SOCK_STREAM : bonjour, «\0aa-sonde» / pair «\0aa-sonde» / 
 AF_UNIX chemin, SOCK_SEQPACKET : nœud 014, enregistrements un|deux|abc|fin, rebind : bind failed: EADDRINUSE (Address already in use), type : connect failed: EPROTOTYPE (Protocol wrong type for socket), après fermeture : connect failed: ECONNREFUSED (Connection refused), nœud supprimé true
 AF_UNIX SOCK_DGRAM : datagrammes de 4 et 2 octets, émetteur «», sans pair : write failed: ENOTCONN (Transport endpoint is not connected)
 socketpair SOCK_SEQPACKET et SOCK_DGRAM : alpha|beta, pair «», lecture après fermeture 0, datagrammes gamma|delta
+SCM_RIGHTS : seqpacket 2 octets, niveau 1 type 1, lu 234 puis 567, suivi de suite ; flux 2 octets, niveau 1 type 1, lu 234 puis 567, suivi de suite ; datagramme 2 octets, niveau 1 type 1, lu 234 puis 567, suivi de suite ; descripteur fermé : sendmsg failed: EBADF (Bad file descriptor)
 UnixDomainSockets par réflexion : nio, connect 1, accept 1 de «  », adresse locale sonde-nio.sock

@@ -7,6 +7,7 @@ import java.nio.ByteBuffer;
 // no constant initializer, so that javac never inlines a value.
 public final class StructMsghdr {
   public SocketAddress msg_name;
+  public StructCmsghdr[] msg_control;
   public int msg_flags;
 
   public StructMsghdr(SocketAddress msg_name, ByteBuffer[] msg_iov, StructCmsghdr[] msg_control, int msg_flags) {
