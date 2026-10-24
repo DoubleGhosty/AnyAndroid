@@ -6,4 +6,5 @@ réveil du sélecteur : délai 0 après 100 ms : true, réveillé 0, selectNow 0
 fermeture pendant read : AsynchronousCloseException, fil terminé true, canal ouvert false
 interruption pendant read : ClosedByInterruptException, fil terminé true, canal ouvert false
 datagrammes : datagramme de /127.0.0.1, port true, rien null, connecté true, tronqué conn
+canaux asynchrones : 5 écrits, lu 5 octets : async, délai InterruptedByTimeoutException, terminé true
 adaptateur de socket : SocketTimeoutException, puis Z, TCP_NODELAY false

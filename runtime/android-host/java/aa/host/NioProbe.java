@@ -10,6 +10,9 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketTimeoutException;
 import java.nio.ByteBuffer;
+import java.nio.channels.AsynchronousServerSocketChannel;
+import java.nio.channels.AsynchronousSocketChannel;
+import java.nio.channels.CompletionHandler;
 import java.nio.channels.DatagramChannel;
 import java.nio.channels.Pipe;
 import java.nio.channels.SelectionKey;
@@ -20,6 +23,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Self-test of libcore's NIO channels (G2) on AOSP's real libcore, on the loopback interface
@@ -34,7 +40,10 @@ public final class NioProbe {
     String run() throws Throwable;
   }
 
+  static String[] only;  // first argument: run only the checks whose name contains one of its words (a,b)
+
   static void check(String what, Check c) {
+    if (only != null && java.util.Arrays.stream(only).noneMatch(what::contains)) return;
     String result;
     try {
       result = c.run();
@@ -70,6 +79,7 @@ public final class NioProbe {
   }
 
   public static void main(String[] args) {
+    only = args.length > 0 ? args[0].split(",") : null;
     check("tube NIO", () -> {
       Pipe pipe = Pipe.open();
       try (Pipe.SinkChannel sink = pipe.sink(); Pipe.SourceChannel source = pipe.source()) {
@@ -156,6 +166,7 @@ public final class NioProbe {
             + ", rien " + nothing + ", connecté " + a.isConnected() + ", tronqué " + text(small);
       }
     });
+    check("canaux asynchrones", NioProbe::asynchronous);
     check("adaptateur de socket", () -> {
       try (ServerSocketChannel server = ServerSocketChannel.open()) {
         server.bind(new InetSocketAddress(LOOPBACK, 0));
@@ -174,6 +185,39 @@ public final class NioProbe {
         }
       }
     });
+  }
+
+  // AsynchronousSocketChannel on the default group (EPollPort): accept and connect as futures,
+  // a read completed through a CompletionHandler, another one failed by its timeout.
+  static String asynchronous() throws Exception {
+    try (AsynchronousServerSocketChannel server = AsynchronousServerSocketChannel.open()) {
+      server.bind(new InetSocketAddress(LOOPBACK, 0));
+      Future<AsynchronousSocketChannel> accepted = server.accept();
+      try (AsynchronousSocketChannel client = AsynchronousSocketChannel.open()) {
+        client.connect(server.getLocalAddress()).get(10, TimeUnit.SECONDS);
+        try (AsynchronousSocketChannel peer = accepted.get(10, TimeUnit.SECONDS)) {
+          int written = client.write(ascii("async")).get(10, TimeUnit.SECONDS);
+          ByteBuffer in = ByteBuffer.allocate(16);
+          Object[] results = new Object[2];
+          CountDownLatch done = new CountDownLatch(2);
+          class Handler implements CompletionHandler<Integer, Integer> {
+            @Override public void completed(Integer n, Integer which) {
+              results[which] = n + " octets";
+              done.countDown();
+            }
+
+            @Override public void failed(Throwable t, Integer which) {
+              results[which] = t.getClass().getSimpleName();
+              done.countDown();
+            }
+          }
+          peer.read(in, 0, new Handler());
+          client.read(ByteBuffer.allocate(8), 200, TimeUnit.MILLISECONDS, 1, new Handler());
+          boolean finished = done.await(10, TimeUnit.SECONDS);
+          return written + " écrits, lu " + results[0] + " : " + text(in) + ", délai " + results[1] + ", terminé " + finished;
+        }
+      }
+    }
   }
 
   // A server thread echoes in upper case what it reads, until the end of the stream.

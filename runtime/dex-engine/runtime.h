@@ -603,7 +603,10 @@ class Runtime {
   // Runs fn() with the GIL released, for a blocking system call (sockets):
   // other Java threads run meanwhile. fn must not touch Java objects, nor the
   // runtime; the caller's stack stays visible to the collector, as in park().
+  // A waiting fn returns soon once shutting_down() (the runtime joins every
+  // thread); run_blocking then ends the thread.
   void run_blocking(const std::function<void()>& fn);
+  bool shutting_down() const { return shutting_down_; }
   void interrupt(VmThread* t);
   bool join(VmThread* t, int64_t millis);  // false on timeout
   VmThread* thread_of_peer(Handle peer);

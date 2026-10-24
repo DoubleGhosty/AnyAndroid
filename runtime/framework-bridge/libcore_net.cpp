@@ -23,6 +23,8 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -382,6 +384,7 @@ Wait wait_socket(Runtime& rt, NetSocket& s, int32_t fd, short events, int64_t ti
         result = registration.signal();
         return;
       }
+      if (rt.shutting_down()) return;
       int slice = 50;
       if (timeout_us > 0) {
         auto left = std::chrono::duration_cast<std::chrono::microseconds>(deadline - Clock::now()).count();
@@ -1267,6 +1270,7 @@ int poll_wait(Runtime& rt, std::vector<PollEntry>& entries, int64_t timeout_ms, 
         interrupted = true;
         return;
       }
+      if (rt.shutting_down()) return;
       int slice = 50;
       if (timeout_ms > 0) {  // never before the timeout: the last slice rounded up
         auto left = std::chrono::duration_cast<std::chrono::microseconds>(deadline - Clock::now()).count();
@@ -1927,6 +1931,254 @@ void register_nio_net(rt::NativeRegistry& r) {
   }
 }
 
+// --- epoll (sun.nio.ch.EPoll, for EPollPort and the asynchronous channels) --------------
+
+constexpr int32_t kEpollCtlAdd = 1, kEpollCtlDel = 2, kEpollCtlMod = 3;
+constexpr uint32_t kEpollOneshot = 1u << 30;
+constexpr int32_t kENOENT = 2, kEEXIST = 17;
+
+// An epoll instance (epoll_create1): an open file of the Vfs holding its
+// interest list. Entries name sockets and pipes (other files are not
+// pollable: EPERM) by a weak reference, so that an entry goes away with its
+// file's last descriptor, as in Linux. Readiness is level-triggered
+// (EPOLLET is taken as level-triggered); EPOLLONESHOT disarms an entry once
+// reported. epoll_wait waits in WSAPoll, the GIL released; epoll_ctl wakes
+// it through a loopback pair of its own so that it polls the new list.
+class EpollFile final : public vfs::OpenFile {
+ public:
+  struct Entry {
+    std::weak_ptr<NetSocket> sock;
+    uint32_t events = 0;
+    bool armed = true;
+  };
+  EpollFile(SOCKET wake_read, SOCKET wake_write) : wake_read_(wake_read), wake_write_(wake_write) {}
+  ~EpollFile() override {
+    closesocket(wake_read_);
+    closesocket(wake_write_);
+  }
+  EpollFile(const EpollFile&) = delete;
+  EpollFile& operator=(const EpollFile&) = delete;
+
+  vfs::VStat stat() override {
+    vfs::VStat st;
+    st.type = vfs::NodeType::kFifo;  // not seekable; an anonymous inode, mode 0600
+    st.mode = 0600;
+    st.ino = ino_;
+    return st;
+  }
+  size_t read(uint64_t, std::span<uint8_t>) override { throw vfs::VfsError{lx::kEINVAL, "read"}; }
+  size_t write(uint64_t, std::span<const uint8_t>) override { throw vfs::VfsError{lx::kEINVAL, "write"}; }
+  void truncate(uint64_t) override { throw vfs::VfsError{lx::kEINVAL, "ftruncate"}; }
+  bool seekable() const override { return false; }
+
+  // epoll_ctl: 0 or the Linux errno.
+  int32_t control(int32_t op, int32_t fd, std::shared_ptr<NetSocket> sock, uint32_t events) {
+    std::lock_guard<std::mutex> guard(lock_);
+    auto it = entries_.find(fd);
+    bool present = it != entries_.end() && !it->second.sock.expired() && it->second.sock.lock() == sock;
+    switch (op) {
+      case kEpollCtlAdd:
+        if (present) return kEEXIST;
+        entries_[fd] = Entry{sock, events, true};
+        break;
+      case kEpollCtlMod:
+        if (!present) return kENOENT;
+        it->second.events = events;
+        it->second.armed = true;
+        break;
+      case kEpollCtlDel:
+        if (!present) return kENOENT;
+        entries_.erase(it);
+        break;
+      default: return lx::kEINVAL;
+    }
+    char byte = 1;
+    send(wake_write_, &byte, 1, 0);  // a waiter polls the new list; a full pipe is woken already
+    return 0;
+  }
+
+  struct Event {
+    uint32_t events;
+    int32_t fd;
+  };
+
+  // epoll_wait without a timeout (EPoll.epollWait), at most `max` events;
+  // run with the GIL released, until `stop` (the runtime shutting down).
+  std::vector<Event> wait(size_t max, const std::function<bool()>& stop) {
+    std::vector<Event> out;
+    while (out.empty() && !stop()) {
+      std::vector<std::pair<int32_t, std::shared_ptr<NetSocket>>> polled;
+      std::vector<WSAPOLLFD> fds;
+      {
+        std::lock_guard<std::mutex> guard(lock_);
+        for (auto it = entries_.begin(); it != entries_.end();) {
+          auto sock = it->second.sock.lock();
+          if (!sock) {  // its file was closed
+            it = entries_.erase(it);
+            continue;
+          }
+          if (it->second.armed) {
+            WSAPOLLFD p{};
+            p.fd = sock->handle();
+            p.events = to_wsa_events(int16_t(it->second.events & 0xffff));
+            fds.push_back(p);
+            polled.emplace_back(it->first, std::move(sock));
+          }
+          ++it;
+        }
+      }
+      WSAPOLLFD wake{};
+      wake.fd = wake_read_;
+      wake.events = POLLRDNORM;
+      fds.push_back(wake);
+      if (WSAPoll(fds.data(), ULONG(fds.size()), 50) <= 0) {
+        // Not reported by WSAPoll on every Windows version: a failed connect.
+        bool failed = false;
+        for (size_t i = 0; i < polled.size(); ++i) {
+          if (polled[i].second->connecting && pending_error(polled[i].second->handle()) != 0) {
+            fds[i].revents = POLLERR | POLLHUP;
+            failed = true;
+          }
+        }
+        if (!failed) continue;
+      }
+      if (fds.back().revents) {
+        char drain[64];
+        while (recv(wake_read_, drain, sizeof drain, 0) > 0) {
+        }
+      }
+      std::lock_guard<std::mutex> guard(lock_);
+      for (size_t i = 0; i < polled.size() && out.size() < max; ++i) {
+        auto it = entries_.find(polled[i].first);
+        if (it == entries_.end() || !it->second.armed || it->second.sock.lock() != polled[i].second) continue;
+        int16_t r = from_wsa_events(fds[i].revents, int16_t(it->second.events & 0xffff));
+        if (!r) continue;
+        out.push_back(Event{uint32_t(uint16_t(r)), polled[i].first});
+        if (it->second.events & kEpollOneshot) it->second.armed = false;
+      }
+    }
+    return out;
+  }
+
+ private:
+  static uint64_t next_ino() {
+    static std::atomic<uint64_t> counter{200000};
+    return ++counter;
+  }
+  std::mutex lock_;
+  std::map<int32_t, Entry> entries_;
+  SOCKET wake_read_, wake_write_;
+  const uint64_t ino_ = next_ino();
+};
+
+std::shared_ptr<EpollFile> epoll_of(int32_t epfd, int32_t& err) {
+  vfs::Vfs& v = libcore_vfs();
+  if (epfd < 3 || !v.is_open(epfd)) {
+    err = lx::kEBADF;
+    return nullptr;
+  }
+  auto e = std::dynamic_pointer_cast<EpollFile>(v.open_file(epfd));
+  if (!e) err = lx::kEINVAL;
+  return e;
+}
+
+void register_epoll(rt::NativeRegistry& r) {
+  const char* ep = "Lsun/nio/ch/EPoll;";  // static natives
+  // struct epoll_event of x86_64 is packed: events (4 bytes), then data (8 bytes).
+  r.bind(ep, "eventSize", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_int(12); });
+  r.bind(ep, "eventsOffset", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_int(0); });
+  r.bind(ep, "dataOffset", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_int(4); });
+  r.bind(ep, "epollCreate", "()I", [](Runtime& rt, NativeArgs&) -> uint64_t {
+    ensure_winsock();
+    auto [one, two] = loopback_pair(SOCK_STREAM);
+    if (one == INVALID_SOCKET) throw_io_errno(rt, linux_errno(WSAGetLastError()));  // "epoll_create1 failed"
+    auto file = std::make_shared<EpollFile>(one, two);
+    int32_t fd = -1;
+    try {
+      fd = libcore_vfs().install(std::move(file), vfs::kO_RDWR, "anon_inode:[eventpoll]");
+    } catch (const vfs::VfsError& e) {
+      throw_io_errno(rt, e.err);
+    }
+    return rt::ret_int(fd);
+  }, S::kPartial, "WSAPoll ; EPOLLET traité comme déclenchement par niveau");
+  // epollCtl(epfd, op, fd, events): 0 or the errno.
+  r.bind(ep, "epollCtl", "(IIII)I", [](Runtime&, NativeArgs& a) -> uint64_t {
+    int32_t epfd = a.i32(0), op = a.i32(1), fd = a.i32(2), err = 0;
+    auto epoll = epoll_of(epfd, err);
+    if (!epoll) return rt::ret_int(err);
+    if (fd == epfd) return rt::ret_int(lx::kEINVAL);
+    if (fd < 0 || (fd > 2 && !libcore_vfs().is_open(fd))) return rt::ret_int(lx::kEBADF);
+    auto sock = socket_of(fd);
+    if (!sock) return rt::ret_int(lx::kEPERM);  // regular files and devices are not pollable
+    return rt::ret_int(epoll->control(op, fd, std::move(sock), uint32_t(a.i32(3))));
+  });
+  // epollWait(epfd, address, numfds): waits for ever (RESTARTABLE), the
+  // events written at `address`.
+  r.bind(ep, "epollWait", "(IJI)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t epfd = a.i32(0), numfds = a.i32(3), err = 0;
+    int64_t address = a.i64(1);
+    auto epoll = epoll_of(epfd, err);
+    if (!epoll) throw_io_errno(rt, err);  // "epoll_wait failed"
+    if (numfds <= 0) throw_io_errno(rt, lx::kEINVAL);
+    std::vector<EpollFile::Event> events;
+    rt.run_blocking([&] { events = epoll->wait(size_t(numfds), [&rt] { return rt.shutting_down(); }); });
+    auto raw = native_span(rt, address, uint64_t(events.size()) * 12, true);
+    for (size_t i = 0; i < events.size(); ++i) {
+      uint64_t data = uint32_t(events[i].fd);
+      std::memcpy(raw.data() + i * 12, &events[i].events, 4);
+      std::memcpy(raw.data() + i * 12 + 4, &data, 8);
+    }
+    return rt::ret_int(int32_t(events.size()));
+  });
+
+  // EPollPort: its wakeup socketpair (blocking, as socketpair(2) makes it).
+  const char* port = "Lsun/nio/ch/EPollPort;";
+  r.bind(port, "socketpair", "([I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    Handle sv = a.h(0);
+    if (sv == kNull) rt.throw_npe({});
+    ensure_winsock();
+    auto [one, two] = loopback_pair(SOCK_STREAM);
+    if (one == INVALID_SOCKET) throw_io_errno(rt, linux_errno(WSAGetLastError()));  // "socketpair failed"
+    int32_t fds[2] = {-1, -1};
+    SOCKET handles[2] = {one, two};
+    for (int i = 0; i < 2; ++i) {
+      auto sock = std::make_shared<NetSocket>(handles[i], lx::kAfUnix, lx::kSockStream, 0, AF_INET);
+      if (int32_t err = install_fd(std::move(sock), fds[i])) {
+        if (i == 1) libcore_vfs().close(fds[0]);
+        else closesocket(two);
+        throw_io_errno(rt, err);
+      }
+    }
+    rt::ArrayObject& arr = rt.array(sv, "int[]");
+    if (arr.length < 2) rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "socketpair");
+    std::memcpy(arr.data.data(), fds, sizeof fds);
+    return 0;
+  }, S::kPartial, "AF_UNIX émulé par deux sockets de la boucle locale");
+  r.bind(port, "interrupt", "(I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    uint8_t byte = 1;
+    int32_t err = 0;
+    if (once(a.i32(0), std::span<uint8_t>(&byte, 1), true, err) < 0) throw_io_errno(rt, err);  // "write failed"
+    return 0;
+  });
+  // drain1: reads one byte, waiting for it (a blocking read).
+  r.bind(port, "drain1", "(I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = a.i32(0);
+    for (;;) {
+      uint8_t byte = 0;
+      int32_t err = 0;
+      if (once(fd, std::span<uint8_t>(&byte, 1), false, err) >= 0) return 0;
+      auto s = socket_of(fd);
+      if (err != lx::kEAGAIN || !s) throw_io_errno(rt, err);  // "drain1 failed"
+      wait_socket(rt, *s, fd, POLLRDNORM, 0);
+    }
+  });
+  r.bind(port, "close0", "(I)V", [](Runtime&, NativeArgs& a) -> uint64_t {
+    int32_t fd = a.i32(0);
+    if (fd > 2 && libcore_vfs().is_open(fd)) libcore_vfs().close(fd);
+    return 0;
+  });
+}
+
 }  // namespace
 
 std::optional<int64_t> nio_socket_io(Runtime& rt, int32_t fd, std::span<const std::span<uint8_t>> buffers, bool reading) {
@@ -2187,6 +2439,7 @@ void register_libcore_net(rt::NativeRegistry& r) {
               signaled = true;
               return;
             }
+            if (rt.shutting_down()) return;
             int slice = 50;
             if (timeout > 0) {  // never before the timeout: the last slice rounded up
               auto left = std::chrono::duration_cast<std::chrono::microseconds>(deadline - Clock::now()).count();
@@ -2321,6 +2574,7 @@ void register_libcore_net(rt::NativeRegistry& r) {
   }, S::kPartial, "deux sockets de la boucle locale");
 
   register_nio_net(r);
+  register_epoll(r);
 
   // SocketInputStream.socketRead0 and SocketOutputStream.socketWrite0
   // (ojluni's SocketInputStream.c, SocketOutputStream.c): at most 64 KiB per
