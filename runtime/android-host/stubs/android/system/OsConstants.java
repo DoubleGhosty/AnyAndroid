@@ -25,6 +25,8 @@ public final class OsConstants {
   public static final int MS_SYNC = Stubs.integer();
   public static final int SOCK_DGRAM = Stubs.integer();
   public static final int MSG_TRUNC = Stubs.integer();
+  public static final int AF_UNIX = Stubs.integer();
+  public static final int SOCK_SEQPACKET = Stubs.integer();
 
   public static boolean S_ISLNK(int mode) {
     throw new RuntimeException("stub");

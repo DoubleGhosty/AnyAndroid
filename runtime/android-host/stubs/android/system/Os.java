@@ -134,6 +134,44 @@ public final class Os {
     throw new RuntimeException("stub");
   }
 
+  public static void bind(FileDescriptor fd, java.net.SocketAddress address)
+      throws ErrnoException, java.net.SocketException {
+    throw new RuntimeException("stub");
+  }
+
+  public static void listen(FileDescriptor fd, int backlog) throws ErrnoException {
+    throw new RuntimeException("stub");
+  }
+
+  public static FileDescriptor accept(FileDescriptor fd, java.net.SocketAddress peerAddress)
+      throws ErrnoException, java.net.SocketException {
+    throw new RuntimeException("stub");
+  }
+
+  public static void connect(FileDescriptor fd, java.net.SocketAddress address)
+      throws ErrnoException, java.net.SocketException {
+    throw new RuntimeException("stub");
+  }
+
+  public static java.net.SocketAddress getpeername(FileDescriptor fd) throws ErrnoException {
+    throw new RuntimeException("stub");
+  }
+
+  public static int sendto(FileDescriptor fd, byte[] bytes, int byteOffset, int byteCount, int flags,
+      java.net.SocketAddress address) throws ErrnoException, java.net.SocketException {
+    throw new RuntimeException("stub");
+  }
+
+  public static int recvfrom(FileDescriptor fd, byte[] bytes, int byteOffset, int byteCount, int flags,
+      java.net.InetSocketAddress srcAddress) throws ErrnoException, java.net.SocketException {
+    throw new RuntimeException("stub");
+  }
+
+  public static void socketpair(int domain, int type, int protocol, FileDescriptor fd1, FileDescriptor fd2)
+      throws ErrnoException {
+    throw new RuntimeException("stub");
+  }
+
   public static java.net.SocketAddress getsockname(FileDescriptor fd) throws ErrnoException {
     throw new RuntimeException("stub");
   }

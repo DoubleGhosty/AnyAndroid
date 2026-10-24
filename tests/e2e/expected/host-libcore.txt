@@ -76,3 +76,8 @@ liens symboliques : contenu par le lien, S_ISLNK true vers cible.txt, pendant ve
 transferTo et MappedByteBuffer : 5 octets transférés : 23456, mappé chargé true 9
 VMDebug : 3 marqueurs comptés 3, statistiques 11, gc-count true, agent SecurityException: Can't attach agent, process is not debuggable.
 OsConstantsHolder et sysconf : AI_ADDRCONFIG 0x400, EAI_NONAME 8, SIGRTMIN 42, O_NOFOLLOW 0400000, sysconf(_SC_PAGESIZE = 0x27) 4096
+AF_UNIX abstrait, SOCK_STREAM : bonjour, «\0aa-sonde» / pair «\0aa-sonde» / client «», rebind : bind failed: EADDRINUSE (Address already in use), inconnu : connect failed: ECONNREFUSED (Connection refused)
+AF_UNIX chemin, SOCK_SEQPACKET : nœud 014, enregistrements un|deux|abc|fin, rebind : bind failed: EADDRINUSE (Address already in use), type : connect failed: EPROTOTYPE (Protocol wrong type for socket), après fermeture : connect failed: ECONNREFUSED (Connection refused), nœud supprimé true
+AF_UNIX SOCK_DGRAM : datagrammes de 4 et 2 octets, émetteur «», sans pair : write failed: ENOTCONN (Transport endpoint is not connected)
+socketpair SOCK_SEQPACKET et SOCK_DGRAM : alpha|beta, pair «», lecture après fermeture 0, datagrammes gamma|delta
+UnixDomainSockets par réflexion : nio, connect 1, accept 1 de «  », adresse locale sonde-nio.sock

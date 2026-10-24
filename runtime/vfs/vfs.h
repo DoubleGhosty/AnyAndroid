@@ -22,7 +22,7 @@
 //  - the application's APK under /data/app/<package>, read-only, from memory;
 //  - a host directory per application for writable areas (/data, /sdcard),
 //    sandboxed: Linux names are encoded, reparse points refused, symbolic
-//    links made by the application stored as marked host files;
+//    links, sockets and FIFOs made by the application stored as marked host files;
 //  - /dev (null, zero, random, urandom).
 // Symbolic links are resolved at the VFS level, so they may cross mounts.
 // Errors are Linux errno values (VfsError), never host error codes.
@@ -30,7 +30,7 @@ namespace aa::vfs {
 
 // Linux errno values used by the VFS.
 enum : int32_t {
-  kEPERM = 1, kENOENT = 2, kEIO = 5, kEBADF = 9, kENOMEM = 12, kEACCES = 13, kEBUSY = 16, kEEXIST = 17, kEXDEV = 18, kENOTDIR = 20,
+  kEPERM = 1, kENOENT = 2, kEIO = 5, kENXIO = 6, kEBADF = 9, kENOMEM = 12, kEACCES = 13, kEBUSY = 16, kEEXIST = 17, kEXDEV = 18, kENOTDIR = 20,
   kEISDIR = 21, kEINVAL = 22, kEMFILE = 24, kENOTTY = 25, kEFBIG = 27, kENOSPC = 28, kESPIPE = 29,
   kEROFS = 30, kENAMETOOLONG = 36, kENOTEMPTY = 39, kELOOP = 40, kENODATA = 61, kEOPNOTSUPP = 95,
 };
@@ -86,8 +86,11 @@ class Mount {
   virtual void remove(const std::string& rel, bool directory) { throw VfsError{kEROFS, rel}; }
   virtual void rename(const std::string& from, const std::string& to) { throw VfsError{kEROFS, from}; }
   virtual void set_mtime(const std::string& rel, int64_t seconds) { throw VfsError{kEROFS, rel}; }
-  // A symbolic link at `rel` (absent, parent checked by the caller's lstat).
-  virtual void symlink(const std::string& rel, const std::string& target) { throw VfsError{kEROFS, rel}; }
+  // A symbolic link, socket or FIFO node at `rel` (a free name, the caller
+  // checked) holding `data`: the link's target, an identity for the others.
+  virtual void mknod(const std::string& rel, NodeType type, const std::string& data) { throw VfsError{kEROFS, rel}; }
+  // The data of a socket or FIFO node (EINVAL for any other node).
+  virtual std::string node_data(const std::string& rel) { throw VfsError{kEINVAL, rel}; }
   virtual bool writable() const { return false; }
 };
 
@@ -135,6 +138,12 @@ class Vfs {
   void rename(std::string_view from, std::string_view to);
   // symlink(2): `path` becomes a link to `target`, stored as given.
   void symlink(std::string_view target, std::string_view path);
+  // A socket (bind of AF_UNIX) or FIFO (mkfifo) node at `path`, holding
+  // `data`, an identity of the emulator's own (the bound socket, the pipe).
+  void mknod(std::string_view path, NodeType type, std::string_view data);
+  // The type of the node `path` names (links followed), with its data for a
+  // socket or FIFO node.
+  std::pair<NodeType, std::string> node(std::string_view path);
   // link(2): the checks of Linux, then EACCES, as Android's SELinux policy
   // grants applications no `link` permission on their files.
   void link(std::string_view from, std::string_view to);

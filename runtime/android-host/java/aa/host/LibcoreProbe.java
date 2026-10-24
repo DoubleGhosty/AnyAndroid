@@ -87,6 +87,7 @@ public final class LibcoreProbe {
     unicode();
     timeZones();
     posix();
+    unixSockets();
   }
 
   // --- Scatter-gather I/O (readv, writev) -----------------------------------------------
@@ -941,6 +942,175 @@ public final class LibcoreProbe {
         + ", EAI_NONAME " + OsConstants.EAI_NONAME + ", SIGRTMIN " + OsConstants.SIGRTMIN
         + ", O_NOFOLLOW 0" + Integer.toOctalString(OsConstants.O_NOFOLLOW)
         + ", sysconf(_SC_PAGESIZE = 0x" + Integer.toHexString(OsConstants._SC_PAGESIZE) + ") " + Os.sysconf(OsConstants._SC_PAGESIZE));
+  }
+
+  // --- AF_UNIX (no INTERNET permission needed) --------------------------------------------
+
+  static String sunPath(java.net.SocketAddress address) {
+    byte[] path = ((android.system.UnixSocketAddress) address).getSunPath();
+    StringBuilder out = new StringBuilder("«");
+    for (byte b : path) out.append(b == 0 ? "\\0" : String.valueOf((char) b));
+    return out.append("»").toString();
+  }
+
+  static String receive(FileDescriptor fd, int size) throws Exception {
+    byte[] buf = new byte[size];
+    int n = Os.read(fd, buf, 0, size);
+    return new String(buf, 0, Math.max(n, 0), StandardCharsets.US_ASCII);
+  }
+
+  static void send(FileDescriptor fd, String text) throws Exception {
+    byte[] b = text.getBytes(StandardCharsets.US_ASCII);
+    Os.write(fd, b, 0, b.length);
+  }
+
+  static String errno(Check c) {
+    try {
+      c.run();
+      return "réussi";
+    } catch (android.system.ErrnoException e) {
+      return e.getMessage();
+    } catch (Throwable t) {
+      return t.getClass().getSimpleName();
+    }
+  }
+
+  static void unixSockets() {
+    check("AF_UNIX abstrait, SOCK_STREAM", () -> {
+      FileDescriptor server = Os.socket(OsConstants.AF_UNIX, OsConstants.SOCK_STREAM, 0);
+      Os.bind(server, android.system.UnixSocketAddress.createAbstract("aa-sonde"));
+      Os.listen(server, 4);
+      FileDescriptor client = Os.socket(OsConstants.AF_UNIX, OsConstants.SOCK_STREAM, 0);
+      Os.connect(client, android.system.UnixSocketAddress.createAbstract("aa-sonde"));
+      android.system.UnixSocketAddress peer = android.system.UnixSocketAddress.createAbstract("x");
+      FileDescriptor accepted = Os.accept(server, peer);
+      send(client, "bonjour");
+      String got = receive(accepted, 64);
+      String names = sunPath(Os.getsockname(accepted)) + " / pair " + sunPath(Os.getpeername(client)) + " / client "
+          + sunPath(peer);
+      String again = errno(() -> {
+        FileDescriptor other = Os.socket(OsConstants.AF_UNIX, OsConstants.SOCK_STREAM, 0);
+        Os.bind(other, android.system.UnixSocketAddress.createAbstract("aa-sonde"));
+        return null;
+      });
+      String unknown = errno(() -> {
+        Os.connect(Os.socket(OsConstants.AF_UNIX, OsConstants.SOCK_STREAM, 0),
+            android.system.UnixSocketAddress.createAbstract("aa-absent"));
+        return null;
+      });
+      Os.close(accepted);
+      Os.close(client);
+      Os.close(server);
+      return got + ", " + names + ", rebind : " + again + ", inconnu : " + unknown;
+    });
+    check("AF_UNIX chemin, SOCK_SEQPACKET", () -> {
+      File node = scratch("sonde.sock");
+      node.delete();
+      FileDescriptor server = Os.socket(OsConstants.AF_UNIX, OsConstants.SOCK_SEQPACKET, 0);
+      Os.bind(server, android.system.UnixSocketAddress.createFileSystem(node.getPath()));
+      int mode = (Integer) java.nio.file.Files.getAttribute(node.toPath(), "unix:mode");
+      Os.listen(server, 4);
+      FileDescriptor client = Os.socket(OsConstants.AF_UNIX, OsConstants.SOCK_SEQPACKET, 0);
+      Os.connect(client, android.system.UnixSocketAddress.createFileSystem(node.getPath()));
+      FileDescriptor accepted = Os.accept(server, null);
+      send(client, "un");
+      send(client, "deux");
+      send(client, "abcdef");
+      String records = receive(accepted, 64) + "|" + receive(accepted, 64) + "|" + receive(accepted, 3);
+      send(client, "fin");
+      records += "|" + receive(accepted, 64);
+      String again = errno(() -> {
+        Os.bind(Os.socket(OsConstants.AF_UNIX, OsConstants.SOCK_SEQPACKET, 0),
+            android.system.UnixSocketAddress.createFileSystem(node.getPath()));
+        return null;
+      });
+      String wrongType = errno(() -> {
+        Os.connect(Os.socket(OsConstants.AF_UNIX, OsConstants.SOCK_STREAM, 0),
+            android.system.UnixSocketAddress.createFileSystem(node.getPath()));
+        return null;
+      });
+      Os.close(accepted);
+      Os.close(client);
+      Os.close(server);
+      String closed = errno(() -> {
+        Os.connect(Os.socket(OsConstants.AF_UNIX, OsConstants.SOCK_SEQPACKET, 0),
+            android.system.UnixSocketAddress.createFileSystem(node.getPath()));
+        return null;
+      });
+      boolean removed = node.delete();
+      return "nœud 0" + Integer.toOctalString(mode >> 12) + ", enregistrements " + records + ", rebind : " + again
+          + ", type : " + wrongType + ", après fermeture : " + closed + ", nœud supprimé " + removed;
+    });
+    check("AF_UNIX SOCK_DGRAM", () -> {
+      FileDescriptor a = Os.socket(OsConstants.AF_UNIX, OsConstants.SOCK_DGRAM, 0);
+      FileDescriptor b = Os.socket(OsConstants.AF_UNIX, OsConstants.SOCK_DGRAM, 0);
+      Os.bind(b, android.system.UnixSocketAddress.createAbstract("aa-dgram"));
+      byte[] ping = "ping".getBytes(StandardCharsets.US_ASCII);
+      Os.sendto(a, ping, 0, ping.length, 0, android.system.UnixSocketAddress.createAbstract("aa-dgram"));
+      Os.sendto(a, ping, 0, 2, 0, android.system.UnixSocketAddress.createAbstract("aa-dgram"));
+      byte[] buf = new byte[16];
+      int first = Os.recvfrom(b, buf, 0, buf.length, 0, null);
+      int second = Os.recvfrom(b, buf, 0, buf.length, 0, null);
+      String autobound = sunPath(Os.getsockname(a));
+      String noPeer = errno(() -> {
+        Os.write(Os.socket(OsConstants.AF_UNIX, OsConstants.SOCK_DGRAM, 0), ping, 0, 1);
+        return null;
+      });
+      Os.close(a);
+      Os.close(b);
+      return "datagrammes de " + first + " et " + second + " octets, émetteur " + autobound + ", sans pair : " + noPeer;
+    });
+    check("socketpair SOCK_SEQPACKET et SOCK_DGRAM", () -> {
+      FileDescriptor one = new FileDescriptor();
+      FileDescriptor two = new FileDescriptor();
+      Os.socketpair(OsConstants.AF_UNIX, OsConstants.SOCK_SEQPACKET, 0, one, two);
+      send(one, "alpha");
+      send(one, "beta");
+      String got = receive(two, 64) + "|" + receive(two, 64);
+      String peer = sunPath(Os.getpeername(two));
+      Os.close(one);
+      int end = Os.read(two, new byte[8], 0, 8);
+      Os.close(two);
+      FileDescriptor three = new FileDescriptor();
+      FileDescriptor four = new FileDescriptor();
+      Os.socketpair(OsConstants.AF_UNIX, OsConstants.SOCK_DGRAM, 0, three, four);
+      send(four, "gamma");
+      send(three, "delta");
+      String datagrams = receive(three, 64) + "|" + receive(four, 64);
+      Os.close(three);
+      Os.close(four);
+      return got + ", pair " + peer + ", lecture après fermeture " + end + ", datagrammes " + datagrams;
+    });
+    // sun.nio.ch.UnixDomainSockets: no public API of Android 17 reaches it
+    // (no SocketChannel.open(UNIX)); its natives are checked by reflection.
+    check("UnixDomainSockets par réflexion", () -> {
+      Class<?> uds = Class.forName("sun.nio.ch.UnixDomainSockets");
+      Method socket = uds.getDeclaredMethod("socket");
+      Method bind = uds.getDeclaredMethod("bind", FileDescriptor.class, java.nio.file.Path.class);
+      Method connect = uds.getDeclaredMethod("connect", FileDescriptor.class, java.nio.file.Path.class);
+      Method accept = uds.getDeclaredMethod("accept", FileDescriptor.class, FileDescriptor.class, String[].class);
+      Method local = uds.getDeclaredMethod("localAddress", FileDescriptor.class);
+      for (Method m : new Method[] {socket, bind, connect, accept, local}) m.setAccessible(true);
+      File node = scratch("sonde-nio.sock");
+      node.delete();
+      FileDescriptor server = (FileDescriptor) socket.invoke(null);
+      bind.invoke(null, server, node.toPath());
+      Os.listen(server, 2);
+      FileDescriptor client = (FileDescriptor) socket.invoke(null);
+      int connected = (Integer) connect.invoke(null, client, node.toPath());
+      FileDescriptor accepted = new FileDescriptor();
+      String[] peer = new String[1];
+      int took = (Integer) accept.invoke(null, server, accepted, peer);
+      send(client, "nio");
+      String got = receive(accepted, 16);
+      String name = local.invoke(null, server).toString();
+      Os.close(accepted);
+      Os.close(client);
+      Os.close(server);
+      node.delete();
+      return got + ", connect " + connected + ", accept " + took + " de « " + peer[0] + " », adresse locale "
+          + name.substring(name.lastIndexOf('/') + 1);
+    });
   }
 
   static final class CountedMarker {}

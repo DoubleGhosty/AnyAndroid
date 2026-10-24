@@ -23,6 +23,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <map>
@@ -77,11 +78,12 @@ using S = rt::ApiStatus;
 // Linux (bionic x86_64) values, as the Java side sees them.
 namespace lx {
 constexpr int32_t kAfUnspec = 0, kAfUnix = 1, kAfInet = 2, kAfInet6 = 10;
-constexpr int32_t kSockStream = 1, kSockDgram = 2, kSockRaw = 3, kSockNonblock = 04000, kSockCloexec = 02000000;
+constexpr int32_t kSockStream = 1, kSockDgram = 2, kSockRaw = 3, kSockSeqpacket = 5, kSockNonblock = 04000,
+                  kSockCloexec = 02000000;
 constexpr int32_t kSolSocket = 1, kIpprotoIp = 0, kIpprotoTcp = 6, kIpprotoIpv6 = 41;
 constexpr int32_t kSoReuseaddr = 2, kSoType = 3, kSoError = 4, kSoDontroute = 5, kSoBroadcast = 6, kSoSndbuf = 7,
                   kSoRcvbuf = 8, kSoKeepalive = 9, kSoOobinline = 10, kSoLinger = 13, kSoReuseport = 15,
-                  kSoRcvlowat = 18, kSoSndlowat = 19, kSoRcvtimeo = 20, kSoSndtimeo = 21, kSoAcceptconn = 30,
+                  kSoPasscred = 16, kSoRcvlowat = 18, kSoSndlowat = 19, kSoRcvtimeo = 20, kSoSndtimeo = 21, kSoAcceptconn = 30,
                   kSoProtocol = 38, kSoDomain = 39;
 constexpr int32_t kTcpNodelay = 1, kTcpMaxseg = 2, kTcpKeepidle = 4, kTcpKeepintvl = 5, kTcpKeepcnt = 6;
 constexpr int32_t kIpTos = 1, kIpTtl = 2, kIpMulticastTtl = 33, kIpMulticastLoop = 34, kIpMulticastAll = 49;
@@ -91,7 +93,7 @@ constexpr int16_t kPollIn = 0x1, kPollOut = 0x4, kPollErr = 0x8, kPollHup = 0x10
                   kPollRdnorm = 0x40, kPollWrnorm = 0x100;
 constexpr int32_t kMsgOob = 1, kMsgPeek = 2, kMsgDontroute = 4, kMsgDontwait = 0x40;
 enum : int32_t {
-  kEPERM = 1, kEINTR = 4, kEIO = 5, kEBADF = 9, kEAGAIN = 11, kENOMEM = 12, kEACCES = 13, kEFAULT = 14,
+  kEPERM = 1, kENOENT = 2, kEINTR = 4, kEIO = 5, kEBADF = 9, kEAGAIN = 11, kENOMEM = 12, kEACCES = 13, kEFAULT = 14,
   kEINVAL = 22, kEMFILE = 24, kEPIPE = 32, kEDOM = 33, kENOTSOCK = 88, kEDESTADDRREQ = 89, kEMSGSIZE = 90,
   kEPROTOTYPE = 91, kENOPROTOOPT = 92, kEPROTONOSUPPORT = 93, kESOCKTNOSUPPORT = 94, kEOPNOTSUPP = 95,
   kEPFNOSUPPORT = 96, kEAFNOSUPPORT = 97, kEADDRINUSE = 98, kEADDRNOTAVAIL = 99, kENETDOWN = 100,
@@ -237,16 +239,8 @@ class NetSocket final : public vfs::OpenFile {
     st.ino = ino;
     return st;
   }
-  size_t read(uint64_t, std::span<uint8_t> out) override {
-    int n = recv(handle_, reinterpret_cast<char*>(out.data()), int(std::min<size_t>(out.size(), INT32_MAX)), 0);
-    if (n == SOCKET_ERROR) throw vfs::VfsError{linux_errno(WSAGetLastError()), "read"};
-    return size_t(n);
-  }
-  size_t write(uint64_t, std::span<const uint8_t> data) override {
-    int n = send(handle_, reinterpret_cast<const char*>(data.data()), int(std::min<size_t>(data.size(), INT32_MAX)), 0);
-    if (n == SOCKET_ERROR) throw vfs::VfsError{linux_errno(WSAGetLastError(), true), "write"};
-    return size_t(n);
-  }
+  size_t read(uint64_t, std::span<uint8_t> out) override;  // after the AF_UNIX helpers
+  size_t write(uint64_t, std::span<const uint8_t> data) override;
   void truncate(uint64_t) override { throw vfs::VfsError{lx::kEINVAL, "ftruncate"}; }
   bool seekable() const override { return false; }
 
@@ -268,6 +262,12 @@ class NetSocket final : public vfs::OpenFile {
   // IP_MULTICAST_ALL: Windows never hands a socket the datagrams of groups
   // it did not join, which is the 0 Android sets; the value is kept.
   int32_t multicast_all = 1;
+  // AF_UNIX (see "AF_UNIX" below): the bound name, sun_path as getsockname
+  // reports it (empty: unnamed), the connected peer's, listen() called,
+  // SO_PASSCRED (kept, no credentials are sent).
+  std::string unix_name, unix_peer;
+  bool unix_connected = false, unix_listening = false;
+  int32_t passcred = 0;
 
  private:
   static uint64_t next_ino() {
@@ -783,8 +783,9 @@ int32_t int_option(NetSocket& s, int32_t level, int32_t option, int32_t& value) 
       case lx::kSoType: value = s.type; return 0;
       case lx::kSoDomain: value = s.family; return 0;
       case lx::kSoProtocol:
-        value = s.protocol != 0 ? s.protocol : s.type == lx::kSockStream ? IPPROTO_TCP : IPPROTO_UDP;
+        value = s.family == lx::kAfUnix ? 0 : s.protocol != 0 ? s.protocol : s.type == lx::kSockStream ? IPPROTO_TCP : IPPROTO_UDP;
         return 0;
+      case lx::kSoPasscred: value = s.passcred; return 0;
       case lx::kSoError: {
         int err = pending_error(s.handle());
         s.connecting = false;
@@ -822,6 +823,10 @@ int32_t set_option(NetSocket& s, int32_t level, int32_t option, int32_t value) {
     return 0;
   }
   if (level == lx::kSolSocket && option == lx::kSoReuseport) return lx::kENOPROTOOPT;
+  if (level == lx::kSolSocket && option == lx::kSoPasscred) {  // kept; no SCM_CREDENTIALS are sent
+    s.passcred = value != 0;
+    return 0;
+  }
   if (level == lx::kIpprotoIp && option == lx::kIpMulticastAll) {
     s.multicast_all = value != 0;
     return 0;
@@ -882,61 +887,6 @@ std::vector<WSABUF> message_buffers(Runtime& rt, Handle msg, bool writable) {
     out.push_back(w);
   }
   return out;
-}
-
-// recvmsg(2) into a StructMsghdr: msg_name filled with the sender,
-// msg_flags with MSG_TRUNC for a datagram cut short; no ancillary data.
-// `throwing`: recvmsg (ErrnoException, SocketException when a close is
-// signalled); otherwise recvmsgNoThrow (-errno).
-int32_t recv_message(Runtime& rt, Handle java_fd, Handle msg, int32_t flags, bool throwing) {
-  auto bufs = message_buffers(rt, msg, true);
-  Handle name = field_of(rt, msg, kStructMsghdr, "msg_name", "Ljava/net/SocketAddress;");
-  int32_t fd = fd_of(rt, java_fd);
-  auto s = socket_of(fd);
-  if (!s || s->pipe != NetSocket::Pipe::kNone) {
-    int32_t err = fd < 0 || (fd > 2 && !libcore_vfs().is_open(fd)) ? lx::kEBADF : lx::kENOTSOCK;
-    if (throwing) throw_errno(rt, "recvmsg", err);
-    return -err;
-  }
-  size_t total = 0;
-  for (const WSABUF& w : bufs) total += w.len;
-  sockaddr_storage ss{};
-  int len = sizeof ss;
-  bool truncated = false;
-  auto call = [&]() -> int64_t {
-    DWORD got = 0, f = DWORD(win_msg_flags(flags));
-    len = sizeof ss;
-    int rc = WSARecvFrom(s->handle(), bufs.data(), DWORD(bufs.size()), &got, &f,
-                         name != kNull ? reinterpret_cast<sockaddr*>(&ss) : nullptr, name != kNull ? &len : nullptr,
-                         nullptr, nullptr);
-    if (rc == SOCKET_ERROR && WSAGetLastError() == WSAEMSGSIZE) {
-      truncated = true;
-      return int64_t(total);
-    }
-    return rc == SOCKET_ERROR ? -1 : int64_t(got);
-  };
-  bool dontwait = (flags & lx::kMsgDontwait) != 0;
-  int64_t n;
-  if (throwing) {
-    n = retry(rt, *s, fd, "recvmsg", POLLRDNORM, s->rcvtimeo_us, dontwait, false, false, call);
-  } else {
-    int32_t err = 0;
-    n = retry_nothrow(rt, *s, fd, POLLRDNORM, s->rcvtimeo_us, dontwait, false, err, call);
-    if (n < 0) return -err;
-  }
-  if (name != kNull) {
-    bool inet = ss.ss_family == AF_INET || ss.ss_family == AF_INET6;
-    if (throwing && !inet) throw_net(rt, "Ljava/net/SocketException;", "unknown socket address type");
-    if (inet) {
-      if (!is_inet_socket_address(rt, name)) {
-        rt.throw_new("Ljava/lang/UnsupportedOperationException;", "unsupported SocketAddress subclass");
-      }
-      fill_inet_socket_address(rt, name, reinterpret_cast<const sockaddr*>(&ss));
-    }
-  }
-  constexpr int32_t kMsgTrunc = 0x20;
-  field_of(rt, msg, kStructMsghdr, "msg_flags", "I") = uint32_t(truncated ? kMsgTrunc : 0);
-  return int32_t(n);
 }
 
 // --- Network interfaces -----------------------------------------------------------------
@@ -1138,9 +1088,15 @@ void do_connect(Runtime& rt, NetSocket& s, int32_t fd, const Endpoint& e) {
   if (int failed = pending_error(s.handle())) throw_errno(rt, "connect", linux_errno(failed));
 }
 
+Handle new_unix_address(Runtime& rt, const std::string& sun_path);  // AF_UNIX, below
+
 Handle sock_name(Runtime& rt, Handle java_fd, bool peer) {
   const char* function = peer ? "getpeername" : "getsockname";
   auto s = socket_arg(rt, java_fd, function);
+  if (s->family == lx::kAfUnix) {
+    if (peer && !s->unix_connected) throw_errno(rt, function, lx::kENOTCONN);
+    return new_unix_address(rt, peer ? s->unix_peer : s->unix_name);
+  }
   sockaddr_storage ss{};
   int len = sizeof ss;
   int rc = peer ? getpeername(s->handle(), reinterpret_cast<sockaddr*>(&ss), &len)
@@ -1309,19 +1265,552 @@ std::pair<SOCKET, SOCKET> loopback_pair(int type) {
   if (connect(client, reinterpret_cast<sockaddr*>(&where), len) && WSAGetLastError() != WSAEWOULDBLOCK) {
     return fail(listener, client, INVALID_SOCKET);
   }
-  WSAPOLLFD p{};
-  p.fd = listener;
-  p.events = POLLRDNORM;
-  if (WSAPoll(&p, 1, 5000) != 1) return fail(listener, client, INVALID_SOCKET);
-  SOCKET server = accept(listener, nullptr, nullptr);
+  // The connection taken must be the client's: another program of the host
+  // may connect to the listener meanwhile; its connections are closed.
+  sockaddr_in mine{};
+  int mine_len = sizeof mine;
+  getsockname(client, reinterpret_cast<sockaddr*>(&mine), &mine_len);
+  SOCKET server = INVALID_SOCKET;
+  for (int tries = 0; tries < 16 && server == INVALID_SOCKET; ++tries) {
+    WSAPOLLFD p{};
+    p.fd = listener;
+    p.events = POLLRDNORM;
+    if (WSAPoll(&p, 1, 5000) != 1) return fail(listener, client, INVALID_SOCKET);
+    sockaddr_in from{};
+    int from_len = sizeof from;
+    server = accept(listener, reinterpret_cast<sockaddr*>(&from), &from_len);
+    if (server == INVALID_SOCKET) return fail(listener, client, INVALID_SOCKET);
+    if (from.sin_port != mine.sin_port || from.sin_addr.s_addr != mine.sin_addr.s_addr) {
+      closesocket(server);
+      server = INVALID_SOCKET;
+    }
+  }
   if (server == INVALID_SOCKET) return fail(listener, client, INVALID_SOCKET);
   closesocket(listener);
   u_long on = 1;
   ioctlsocket(server, FIONBIO, &on);
+  WSAPOLLFD p{};
   p.fd = client;
   p.events = POLLWRNORM;
   WSAPoll(&p, 1, 5000);  // the connection completes
   return {server, client};
+}
+
+// --- AF_UNIX ----------------------------------------------------------------------------
+//
+// Windows' own AF_UNIX has neither datagrams, SOCK_SEQPACKET nor the abstract
+// namespace, and its socket files are reparse points, which host areas refuse.
+// An AF_UNIX socket of the process is therefore a loopback socket, TCP for
+// SOCK_STREAM and SOCK_SEQPACKET, UDP for SOCK_DGRAM, and its names live here:
+//  - an abstract name ("\0" then bytes) or an autobind one, in a table of the
+//    process, free again once the socket is closed;
+//  - a path names a socket node of the Vfs (S_IFSOCK) whose data identifies
+//    the binding: a rename keeps it, and a node left by a closed socket or an
+//    earlier run refuses connections (ECONNREFUSED), as on Linux.
+// Only the process's own sockets reach them: a connection or a datagram from
+// a loopback port that is none of its AF_UNIX sockets (another program of the
+// host) is dropped unseen. A SOCK_SEQPACKET record travels as a 4-byte length
+// then its bytes and is only taken whole.
+
+constexpr size_t kSunPathMax = 108;  // sizeof(sockaddr_un::sun_path)
+constexpr int kUnixBuffer = 212992;  // net.core.rmem_default and wmem_default
+constexpr size_t kSeqHeader = 4;
+constexpr std::string_view kUnixSocketAddress = "Landroid/system/UnixSocketAddress;";
+
+struct UnixTable {
+  std::mutex lock;
+  std::map<std::string, std::weak_ptr<NetSocket>> names;  // an abstract name, or "node:" + a socket node's data
+  std::map<uint32_t, std::weak_ptr<NetSocket>> ports;     // the loopback port of each (| 0x10000: UDP)
+};
+
+UnixTable& unix_table() {
+  static UnixTable table;
+  return table;
+}
+
+uint32_t port_key(int32_t type, uint16_t port) { return (type == lx::kSockDgram ? 0x10000u : 0u) | port; }
+
+template <typename Map>
+void forget_closed(Map& map) {
+  for (auto it = map.begin(); it != map.end();) it = it->second.expired() ? map.erase(it) : std::next(it);
+}
+
+// The loopback address a Winsock socket is bound to (port 0 when unbound).
+sockaddr_in loopback_name(SOCKET h) {
+  sockaddr_in sin{};
+  int len = sizeof sin;
+  if (getsockname(h, reinterpret_cast<sockaddr*>(&sin), &len) == SOCKET_ERROR) sin = sockaddr_in{};
+  return sin;
+}
+
+// Gives AF_UNIX socket `s` its loopback port if it has none, and records it:
+// 0, else the Linux errno.
+int32_t unix_attach(const std::shared_ptr<NetSocket>& s) {
+  sockaddr_in sin = loopback_name(s->handle());
+  if (sin.sin_port == 0) {
+    sockaddr_in any{};
+    any.sin_family = AF_INET;
+    any.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(s->handle(), reinterpret_cast<sockaddr*>(&any), sizeof any) == SOCKET_ERROR) {
+      return linux_errno(WSAGetLastError());
+    }
+    sin = loopback_name(s->handle());
+  }
+  UnixTable& t = unix_table();
+  std::lock_guard<std::mutex> guard(t.lock);
+  if (t.ports.size() >= 1024) forget_closed(t.ports);
+  t.ports[port_key(s->type, ntohs(sin.sin_port))] = s;
+  return 0;
+}
+
+// The AF_UNIX socket of the process behind a loopback source address, if any.
+std::shared_ptr<NetSocket> unix_by_address(int32_t type, const sockaddr_storage& ss) {
+  if (ss.ss_family != AF_INET) return nullptr;
+  const auto& sin = reinterpret_cast<const sockaddr_in&>(ss);
+  if (sin.sin_addr.s_addr != htonl(INADDR_LOOPBACK)) return nullptr;
+  UnixTable& t = unix_table();
+  std::lock_guard<std::mutex> guard(t.lock);
+  auto it = t.ports.find(port_key(type, ntohs(sin.sin_port)));
+  std::shared_ptr<NetSocket> sock = it == t.ports.end() ? nullptr : it->second.lock();
+  return sock && sock->family == lx::kAfUnix && sock->type == type ? sock : nullptr;
+}
+
+bool is_unix_socket_address(Runtime& rt, Handle h) { return h != kNull && rt.instance_of(h, rt.find_class(kUnixSocketAddress)); }
+
+// javaUnixSocketAddressToSockaddr: the sun_path bytes, at most 108.
+std::string unix_sun_path(Runtime& rt, Handle usa) {
+  Handle bytes = field_of(rt, usa, kUnixSocketAddress, "sun_path", "[B");
+  if (bytes == kNull) rt.throw_npe({});
+  rt::ArrayObject& a = rt.array(bytes, "byte[]");
+  if (a.length > kSunPathMax) {
+    rt.throw_new("Ljava/lang/IllegalArgumentException;",
+                 "sun_path too long: max=" + std::to_string(kSunPathMax) + ", is=" + std::to_string(a.length));
+  }
+  return std::string(reinterpret_cast<const char*>(a.data.data()), a.length);
+}
+
+Handle unix_bytes(Runtime& rt, const std::string& sun_path) {
+  Handle bytes = rt.new_array("[B", int32_t(sun_path.size()));
+  if (!sun_path.empty()) std::memcpy(rt.array(bytes, "byte[]").data.data(), sun_path.data(), sun_path.size());
+  return bytes;
+}
+
+// makeSocketAddress of an AF_UNIX address: a UnixSocketAddress.
+Handle new_unix_address(Runtime& rt, const std::string& sun_path) {
+  rt::GlobalRef bytes(rt, unix_bytes(rt, sun_path));
+  return construct(rt, kUnixSocketAddress, "([B)V", {bytes.get()});
+}
+
+// fillUnixSocketAddress.
+void fill_unix_address(Runtime& rt, Handle usa, const std::string& sun_path) {
+  if (usa == kNull) return;
+  Handle bytes = unix_bytes(rt, sun_path);
+  field_of(rt, usa, kUnixSocketAddress, "sun_path", "[B") = bytes;
+}
+
+// The identity of a new socket node: unique in this run and from one run to another.
+std::string unix_node_id() {
+  static const uint64_t start = [] {
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return uint64_t(t.QuadPart);
+  }();
+  static std::atomic<uint64_t> counter{0};
+  char id[64];
+  std::snprintf(id, sizeof id, "%lx-%llx-%llx", GetCurrentProcessId(), static_cast<unsigned long long>(start),
+                static_cast<unsigned long long>(++counter));
+  return id;
+}
+
+// bind(2) of an AF_UNIX socket (unix_bind): 0, else the Linux errno. An
+// empty sun_path autobinds: an abstract name of five hex digits. A path is
+// kept as Linux keeps it (unix_mkname_bsd): up to its first NUL, NUL-terminated.
+int32_t unix_bind(const std::shared_ptr<NetSocket>& s, const std::string& sun_path) {
+  if (!s->unix_name.empty()) return lx::kEINVAL;  // bound already
+  UnixTable& t = unix_table();
+  std::string name, path;
+  if (sun_path.empty()) {
+    static uint32_t next = 0;
+    std::lock_guard<std::mutex> guard(t.lock);
+    for (uint32_t tries = 0;; ++tries) {
+      if (tries > 0xFFFFF) return 28;  // ENOSPC
+      char hex[8];
+      std::snprintf(hex, sizeof hex, "%05x", unsigned(next++ & 0xFFFFF));
+      name = std::string(1, '\0') + hex;
+      auto it = t.names.find(name);
+      if (it == t.names.end() || it->second.expired()) break;
+    }
+  } else if (sun_path[0] == '\0') {
+    name = sun_path;
+    std::lock_guard<std::mutex> guard(t.lock);
+    auto it = t.names.find(name);
+    if (it != t.names.end() && !it->second.expired()) return lx::kEADDRINUSE;
+  } else {
+    path = sun_path.substr(0, sun_path.find('\0'));
+    name = path + '\0';
+  }
+  if (int32_t err = unix_attach(s)) return err;
+  std::string key = name;
+  if (!path.empty()) {
+    std::string id = unix_node_id();
+    try {
+      libcore_vfs().mknod(path, vfs::NodeType::kSocket, id);
+    } catch (const vfs::VfsError& e) {
+      return e.err == vfs::kEEXIST ? lx::kEADDRINUSE : e.err;
+    }
+    key = "node:" + id;
+  }
+  std::lock_guard<std::mutex> guard(t.lock);
+  if (t.names.size() >= 1024) forget_closed(t.names);
+  t.names[key] = s;
+  s->unix_name = name;
+  return 0;
+}
+
+// The AF_UNIX socket a sun_path names (unix_find_other), else nullptr and the
+// Linux errno: the path's own (ENOENT...), ECONNREFUSED when nothing is bound
+// to the name or the path is not a socket.
+std::shared_ptr<NetSocket> unix_lookup(const std::string& sun_path, int32_t& err) {
+  if (sun_path.empty()) {
+    err = lx::kEINVAL;
+    return nullptr;
+  }
+  std::string key = sun_path;
+  if (sun_path[0] != '\0') {
+    try {
+      auto [type, data] = libcore_vfs().node(sun_path.substr(0, sun_path.find('\0')));
+      if (type != vfs::NodeType::kSocket) {
+        err = lx::kECONNREFUSED;
+        return nullptr;
+      }
+      key = "node:" + data;
+    } catch (const vfs::VfsError& e) {
+      err = e.err;
+      return nullptr;
+    }
+  }
+  UnixTable& t = unix_table();
+  std::lock_guard<std::mutex> guard(t.lock);
+  auto it = t.names.find(key);
+  std::shared_ptr<NetSocket> sock = it == t.names.end() ? nullptr : it->second.lock();
+  if (!sock) err = lx::kECONNREFUSED;
+  return sock;
+}
+
+Endpoint unix_endpoint(const NetSocket& target) {
+  Endpoint e;
+  sockaddr_in sin = loopback_name(target.handle());
+  std::memcpy(&e.ss, &sin, sizeof sin);
+  e.len = sizeof sin;
+  return e;
+}
+
+// The loopback socket behind a new AF_UNIX socket: Linux's buffer sizes.
+SOCKET new_unix_socket(int32_t type) {
+  SOCKET h = new_win_socket(AF_INET, type == lx::kSockDgram ? SOCK_DGRAM : SOCK_STREAM, 0);
+  if (h != INVALID_SOCKET) {
+    int size = kUnixBuffer;
+    setsockopt(h, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&size), sizeof size);
+    setsockopt(h, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&size), sizeof size);
+  }
+  return h;
+}
+
+// connect(2) of an AF_UNIX socket: 0, else the Linux errno (kClosedWhileWaiting
+// when the socket was closed meanwhile). A stream connection to a listening
+// socket of the process is made at once, as Linux makes it (no EINPROGRESS;
+// EAGAIN when a non-blocking one finds the backlog full); a datagram socket
+// only takes its peer.
+constexpr int32_t kClosedWhileWaiting = -1;
+int32_t unix_connect(Runtime& rt, const std::shared_ptr<NetSocket>& s, int32_t fd, const std::string& sun_path) {
+  int32_t err = 0;
+  std::shared_ptr<NetSocket> target = unix_lookup(sun_path, err);
+  if (!target) return err;
+  if (target->type != s->type) return lx::kEPROTOTYPE;
+  bool stream = s->type != lx::kSockDgram;
+  if (stream && s->unix_connected) return lx::kEISCONN;
+  if (stream && !target->unix_listening) return lx::kECONNREFUSED;
+  if (int32_t e = unix_attach(s)) return e;
+  Endpoint to = unix_endpoint(*target);
+  if (connect(s->handle(), reinterpret_cast<const sockaddr*>(&to.ss), to.len) == SOCKET_ERROR) {
+    int wsa = WSAGetLastError();
+    if (wsa != WSAEWOULDBLOCK) return linux_errno(wsa);
+    switch (wait_socket(rt, *s, fd, POLLWRNORM, s->nonblocking ? 1000000 : 0)) {
+      case Wait::kClosed: return kClosedWhileWaiting;
+      case Wait::kTimeout: return lx::kEAGAIN;
+      case Wait::kReady:
+      case Wait::kInterrupted: break;
+    }
+    if (int failed = pending_error(s->handle())) return linux_errno(failed);
+  }
+  s->unix_peer = target->unix_name;
+  s->unix_connected = true;
+  return 0;
+}
+
+// The destination of a send with an address on AF_UNIX socket `s`: for a
+// datagram socket the named one's loopback endpoint (unix_dgram_sendmsg); a
+// stream socket fails, EISCONN when connected, else EOPNOTSUPP
+// (unix_stream_sendmsg); SOCK_SEQPACKET ignores the address once connected,
+// ENOTCONN before (unix_seqpacket_sendmsg).
+Endpoint unix_destination(Runtime& rt, const std::shared_ptr<NetSocket>& s, Handle address, const char* function) {
+  if (!is_unix_socket_address(rt, address)) throw_errno(rt, function, lx::kEINVAL);
+  std::string sun_path = unix_sun_path(rt, address);
+  if (s->type == lx::kSockSeqpacket) {
+    if (!s->unix_connected) throw_errno(rt, function, lx::kENOTCONN);
+    return Endpoint{};
+  }
+  if (s->type != lx::kSockDgram) throw_errno(rt, function, s->unix_connected ? lx::kEISCONN : lx::kEOPNOTSUPP);
+  int32_t err = 0;
+  std::shared_ptr<NetSocket> target = unix_lookup(sun_path, err);
+  if (!target) throw_errno(rt, function, err);
+  if (target->type != lx::kSockDgram) throw_errno(rt, function, lx::kEPROTOTYPE);
+  if (int32_t e = unix_attach(s)) throw_errno(rt, function, e);
+  return unix_endpoint(*target);
+}
+
+// accept(2) on an AF_UNIX socket: a connection from a port that is none of
+// the process's AF_UNIX sockets is closed unseen, as if none had come
+// (WSAEWOULDBLOCK). The Winsock socket, else INVALID_SOCKET with the error set.
+SOCKET unix_accept(NetSocket& listener, std::shared_ptr<NetSocket>& client) {
+  sockaddr_storage ss{};
+  int len = sizeof ss;
+  SOCKET c = accept(listener.handle(), reinterpret_cast<sockaddr*>(&ss), &len);
+  if (c == INVALID_SOCKET) return c;
+  client = unix_by_address(listener.type, ss);
+  if (!client) {
+    closesocket(c);
+    WSASetLastError(WSAEWOULDBLOCK);
+    return INVALID_SOCKET;
+  }
+  return c;
+}
+
+// The socket of a connection unix_accept took: named as the listener, its
+// peer's name the client's.
+std::shared_ptr<NetSocket> unix_accepted(SOCKET c, const NetSocket& listener, const NetSocket& client) {
+  u_long on = 1;
+  ioctlsocket(c, FIONBIO, &on);
+  int size = kUnixBuffer;
+  setsockopt(c, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&size), sizeof size);
+  setsockopt(c, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&size), sizeof size);
+  auto sock = std::make_shared<NetSocket>(c, lx::kAfUnix, listener.type, 0, AF_INET);
+  sock->unix_name = listener.unix_name;
+  sock->unix_peer = client.unix_name;
+  sock->unix_connected = true;
+  return sock;
+}
+
+// One SOCK_SEQPACKET record out, whole: a non-blocking socket without room
+// sends nothing (WSAEWOULDBLOCK); a record started is finished, the GIL
+// released (`rt` null: waiting in place) while the peer makes room. A record
+// longer than the send buffer fails with EMSGSIZE, as on Linux.
+int64_t seq_send(Runtime* rt, NetSocket& s, const WSABUF* bufs, DWORD count) {
+  size_t total = 0;
+  for (DWORD k = 0; k < count; ++k) total += bufs[k].len;
+  if (total > size_t(kUnixBuffer) - 32) {
+    WSASetLastError(WSAEMSGSIZE);
+    return -1;
+  }
+  std::vector<char> record(kSeqHeader + total);
+  uint32_t length = uint32_t(total);
+  std::memcpy(record.data(), &length, kSeqHeader);
+  size_t at = kSeqHeader;
+  for (DWORD k = 0; k < count; ++k) {
+    if (bufs[k].len) std::memcpy(record.data() + at, bufs[k].buf, bufs[k].len);
+    at += bufs[k].len;
+  }
+  int sent = send(s.handle(), record.data(), int(record.size()), 0);
+  if (sent == SOCKET_ERROR) return -1;
+  size_t done = size_t(sent);
+  int failure = 0;
+  auto finish = [&] {
+    while (done < record.size() && !(rt && rt->shutting_down())) {
+      WSAPOLLFD p{};
+      p.fd = s.handle();
+      p.events = POLLWRNORM;
+      WSAPoll(&p, 1, 50);
+      int more = send(s.handle(), record.data() + done, int(record.size() - done), 0);
+      if (more > 0) {
+        done += size_t(more);
+      } else if (more == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK) {
+        failure = WSAGetLastError();
+        return;
+      }
+    }
+  };
+  if (done < record.size()) {
+    if (rt) {
+      rt->run_blocking(finish);
+    } else {
+      finish();
+    }
+  }
+  if (done < record.size()) {
+    WSASetLastError(failure ? failure : WSAESHUTDOWN);
+    return -1;
+  }
+  return int64_t(total);
+}
+
+// One SOCK_SEQPACKET record in, whole, or WSAEWOULDBLOCK while it is not all
+// there: the bytes that fit in `bufs`, the rest dropped (`truncated`), as
+// Linux does. 0 at the end of the connection.
+int64_t seq_recv(NetSocket& s, WSABUF* bufs, DWORD count, bool peek, bool& truncated) {
+  u_long avail = 0;
+  if (ioctlsocket(s.handle(), FIONREAD, &avail) == SOCKET_ERROR) return -1;
+  uint32_t length = 0;
+  if (avail < kSeqHeader || recv(s.handle(), reinterpret_cast<char*>(&length), int(kSeqHeader), MSG_PEEK) != int(kSeqHeader) ||
+      avail < kSeqHeader + length) {
+    if (avail == 0) {
+      char c;
+      int r = recv(s.handle(), &c, 1, MSG_PEEK);  // 0 at the end of the connection, else an error or nothing yet
+      if (r == 0) return 0;
+      if (r == SOCKET_ERROR) return -1;
+    }
+    WSASetLastError(WSAEWOULDBLOCK);
+    return -1;
+  }
+  std::vector<char> record(kSeqHeader + length);
+  if (recv(s.handle(), record.data(), int(record.size()), peek ? MSG_PEEK : 0) != int(record.size())) return -1;
+  size_t copied = 0;
+  for (DWORD k = 0; k < count && copied < length; ++k) {
+    size_t n = std::min<size_t>(bufs[k].len, length - copied);
+    std::memcpy(bufs[k].buf, record.data() + kSeqHeader + copied, n);
+    copied += n;
+  }
+  truncated = copied < length;
+  return int64_t(copied);
+}
+
+// One receive into `bufs` with the Winsock flags `flags`, AF_UNIX's semantics
+// included: a SOCK_SEQPACKET record whole; a datagram from another program of
+// the host dropped. `from` (with its length) gets the sender of an Internet
+// socket, `unix_from` the name of an AF_UNIX socket's sender. -1 with the
+// Winsock error set on failure; a datagram cut short sets `truncated`.
+int64_t recv_into(NetSocket& s, WSABUF* bufs, DWORD count, int flags, sockaddr_storage* from, int* from_len,
+                  bool& truncated, std::string* unix_from = nullptr) {
+  truncated = false;
+  if (s.family == lx::kAfUnix && s.type != lx::kSockDgram) {
+    if (unix_from) *unix_from = s.unix_peer;
+    if (s.type == lx::kSockSeqpacket) return seq_recv(s, bufs, count, (flags & MSG_PEEK) != 0, truncated);
+  }
+  bool unix_dgram = s.family == lx::kAfUnix && s.type == lx::kSockDgram;
+  sockaddr_storage source{};
+  int source_len = sizeof source;
+  sockaddr* name = unix_dgram ? reinterpret_cast<sockaddr*>(&source) : reinterpret_cast<sockaddr*>(from);
+  int* name_len = unix_dgram ? &source_len : from_len;
+  size_t total = 0;
+  for (DWORD k = 0; k < count; ++k) total += bufs[k].len;
+  DWORD got = 0, f = DWORD(flags);
+  int64_t n;
+  if (WSARecvFrom(s.handle(), bufs, count, &got, &f, name, name_len, nullptr, nullptr) == SOCKET_ERROR) {
+    if (WSAGetLastError() != WSAEMSGSIZE) return -1;
+    truncated = true;
+    n = int64_t(total);
+  } else {
+    n = int64_t(got);
+  }
+  if (unix_dgram) {
+    std::shared_ptr<NetSocket> sender = unix_by_address(lx::kSockDgram, source);
+    if (!sender) {
+      if (flags & MSG_PEEK) {
+        char c;
+        recv(s.handle(), &c, 1, 0);  // takes the peeked datagram away
+      }
+      WSASetLastError(WSAEWOULDBLOCK);
+      return -1;
+    }
+    if (unix_from) *unix_from = sender->unix_name;
+  }
+  return n;
+}
+
+// One send of `bufs` (to `to` if not null) with the Winsock flags `flags`; a
+// SOCK_SEQPACKET record whole. -1 with the Winsock error set on failure.
+int64_t send_from(Runtime* rt, NetSocket& s, const WSABUF* bufs, DWORD count, int flags, const Endpoint* to = nullptr) {
+  if (s.family == lx::kAfUnix && s.type == lx::kSockSeqpacket) return seq_send(rt, s, bufs, count);
+  DWORD sent = 0;
+  int rc = WSASendTo(s.handle(), const_cast<WSABUF*>(bufs), count, &sent, DWORD(flags),
+                     to ? reinterpret_cast<const sockaddr*>(&to->ss) : nullptr, to ? to->len : 0, nullptr, nullptr);
+  return rc == SOCKET_ERROR ? -1 : int64_t(sent);
+}
+
+WSABUF wsabuf(std::span<const uint8_t> data) {
+  WSABUF w;
+  w.len = ULONG(std::min<size_t>(data.size(), INT32_MAX));
+  w.buf = const_cast<char*>(reinterpret_cast<const char*>(data.data()));
+  return w;
+}
+
+size_t NetSocket::read(uint64_t, std::span<uint8_t> out) {
+  WSABUF w = wsabuf(out);
+  bool truncated = false;
+  int64_t n = recv_into(*this, &w, 1, 0, nullptr, nullptr, truncated);
+  if (n < 0) throw vfs::VfsError{linux_errno(WSAGetLastError()), "read"};
+  return size_t(n);
+}
+
+size_t NetSocket::write(uint64_t, std::span<const uint8_t> data) {
+  WSABUF w = wsabuf(data);
+  int64_t n = send_from(nullptr, *this, &w, 1, 0);
+  if (n < 0) throw vfs::VfsError{linux_errno(WSAGetLastError(), true), "write"};
+  return size_t(n);
+}
+
+// recvmsg(2) into a StructMsghdr: msg_name filled with the sender,
+// msg_flags with MSG_TRUNC for a datagram cut short; no ancillary data.
+// `throwing`: recvmsg (ErrnoException, SocketException when a close is
+// signalled); otherwise recvmsgNoThrow (-errno).
+int32_t recv_message(Runtime& rt, Handle java_fd, Handle msg, int32_t flags, bool throwing) {
+  auto bufs = message_buffers(rt, msg, true);
+  Handle name = field_of(rt, msg, kStructMsghdr, "msg_name", "Ljava/net/SocketAddress;");
+  int32_t fd = fd_of(rt, java_fd);
+  auto s = socket_of(fd);
+  if (!s || s->pipe != NetSocket::Pipe::kNone) {
+    int32_t err = fd < 0 || (fd > 2 && !libcore_vfs().is_open(fd)) ? lx::kEBADF : lx::kENOTSOCK;
+    if (throwing) throw_errno(rt, "recvmsg", err);
+    return -err;
+  }
+  size_t total = 0;
+  for (const WSABUF& w : bufs) total += w.len;
+  sockaddr_storage ss{};
+  int len = sizeof ss;
+  bool truncated = false;
+  std::string unix_from;
+  auto call = [&]() -> int64_t {
+    len = sizeof ss;
+    return recv_into(*s, bufs.data(), DWORD(bufs.size()), win_msg_flags(flags), name != kNull ? &ss : nullptr,
+                     name != kNull ? &len : nullptr, truncated, &unix_from);
+  };
+  bool dontwait = (flags & lx::kMsgDontwait) != 0;
+  int64_t n;
+  if (throwing) {
+    n = retry(rt, *s, fd, "recvmsg", POLLRDNORM, s->rcvtimeo_us, dontwait, false, false, call);
+  } else {
+    int32_t err = 0;
+    n = retry_nothrow(rt, *s, fd, POLLRDNORM, s->rcvtimeo_us, dontwait, false, err, call);
+    if (n < 0) return -err;
+  }
+  if (name != kNull && s->family == lx::kAfUnix) {
+    if (!is_unix_socket_address(rt, name)) {
+      if (throwing) rt.throw_new("Ljava/lang/UnsupportedOperationException;", "unsupported SocketAddress subclass");
+    } else {
+      fill_unix_address(rt, name, unix_from);
+    }
+  } else if (name != kNull) {
+    bool inet = ss.ss_family == AF_INET || ss.ss_family == AF_INET6;
+    if (throwing && !inet) throw_net(rt, "Ljava/net/SocketException;", "unknown socket address type");
+    if (inet) {
+      if (!is_inet_socket_address(rt, name)) {
+        rt.throw_new("Ljava/lang/UnsupportedOperationException;", "unsupported SocketAddress subclass");
+      }
+      fill_inet_socket_address(rt, name, reinterpret_cast<const sockaddr*>(&ss));
+    }
+  }
+  constexpr int32_t kMsgTrunc = 0x20;
+  field_of(rt, msg, kStructMsghdr, "msg_flags", "I") = uint32_t(truncated ? kMsgTrunc : 0);
+  return int32_t(n);
 }
 
 }  // namespace
@@ -1330,9 +1819,10 @@ std::optional<size_t> socket_read(Runtime& rt, int32_t fd, std::span<uint8_t> ou
   auto s = socket_of(fd);
   if (!s) return std::nullopt;
   if (wrong_pipe_end(*s, false)) throw_errno(rt, "read", lx::kEBADF);
-  int len = int(std::min<size_t>(out.size(), INT32_MAX));
+  WSABUF w = wsabuf(out);
+  bool truncated = false;
   return size_t(retry(rt, *s, fd, "read", POLLRDNORM, s->rcvtimeo_us, false, true, false, [&]() -> int64_t {
-    return recv(s->handle(), reinterpret_cast<char*>(out.data()), len, 0);
+    return recv_into(*s, &w, 1, 0, nullptr, nullptr, truncated);
   }));
 }
 
@@ -1340,9 +1830,9 @@ std::optional<size_t> socket_write(Runtime& rt, int32_t fd, std::span<const uint
   auto s = socket_of(fd);
   if (!s) return std::nullopt;
   if (wrong_pipe_end(*s, true)) throw_errno(rt, "write", lx::kEBADF);
-  int len = int(std::min<size_t>(data.size(), INT32_MAX));
+  WSABUF w = wsabuf(data);
   return size_t(retry(rt, *s, fd, "write", POLLWRNORM, s->sndtimeo_us, false, true, true, [&]() -> int64_t {
-    return send(s->handle(), reinterpret_cast<const char*>(data.data()), len, 0);
+    return send_from(&rt, *s, &w, 1, 0);
   }));
 }
 
@@ -1353,9 +1843,10 @@ std::optional<int64_t> socket_read_nothrow(Runtime& rt, int32_t fd, std::span<ui
     err = lx::kEBADF;
     return -1;
   }
-  int len = int(std::min<size_t>(out.size(), INT32_MAX));
+  WSABUF w = wsabuf(out);
+  bool truncated = false;
   return retry_nothrow(rt, *s, fd, POLLRDNORM, s->rcvtimeo_us, false, false, err, [&]() -> int64_t {
-    return recv(s->handle(), reinterpret_cast<char*>(out.data()), len, 0);
+    return recv_into(*s, &w, 1, 0, nullptr, nullptr, truncated);
   });
 }
 
@@ -1500,11 +1991,9 @@ int64_t nio_io(Runtime& rt, NetSocket& s, int32_t fd, std::span<const std::span<
   int64_t n = 0;
   if (!bufs.empty()) {
     n = nio_call(rt, s, fd, reading ? POLLRDNORM : POLLWRNORM, !reading, err, [&]() -> int64_t {
-      DWORD done = 0, flags = 0;
-      int rc = reading ? WSARecv(s.handle(), bufs.data(), DWORD(bufs.size()), &done, &flags, nullptr, nullptr)
-                       : WSASend(s.handle(), bufs.data(), DWORD(bufs.size()), &done, 0, nullptr, nullptr);
-      if (rc == SOCKET_ERROR && reading && WSAGetLastError() == WSAEMSGSIZE) return int64_t(total);
-      return rc == SOCKET_ERROR ? -1 : int64_t(done);
+      bool truncated = false;
+      return reading ? recv_into(s, bufs.data(), DWORD(bufs.size()), 0, nullptr, nullptr, truncated)
+                     : send_from(&rt, s, bufs.data(), DWORD(bufs.size()), 0);
     });
   }
   if (n == kIosThrown) {
@@ -1580,9 +2069,10 @@ int64_t once(int32_t fd, std::span<uint8_t> data, bool sending, int32_t& err) {
       err = lx::kEBADF;
       return -1;
     }
-    int n = sending ? send(s->handle(), reinterpret_cast<const char*>(data.data()), int(data.size()), 0)
-                    : recv(s->handle(), reinterpret_cast<char*>(data.data()), int(data.size()), 0);
-    if (n == SOCKET_ERROR) {
+    WSABUF w = wsabuf(data);
+    bool truncated = false;
+    int64_t n = sending ? send_from(nullptr, *s, &w, 1, 0) : recv_into(*s, &w, 1, 0, nullptr, nullptr, truncated);
+    if (n < 0) {
       err = io_errno(*s, WSAGetLastError(), sending);
       return -1;
     }
@@ -1937,6 +2427,77 @@ void register_nio_net(rt::NativeRegistry& r) {
     r.bind(cls, "initIDs", "()V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
     r.bind(cls, "accept0", "(Ljava/io/FileDescriptor;Ljava/io/FileDescriptor;[Ljava/net/InetSocketAddress;)I", accept0);
   }
+
+  // UnixDomainSockets (UnixDomainSockets.c): the AF_UNIX stream sockets of
+  // SocketChannel and ServerSocketChannel. A name is the sun_path bytes up to
+  // the first NUL (sockaddrToUnixAddressBytes), empty for an unnamed socket.
+  const char* uds = "Lsun/nio/ch/UnixDomainSockets;";
+  auto uds_name = [](const std::string& name) { return name.substr(0, name.find('\0')); };
+  auto uds_path = [](Runtime& rt, Handle path) {
+    if (path == kNull) throw_net(rt, "Ljava/net/SocketException;", "Unix domain path not present");
+    rt::ArrayObject& a = rt.array(path, "byte[]");
+    // MAX_UNIX_DOMAIN_PATH_LEN: room for a NUL at the end and one at the start (abstract names).
+    if (a.length > kSunPathMax - 2) throw_net(rt, "Ljava/net/SocketException;", "Unix domain path too long");
+    return std::string(reinterpret_cast<const char*>(a.data.data()), a.length) + '\0';
+  };
+  r.bind(uds, "init", "()Z", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_bool(true); });
+  r.bind(uds, "socket0", "()I", [](Runtime& rt, NativeArgs&) -> uint64_t {
+    SOCKET h = new_unix_socket(lx::kSockStream);
+    if (h == INVALID_SOCKET) throw_socket_error(rt, linux_errno(WSAGetLastError()));
+    int32_t fd = -1;
+    if (int32_t err = install_fd(std::make_shared<NetSocket>(h, lx::kAfUnix, lx::kSockStream, 0, AF_INET), fd)) {
+      throw_socket_error(rt, err);
+    }
+    return rt::ret_int(fd);
+  });
+  r.bind(uds, "bind0", "(Ljava/io/FileDescriptor;[B)V", [uds_path](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = -1;
+    auto s = nio_socket(rt, a.h(0), fd);
+    std::string sun_path = uds_path(rt, a.h(1));
+    if (s->family != lx::kAfUnix) throw_socket_error(rt, lx::kEINVAL);
+    // An empty path (a single NUL) autobinds, as Linux does for that length.
+    if (int32_t err = unix_bind(s, sun_path == std::string(1, '\0') ? std::string() : sun_path)) throw_socket_error(rt, err);
+    return 0;
+  });
+  r.bind(uds, "connect0", "(Ljava/io/FileDescriptor;[B)I", [uds_path](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = -1;
+    auto s = nio_socket(rt, a.h(0), fd);
+    std::string sun_path = uds_path(rt, a.h(1));
+    if (s->family != lx::kAfUnix) throw_socket_error(rt, lx::kEINVAL);
+    int32_t err = unix_connect(rt, s, fd, sun_path);
+    if (err == kClosedWhileWaiting) return rt::ret_int(kIosInterrupted);
+    if (err == lx::kEAGAIN) return rt::ret_int(kIosUnavailable);
+    if (err) throw_socket_error(rt, err);
+    return rt::ret_int(1);
+  });
+  r.bind(uds, "accept0", "(Ljava/io/FileDescriptor;Ljava/io/FileDescriptor;[Ljava/lang/Object;)I",
+         [uds_name](Runtime& rt, NativeArgs& a) -> uint64_t {
+           int32_t fd = -1;
+           auto s = nio_socket(rt, a.h(0), fd);
+           if (s->family != lx::kAfUnix || !s->unix_listening) throw_io_errno(rt, lx::kEINVAL);
+           std::shared_ptr<NetSocket> peer;
+           SOCKET c = INVALID_SOCKET;
+           int32_t err = 0;
+           int64_t n = nio_call(rt, *s, fd, POLLRDNORM, false, err, [&]() -> int64_t {
+             c = unix_accept(*s, peer);
+             return c == INVALID_SOCKET ? -1 : 0;
+           });
+           if (n == kIosThrown) throw_io_errno(rt, err);
+           if (n < 0) return rt::ret_int(int32_t(n));
+           int32_t newfd = -1;
+           if (int32_t e = install_fd(unix_accepted(c, *s, *peer), newfd)) throw_io_errno(rt, e);
+           set_descriptor(rt, a.h(1), newfd);
+           Handle array = a.h(2);
+           if (array == kNull) rt.throw_npe({});
+           Handle name = unix_bytes(rt, uds_name(peer->unix_name));
+           std::memcpy(rt.array(array, "Object[]").data.data(), &name, 4);
+           return rt::ret_int(1);
+         });
+  r.bind(uds, "localAddress0", "(Ljava/io/FileDescriptor;)[B", [uds_name](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = -1;
+    auto s = nio_socket(rt, a.h(0), fd);
+    return unix_bytes(rt, uds_name(s->unix_name));
+  });
   // checkConnect(fd, block, ready): 1 once connected, the connection's error
   // thrown, IOS_UNAVAILABLE while a non-blocking one is pending.
   r.bind("Lsun/nio/ch/SocketChannelImpl;", "checkConnect", "(Ljava/io/FileDescriptor;ZZ)I",
@@ -2469,8 +3030,21 @@ void register_libcore_net(rt::NativeRegistry& r) {
   r.bind(lxc, "socket", "(III)Ljava/io/FileDescriptor;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t domain = a.i32(1), type = a.i32(2), protocol = a.i32(3);
     int32_t base = type & ~(lx::kSockNonblock | lx::kSockCloexec);
+    // AF_UNIX (unix_create): no INTERNET permission needed; SOCK_RAW is SOCK_DGRAM.
+    if (domain == lx::kAfUnix) {
+      if (protocol != 0 && protocol != lx::kAfUnix) throw_errno(rt, "socket", lx::kEPROTONOSUPPORT);
+      if (base == lx::kSockRaw) base = lx::kSockDgram;
+      if (base != lx::kSockStream && base != lx::kSockDgram && base != lx::kSockSeqpacket) {
+        throw_errno(rt, "socket", lx::kESOCKTNOSUPPORT);
+      }
+      SOCKET h = new_unix_socket(base);
+      if (h == INVALID_SOCKET) throw_errno(rt, "socket", linux_errno(WSAGetLastError()));
+      auto sock = std::make_shared<NetSocket>(h, lx::kAfUnix, base, 0, AF_INET);
+      sock->nonblocking = (type & lx::kSockNonblock) != 0;
+      return install_socket(rt, std::move(sock), "socket");
+    }
     int af = win_family(domain);
-    if (af < 0 || af == AF_UNSPEC) throw_errno(rt, "socket", lx::kEAFNOSUPPORT);  // AF_UNIX, netlink, packet
+    if (af < 0 || af == AF_UNSPEC) throw_errno(rt, "socket", lx::kEAFNOSUPPORT);  // netlink, packet
     if (!libcore_config().internet) throw_errno(rt, "socket", lx::kEACCES);
     if (base == lx::kSockRaw) throw_errno(rt, "socket", lx::kEPERM);  // no CAP_NET_RAW for applications
     if (base != lx::kSockStream && base != lx::kSockDgram) throw_errno(rt, "socket", lx::kESOCKTNOSUPPORT);
@@ -2484,20 +3058,34 @@ void register_libcore_net(rt::NativeRegistry& r) {
     auto sock = std::make_shared<NetSocket>(s, domain, base, protocol, af);
     sock->nonblocking = (type & lx::kSockNonblock) != 0;
     return install_socket(rt, std::move(sock), "socket");
-  }, S::kPartial, "AF_INET et AF_INET6 (TCP, UDP) sur Winsock ; ni AF_UNIX, ni netlink, ni socket brut");
+  }, S::kPartial, "AF_INET et AF_INET6 (TCP, UDP) sur Winsock, AF_UNIX émulé ; ni netlink, ni socket brut");
+  // An Internet address given to an AF_UNIX socket: EINVAL (unix_bind and
+  // unix_mkname check sun_family).
   r.bind(lxc, "bind", "(Ljava/io/FileDescriptor;Ljava/net/InetAddress;I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto s = socket_arg(rt, a.h(1), "bind");
+    if (s->family == lx::kAfUnix) throw_errno(rt, "bind", lx::kEINVAL);
     do_bind(rt, *s, endpoint_for(rt, *s, a.h(2), a.i32(3), "bind"));
     return 0;
   });
   r.bind(lxc, "bind", "(Ljava/io/FileDescriptor;Ljava/net/SocketAddress;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto s = socket_arg(rt, a.h(1), "bind");
+    if (s->family == lx::kAfUnix) {
+      if (a.h(2) == kNull) rt.throw_npe({});
+      if (!is_unix_socket_address(rt, a.h(2))) throw_errno(rt, "bind", lx::kEINVAL);
+      if (int32_t err = unix_bind(s, unix_sun_path(rt, a.h(2)))) throw_errno(rt, "bind", err);
+      return 0;
+    }
     do_bind(rt, *s, socket_address_arg(rt, *s, a.h(2), "bind"));
     return 0;
   });
   r.bind(lxc, "listen", "(Ljava/io/FileDescriptor;I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto s = socket_arg(rt, a.h(1), "listen");
+    if (s->family == lx::kAfUnix) {  // unix_listen: no datagrams, no unbound socket
+      if (s->type == lx::kSockDgram) throw_errno(rt, "listen", lx::kEOPNOTSUPP);
+      if (s->unix_name.empty()) throw_errno(rt, "listen", lx::kEINVAL);
+    }
     if (listen(s->handle(), std::max(a.i32(2), 0)) == SOCKET_ERROR) throw_errno(rt, "listen", linux_errno(WSAGetLastError()));
+    s->unix_listening = s->family == lx::kAfUnix;
     return 0;
   });
   // The accepted socket is blocking (accept, not accept4), its peer's
@@ -2505,6 +3093,23 @@ void register_libcore_net(rt::NativeRegistry& r) {
   r.bind(lxc, "accept", "(Ljava/io/FileDescriptor;Ljava/net/SocketAddress;)Ljava/io/FileDescriptor;",
          [](Runtime& rt, NativeArgs& a) -> uint64_t {
            auto s = socket_arg(rt, a.h(1), "accept");
+           if (s->family == lx::kAfUnix) {
+             if (!s->unix_listening) throw_errno(rt, "accept", lx::kEINVAL);
+             std::shared_ptr<NetSocket> peer;
+             SOCKET c = INVALID_SOCKET;
+             retry(rt, *s, fd_of(rt, a.h(1)), "accept", POLLRDNORM, s->rcvtimeo_us, false, false, false, [&]() -> int64_t {
+               c = unix_accept(*s, peer);
+               return c == INVALID_SOCKET ? -1 : 0;
+             });
+             auto sock = unix_accepted(c, *s, *peer);
+             if (Handle address = a.h(2); address != kNull) {
+               if (!is_unix_socket_address(rt, address)) {
+                 rt.throw_new("Ljava/lang/IllegalArgumentException;", "sockaddrToInetAddress unsupported ss_family: 1");
+               }
+               fill_unix_address(rt, address, peer->unix_name);
+             }
+             return install_socket(rt, std::move(sock), "accept");
+           }
            sockaddr_storage ss{};
            int len = sizeof ss;
            SOCKET client = INVALID_SOCKET;
@@ -2526,11 +3131,20 @@ void register_libcore_net(rt::NativeRegistry& r) {
          });
   r.bind(lxc, "connect", "(Ljava/io/FileDescriptor;Ljava/net/InetAddress;I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto s = socket_arg(rt, a.h(1), "connect");
+    if (s->family == lx::kAfUnix) throw_errno(rt, "connect", lx::kEINVAL);
     do_connect(rt, *s, fd_of(rt, a.h(1)), endpoint_for(rt, *s, a.h(2), a.i32(3), "connect"));
     return 0;
   });
   r.bind(lxc, "connect", "(Ljava/io/FileDescriptor;Ljava/net/SocketAddress;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     auto s = socket_arg(rt, a.h(1), "connect");
+    if (s->family == lx::kAfUnix) {
+      if (a.h(2) == kNull) rt.throw_npe({});
+      if (!is_unix_socket_address(rt, a.h(2))) throw_errno(rt, "connect", lx::kEINVAL);
+      int32_t err = unix_connect(rt, s, fd_of(rt, a.h(1)), unix_sun_path(rt, a.h(2)));
+      if (err == kClosedWhileWaiting) throw_closed(rt, false, "connect");
+      if (err) throw_errno(rt, "connect", err);
+      return 0;
+    }
     do_connect(rt, *s, fd_of(rt, a.h(1)), socket_address_arg(rt, *s, a.h(2), "connect"));
     return 0;
   });
@@ -2554,15 +3168,14 @@ void register_libcore_net(rt::NativeRegistry& r) {
     sockaddr_storage ss{};
     int len = sizeof ss;
     int size = int(std::min<size_t>(buf.size(), INT32_MAX));
+    WSABUF w = wsabuf(std::span<const uint8_t>(buf.data(), size_t(size)));
     int64_t n = retry(rt, *s, fd_of(rt, a.h(1)), "recvfrom", POLLRDNORM, s->rcvtimeo_us, (flags & lx::kMsgDontwait) != 0, false, false,
                       [&]() -> int64_t {
-                        len = sizeof ss;
-                        int got = recvfrom(s->handle(), reinterpret_cast<char*>(buf.data()), size, win_msg_flags(flags),
-                                           from != kNull ? reinterpret_cast<sockaddr*>(&ss) : nullptr,
-                                           from != kNull ? &len : nullptr);
                         // A datagram longer than the buffer: Linux returns what fits.
-                        if (got == SOCKET_ERROR && WSAGetLastError() == WSAEMSGSIZE) return size;
-                        return got;
+                        len = sizeof ss;
+                        bool truncated = false;
+                        return recv_into(*s, &w, 1, win_msg_flags(flags), from != kNull ? &ss : nullptr,
+                                         from != kNull ? &len : nullptr, truncated);
                       });
     if (from != kNull && (ss.ss_family == AF_INET || ss.ss_family == AF_INET6)) {
       fill_inet_socket_address(rt, from, reinterpret_cast<const sockaddr*>(&ss));
@@ -2573,18 +3186,16 @@ void register_libcore_net(rt::NativeRegistry& r) {
   auto send_to = [](Runtime& rt, NetSocket& s, NativeArgs& a, const Endpoint* to) -> uint64_t {
     auto buf = extract_io_buffer(rt, a.h(2), a.i32(3), a.i32(4), false);
     int32_t flags = a.i32(5);
-    int size = int(std::min<size_t>(buf.size(), INT32_MAX));
+    WSABUF w = wsabuf(buf);
     int64_t n = retry(rt, s, fd_of(rt, a.h(1)), "sendto", POLLWRNORM, s.sndtimeo_us, (flags & lx::kMsgDontwait) != 0, false, true,
-                      [&]() -> int64_t {
-                        return sendto(s.handle(), reinterpret_cast<const char*>(buf.data()), size, win_msg_flags(flags),
-                                      to ? reinterpret_cast<const sockaddr*>(&to->ss) : nullptr, to ? to->len : 0);
-                      });
+                      [&]() -> int64_t { return send_from(&rt, s, &w, 1, win_msg_flags(flags), to); });
     return rt::ret_int(int32_t(n));
   };
   r.bind(lxc, "sendtoBytes", "(Ljava/io/FileDescriptor;Ljava/lang/Object;IIILjava/net/InetAddress;I)I",
          [send_to](Runtime& rt, NativeArgs& a) -> uint64_t {
            auto s = socket_arg(rt, a.h(1), "sendto");
            if (a.h(6) == kNull) return send_to(rt, *s, a, nullptr);
+           if (s->family == lx::kAfUnix) throw_errno(rt, "sendto", lx::kEINVAL);
            Endpoint to = endpoint_for(rt, *s, a.h(6), a.i32(7), "sendto");
            return send_to(rt, *s, a, &to);
          });
@@ -2592,7 +3203,8 @@ void register_libcore_net(rt::NativeRegistry& r) {
          [send_to](Runtime& rt, NativeArgs& a) -> uint64_t {
            auto s = socket_arg(rt, a.h(1), "sendto");
            if (a.h(6) == kNull) return send_to(rt, *s, a, nullptr);
-           Endpoint to = socket_address_arg(rt, *s, a.h(6), "sendto");
+           Endpoint to = s->family == lx::kAfUnix ? unix_destination(rt, s, a.h(6), "sendto")
+                                                  : socket_address_arg(rt, *s, a.h(6), "sendto");
            return send_to(rt, *s, a, &to);
          });
 
@@ -2818,22 +3430,31 @@ void register_libcore_net(rt::NativeRegistry& r) {
     if (a.h(5) == kNull) rt.throw_npe("null fd2");
     int32_t domain = a.i32(1), type = a.i32(2) & ~(lx::kSockNonblock | lx::kSockCloexec);
     if (domain != lx::kAfUnix) throw_errno(rt, "socketpair", lx::kEOPNOTSUPP);
-    if (type != lx::kSockStream && type != lx::kSockDgram) throw_errno(rt, "socketpair", lx::kESOCKTNOSUPPORT);
+    if (type == lx::kSockRaw) type = lx::kSockDgram;
+    if (type != lx::kSockStream && type != lx::kSockDgram && type != lx::kSockSeqpacket) {
+      throw_errno(rt, "socketpair", lx::kESOCKTNOSUPPORT);
+    }
     ensure_winsock();
-    auto [one, two] = loopback_pair(type == lx::kSockStream ? SOCK_STREAM : SOCK_DGRAM);
+    auto [one, two] = loopback_pair(type == lx::kSockDgram ? SOCK_DGRAM : SOCK_STREAM);
     if (one == INVALID_SOCKET) throw_errno(rt, "socketpair", linux_errno(WSAGetLastError()));
     auto first = std::make_shared<NetSocket>(one, lx::kAfUnix, type, 0, AF_INET);
     auto second = std::make_shared<NetSocket>(two, lx::kAfUnix, type, 0, AF_INET);
     bool nonblocking = (a.i32(2) & lx::kSockNonblock) != 0;
-    first->nonblocking = nonblocking;
-    second->nonblocking = nonblocking;
+    for (const auto& sock : {first, second}) {
+      unix_attach(sock);  // known ports: their datagrams are the process's own
+      sock->nonblocking = nonblocking;
+      sock->unix_connected = true;  // unnamed, connected to each other
+      int size = kUnixBuffer;
+      setsockopt(sock->handle(), SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&size), sizeof size);
+      setsockopt(sock->handle(), SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&size), sizeof size);
+    }
     for (auto [java_fd, sock] : {std::pair{a.h(4), first}, std::pair{a.h(5), second}}) {
       Handle made = install_socket(rt, sock, "socketpair");
       rt::Field* f = find_field(rt.class_of(made), "descriptor", "I");
       field_of(rt, java_fd, "Ljava/io/FileDescriptor;", "descriptor", "I") = rt.object(made)->fields.at(f->slot);
     }
     return 0;
-  }, S::kPartial, "AF_UNIX émulé par deux sockets TCP (ou UDP) de la boucle locale");
+  }, S::kPartial, "AF_UNIX émulé par deux sockets TCP (ou UDP) de la boucle locale (sans SCM_RIGHTS)");
 
   // pipe2(flags): O_NONBLOCK and O_CLOEXEC (no exec here), O_DIRECT ignored.
   r.bind(lxc, "pipe2", "(I)[Ljava/io/FileDescriptor;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
@@ -3021,14 +3642,13 @@ void register_libcore_net(rt::NativeRegistry& r) {
     }
     sockaddr_storage ss{};
     int len = sizeof ss;
-    int size = int(std::min<size_t>(buf.size(), INT32_MAX));
+    WSABUF w = wsabuf(buf);
     int32_t err = 0;
     int64_t n = retry_nothrow(rt, *s, fd, POLLRDNORM, s->rcvtimeo_us, (flags & lx::kMsgDontwait) != 0, false, err, [&]() -> int64_t {
       len = sizeof ss;
-      int got = recvfrom(s->handle(), reinterpret_cast<char*>(buf.data()), size, win_msg_flags(flags),
-                         from != kNull ? reinterpret_cast<sockaddr*>(&ss) : nullptr, from != kNull ? &len : nullptr);
-      if (got == SOCKET_ERROR && WSAGetLastError() == WSAEMSGSIZE) return size;
-      return got;
+      bool truncated = false;
+      return recv_into(*s, &w, 1, win_msg_flags(flags), from != kNull ? &ss : nullptr, from != kNull ? &len : nullptr,
+                       truncated);
     });
     if (n < 0) return rt::ret_int(-err);
     if (from != kNull && (ss.ss_family == AF_INET || ss.ss_family == AF_INET6)) {
@@ -3052,16 +3672,15 @@ void register_libcore_net(rt::NativeRegistry& r) {
     }
     Handle name = field_of(rt, msg, "Landroid/system/StructMsghdr;", "msg_name", "Ljava/net/SocketAddress;");
     Endpoint to;
-    if (name != kNull) to = socket_address_arg(rt, *s, name, "sendmsg");
+    if (name != kNull) {
+      to = s->family == lx::kAfUnix ? unix_destination(rt, s, name, "sendmsg") : socket_address_arg(rt, *s, name, "sendmsg");
+    }
     int32_t flags = a.i32(3);
     int32_t fd = fd_of(rt, a.h(1));
     int64_t n = retry(rt, *s, fd, "sendmsg", POLLWRNORM, s->sndtimeo_us, (flags & lx::kMsgDontwait) != 0, false, true,
                       [&]() -> int64_t {
-                        DWORD sent = 0;
-                        int rc = WSASendTo(s->handle(), bufs.data(), DWORD(bufs.size()), &sent, DWORD(win_msg_flags(flags)),
-                                           name != kNull ? reinterpret_cast<const sockaddr*>(&to.ss) : nullptr,
-                                           name != kNull ? to.len : 0, nullptr, nullptr);
-                        return rc == SOCKET_ERROR ? -1 : int64_t(sent);
+                        return send_from(&rt, *s, bufs.data(), DWORD(bufs.size()), win_msg_flags(flags),
+                                         name != kNull ? &to : nullptr);
                       });
     return rt::ret_int(int32_t(n));
   }, S::kPartial, "sans message de contrôle");

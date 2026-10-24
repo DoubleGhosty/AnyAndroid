@@ -29,7 +29,8 @@ constexpr size_t kMaxName = 255;
 // Timestamp of the files of an Android system image (2009-01-01, as built).
 constexpr int64_t kImageTime = 1230768000;
 
-constexpr uint32_t kIfReg = 0100000, kIfDir = 040000, kIfLnk = 0120000, kIfChr = 020000;
+constexpr uint32_t kIfReg = 0100000, kIfDir = 040000, kIfLnk = 0120000, kIfChr = 020000, kIfSock = 0140000,
+                   kIfFifo = 010000;
 
 std::vector<std::string> components(std::string_view path) {
   std::vector<std::string> out;
@@ -576,26 +577,41 @@ uint32_t host_attributes(const std::filesystem::path& p) {
 #endif
 }
 
-// Symbolic links made in host areas: a host file with the SYSTEM attribute
-// whose content is kLinkMagic then the target, as Cygwin stores them. NTFS's
-// own links need a privilege, and host areas never follow reparse points.
-constexpr char kLinkMagic[] = "!<symlink>";
-constexpr size_t kLinkMagicLen = sizeof kLinkMagic - 1;
+// Nodes made in host areas that Windows lacks (symbolic links, sockets,
+// FIFOs): a host file with the SYSTEM attribute whose content is the node's
+// marker then its data, as Cygwin stores symbolic links. NTFS's own links need
+// a privilege, and host areas never follow reparse points.
+struct NodeMarker {
+  NodeType type;
+  std::string_view magic;
+};
+constexpr NodeMarker kNodeMarkers[] = {
+    {NodeType::kSymlink, "!<symlink>"}, {NodeType::kSocket, "!<socket>"}, {NodeType::kFifo, "!<fifo>"}};
+constexpr size_t kMaxMagic = 10;
 
-// The target stored in `p`, nullopt if `p` is not such a link.
-std::optional<std::string> host_link_target(const std::filesystem::path& p) {
+struct HostNode {
+  NodeType type;
+  std::string data;
+};
+
+// The node stored in `p`, nullopt for an ordinary file.
+std::optional<HostNode> host_node(const std::filesystem::path& p) {
 #ifdef _WIN32
   HANDLE h = CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                          OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
   if (h == INVALID_HANDLE_VALUE) return std::nullopt;
-  std::string data(kLinkMagicLen + kMaxPath, '\0');  // a target is shorter than PATH_MAX
+  std::string data(kMaxMagic + kMaxPath, '\0');  // data is shorter than PATH_MAX
   DWORD got = 0;
   bool ok = ReadFile(h, data.data(), DWORD(data.size()), &got, nullptr);
   CloseHandle(h);
-  if (!ok || got <= kLinkMagicLen || got >= data.size() || data.compare(0, kLinkMagicLen, kLinkMagic) != 0) {
-    return std::nullopt;
+  if (!ok || got >= data.size()) return std::nullopt;
+  data.resize(got);
+  for (const NodeMarker& m : kNodeMarkers) {
+    if (data.size() > m.magic.size() && data.compare(0, m.magic.size(), m.magic) == 0) {
+      return HostNode{m.type, data.substr(m.magic.size())};
+    }
   }
-  return data.substr(kLinkMagicLen, got - kLinkMagicLen);
+  return std::nullopt;
 #else
   (void)p;
   return std::nullopt;
@@ -629,10 +645,14 @@ class HostMount final : public Mount {
       v.type = NodeType::kDirectory;
       v.mode = kIfDir | (read_only_ ? 0755 : 0771);
       v.nlink = 2;
-    } else if (auto target = (attrs & kAttrSystem) ? host_link_target(p) : std::nullopt) {
-      v.type = NodeType::kSymlink;
-      v.mode = kIfLnk | 0777;
-      v.size = target->size();
+    } else if (auto node = (attrs & kAttrSystem) ? host_node(p) : std::nullopt) {
+      v.type = node->type;
+      if (node->type == NodeType::kSymlink) {
+        v.mode = kIfLnk | 0777;
+        v.size = node->data.size();
+      } else {
+        v.mode = (node->type == NodeType::kSocket ? kIfSock : kIfFifo) | 0660;
+      }
     } else {
       v.type = NodeType::kFile;
       v.mode = kIfReg | (read_only_ ? 0644 : 0660);
@@ -645,9 +665,13 @@ class HostMount final : public Mount {
     auto st = lstat(rel);
     if (!st) throw VfsError{kENOENT, rel};
     if (st->type != NodeType::kSymlink) throw VfsError{kEINVAL, rel};
-    auto target = host_link_target(host(rel));
-    if (!target) throw VfsError{kENOENT, rel};  // removed in between
-    return *target;
+    return node_of(rel).data;
+  }
+  std::string node_data(const std::string& rel) override {
+    auto st = lstat(rel);
+    if (!st) throw VfsError{kENOENT, rel};
+    if (st->type != NodeType::kSocket && st->type != NodeType::kFifo) throw VfsError{kEINVAL, rel};
+    return node_of(rel).data;
   }
   std::vector<std::string> list(const std::string& rel) override {
     auto st = lstat(rel);
@@ -670,6 +694,8 @@ class HostMount final : public Mount {
     if (st && (flags & kO_CREAT) && (flags & kO_EXCL)) throw VfsError{kEEXIST, rel};
     if (!st && !(flags & kO_CREAT)) throw VfsError{kENOENT, rel};
     if (st && st->type == NodeType::kSymlink) throw VfsError{kELOOP, rel};  // the Vfs follows links
+    // A socket cannot be opened (connect to it); FIFOs are opened by the Vfs.
+    if (st && (st->type == NodeType::kSocket || st->type == NodeType::kFifo)) throw VfsError{kENXIO, rel};
     if (st && st->type == NodeType::kDirectory) {
       if (acc != kO_RDONLY) throw VfsError{kEISDIR, rel};
       VStat dir = *st;
@@ -753,8 +779,13 @@ class HostMount final : public Mount {
         std::chrono::system_clock::time_point(std::chrono::seconds(seconds)));
     std::filesystem::last_write_time(host(rel), t, ec);
   }
-  void symlink(const std::string& rel, const std::string& target) override {
+  void mknod(const std::string& rel, NodeType type, const std::string& data) override {
     if (read_only_) throw VfsError{kEROFS, rel};
+    const NodeMarker* marker = nullptr;
+    for (const NodeMarker& m : kNodeMarkers) {
+      if (m.type == type) marker = &m;
+    }
+    if (!marker || data.empty()) throw VfsError{kEINVAL, rel};
 #ifdef _WIN32
     std::filesystem::path p = host(rel);
     HANDLE h = CreateFileW(p.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
@@ -763,21 +794,25 @@ class HostMount final : public Mount {
       DWORD e = GetLastError();
       throw VfsError{e == ERROR_FILE_EXISTS ? kEEXIST : host_errno(e), rel};
     }
-    std::string data = kLinkMagic + target;
+    std::string content = std::string(marker->magic) + data;
     DWORD done = 0;
-    bool ok = WriteFile(h, data.data(), DWORD(data.size()), &done, nullptr) && done == data.size();
+    bool ok = WriteFile(h, content.data(), DWORD(content.size()), &done, nullptr) && done == content.size();
     CloseHandle(h);
     if (!ok) {
       DeleteFileW(p.c_str());
       throw VfsError{kENOSPC, rel};
     }
 #else
-    (void)target;
     throw VfsError{kEIO, rel};
 #endif
   }
 
  private:
+  HostNode node_of(const std::string& rel) const {
+    auto node = host_node(host(rel));
+    if (!node) throw VfsError{kENOENT, rel};  // replaced in between
+    return *node;
+  }
   std::filesystem::path host(const std::string& rel) const {
     std::filesystem::path p = root_;
     for (const auto& c : components(rel)) {
@@ -1111,7 +1146,23 @@ void Vfs::symlink(std::string_view target, std::string_view path) {
   std::string p = resolve(path, false);
   check_new_name(p);
   Located l = locate(p);
-  l.mount->symlink(l.rel, std::string(target));
+  l.mount->mknod(l.rel, NodeType::kSymlink, std::string(target));
+}
+
+void Vfs::mknod(std::string_view path, NodeType type, std::string_view data) {
+  if (type != NodeType::kSocket && type != NodeType::kFifo) throw VfsError{kEINVAL, std::string(path)};
+  std::string p = resolve(path, false);
+  check_new_name(p);
+  Located l = locate(p);
+  l.mount->mknod(l.rel, type, std::string(data));
+}
+
+std::pair<NodeType, std::string> Vfs::node(std::string_view path) {
+  std::string p = resolve(path);
+  NodeType type = stat(p).type;
+  if (type != NodeType::kSocket && type != NodeType::kFifo) return {type, {}};
+  Located l = locate(p);
+  return {type, l.mount->node_data(l.rel)};
 }
 
 void Vfs::link(std::string_view from, std::string_view to) {

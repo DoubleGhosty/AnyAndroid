@@ -1466,6 +1466,42 @@ TEST(vfs_symbolic_and_hard_links_in_host_areas) {
   std::filesystem::remove_all(root);
 }
 
+// Socket nodes (bind of an AF_UNIX socket to a path) and FIFO nodes (mkfifo)
+// are kept in host areas with an identity of the emulator's own.
+TEST(vfs_socket_and_fifo_nodes) {
+  auto root = fresh_dir("vfs-nodes");
+  vfs::LayoutOptions lo;
+  lo.data_root = root;
+  lo.package = "com.example.app";
+  auto v = vfs::make_android_vfs(lo);
+  const std::string d = "/data/data/com.example.app/";
+
+  v->mknod(d + "sock", vfs::NodeType::kSocket, "id-1");
+  v->mknod(d + "fifo", vfs::NodeType::kFifo, "id-2");
+  CHECK(v->stat(d + "sock").type == vfs::NodeType::kSocket);
+  CHECK_EQ(v->stat(d + "sock").mode, uint32_t(0140660));
+  CHECK_EQ(v->stat(d + "fifo").mode, uint32_t(010660));
+  CHECK_EQ(v->stat(d + "fifo").size, uint64_t(0));
+  v->symlink("sock", d + "vers-sock");
+  auto [type, data] = v->node(d + "vers-sock");
+  CHECK(type == vfs::NodeType::kSocket);
+  CHECK_EQ(data, std::string("id-1"));
+  CHECK_EQ(v->node(d + "fifo").second, std::string("id-2"));
+  CHECK(v->node(d).first == vfs::NodeType::kDirectory);
+  CHECK_EQ(vfs_errno([&] { v->node(d + "absent"); }), vfs::kENOENT);
+  CHECK_EQ(vfs_errno([&] { v->open(d + "sock", vfs::kO_RDWR, 0); }), vfs::kENXIO);
+  CHECK_EQ(vfs_errno([&] { v->mknod(d + "sock", vfs::NodeType::kSocket, "id-3"); }), vfs::kEEXIST);
+  CHECK_EQ(vfs_errno([&] { v->mknod(d + "f", vfs::NodeType::kFile, "x"); }), vfs::kEINVAL);
+  CHECK_EQ(vfs_errno([&] { v->readlink(d + "sock"); }), vfs::kEINVAL);
+  CHECK_EQ(vfs_errno([&] { v->mknod("/sock", vfs::NodeType::kSocket, "id"); }), vfs::kEROFS);
+  v->rename(d + "sock", d + "sock2");
+  CHECK_EQ(v->node(d + "sock2").second, std::string("id-1"));
+  v->unlink(d + "sock2");
+  v->unlink(d + "fifo");
+  CHECK(!v->exists(d + "sock2"));
+  std::filesystem::remove_all(root);
+}
+
 // SQLite, AtomicFile and SharedPreferences delete or replace files that are
 // still open, as Linux allows: the name changes at once, open descriptors keep
 // the file they had. Windows's default (delete pending until the last handle
