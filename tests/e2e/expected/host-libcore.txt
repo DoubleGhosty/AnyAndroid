@@ -42,6 +42,8 @@ Thread.sleep(Duration) : au moins 5 ms : true
 pile du fil courant : dalvik.system.VMStack.getThreadStackTrace (natif), java.lang.Thread.getStackTrace, main présent true
 pile d'un autre fil : java.lang.Object.wait (natif), toutes les piles : fil courant true, attente true, après la fin 0
 Thread(groupe, cible, nom, pile, héritage) : fil-5 null, priorité 10, TERMINATED, groupe nul true, fil ordinaire hérité
+InMemoryDexClassLoader, tampon du tas : Abx par InMemoryDexClassLoader, même chargeur true, main [class [Ljava.lang.String;]
+InMemoryDexClassLoader, tampon direct : AppWidget par InMemoryDexClassLoader, même chargeur true, main [class [Ljava.lang.String;]
 Character hors ASCII : true true 12 -2 true true true 453 true true 26
 noms de caractères : <control-0000> ; LATIN SMALL LETTER E WITH ACUTE ; 945
 casse selon la langue : İ 1 οδος STRASSE

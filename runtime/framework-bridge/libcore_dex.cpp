@@ -16,8 +16,10 @@
 
 #include <algorithm>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <span>
 #include <stdexcept>
@@ -27,6 +29,7 @@
 #include "apk-inspector/zip_reader.h"
 #include "common/text.h"
 #include "framework-bridge/handles.h"
+#include "framework-bridge/native_memory.h"
 
 namespace aa::bridge {
 
@@ -217,6 +220,15 @@ Lookup find_in_loader_chain(Runtime& rt, const std::string& descriptor, Handle l
   return {true, nullptr};
 }
 
+// A cookie (DexFile.mCookie): a long[] whose element 1 is the DexSet handle.
+Handle cookie_for(Runtime& rt, std::shared_ptr<DexSet> set) {
+  if (tables().sets.live() >= kMaxDexSets) rt.throw_new("Ljava/io/IOException;", "[AnyAndroid] trop de DexFile ouverts");
+  int64_t h = tables().sets.add(std::move(set));
+  Handle cookie = rt.new_array("[J", 2);
+  std::memcpy(rt.array(cookie, "cookie").data.data() + 8, &h, 8);
+  return cookie;
+}
+
 Handle open_dex_file(Runtime& rt, NativeArgs& a) {
   if (a.h(0) == kNull) rt.throw_npe("sourceName");
   std::string path = rt.string_utf8(a.h(0));
@@ -244,15 +256,210 @@ Handle open_dex_file(Runtime& rt, NativeArgs& a) {
     rt.throw_new("Ljava/io/IOException;", "Failed to open dex files from " + path + " because: " + e.what());
   }
   if (set->files.empty()) rt.throw_new("Ljava/io/IOException;", "No original dex files found for dex location " + path);
-  if (tables().sets.live() >= kMaxDexSets) rt.throw_new("Ljava/io/IOException;", "[AnyAndroid] trop de DexFile ouverts");
-  int64_t h = tables().sets.add(set);
-  Handle cookie = rt.new_array("[J", 2);
-  std::memcpy(rt.array(cookie, "cookie").data.data() + 8, &h, 8);
-  return cookie;
+  return cookie_for(rt, set);
+}
+
+// DexFile_openInMemoryDexFilesNative: each DEX is copied from a byte array or
+// a direct ByteBuffer, between its start and end.
+Handle open_in_memory_dex_files(Runtime& rt, NativeArgs& a) {
+  auto element = [&](Handle array, uint32_t i) {
+    Handle h;
+    std::memcpy(&h, &rt.array(array, "Object[]").data[size_t(i) * 4], 4);
+    return h;
+  };
+  auto int_at = [&](Handle array, uint32_t i) {
+    int32_t v;
+    std::memcpy(&v, &rt.array(array, "int[]").data[size_t(i) * 4], 4);
+    return v;
+  };
+  for (int i = 0; i < 4; ++i) {
+    if (a.h(i) == kNull) rt.throw_npe({});
+  }
+  uint32_t count = rt.array(a.h(0), "ByteBuffer[]").length;
+  for (int i = 1; i < 4; ++i) {
+    if (rt.array(a.h(i), "array").length != count) rt.throw_new("Ljava/lang/IllegalArgumentException;", "longueurs incohérentes");
+  }
+  auto set = std::make_shared<DexSet>();
+  for (uint32_t i = 0; i < count; ++i) {
+    int32_t start = int_at(a.h(2), i), end = int_at(a.h(3), i);
+    if (end <= start) rt.throw_new("Ljava/io/IOException;", "Bad range");  // AllocateDexMemoryMap
+    std::vector<uint8_t> bytes(size_t(end - start));
+    if (Handle array = element(a.h(1), i); array != kNull) {
+      rt::ArrayObject& arr = rt.array(array, "byte[]");
+      if (start < 0 || uint32_t(end) > arr.length) {  // GetByteArrayRegion
+        rt.throw_new("Ljava/lang/ArrayIndexOutOfBoundsException;", "length=" + std::to_string(arr.length) +
+                                                                        "; regionStart=" + std::to_string(start) +
+                                                                        "; regionLength=" + std::to_string(end - start));
+      }
+      std::memcpy(bytes.data(), arr.data.data() + start, bytes.size());
+    } else {
+      Handle buffer = element(a.h(0), i);
+      rt::Field* address = buffer != kNull ? find_field(rt.class_of(buffer), "address", "J") : nullptr;
+      int64_t base = 0;
+      if (address) {
+        rt::Object& o = *rt.object(buffer);
+        base = int64_t(uint64_t(o.fields.at(address->slot)) | (uint64_t(o.fields.at(address->slot + 1)) << 32));
+      }
+      if (base == 0) rt.throw_new("Ljava/io/IOException;", "dexFileBuffer not direct");  // GetDirectBufferAddress
+      std::span<uint8_t> src = native_span(rt, base + start, bytes.size());
+      std::memcpy(bytes.data(), src.data(), bytes.size());
+    }
+    // OatFileManager names in-memory DEX files after their memory.
+    std::string location = "Anonymous-DexFile@" + std::to_string(i);
+    try {
+      add_dex_bytes(rt, *set, std::move(bytes), location);
+    } catch (const std::exception& e) {
+      rt.throw_new("Ljava/io/IOException;", "Failed to open dex files from memory: " + std::string(e.what()));
+    }
+  }
+  if (set->files.empty()) rt.throw_new("Ljava/io/IOException;", "No dex files in memory");
+  return cookie_for(rt, set);
+}
+
+// libartbase/base/compiler_filter.cc: the filters, in their order of quality.
+enum class Filter { kAssumeVerified, kVerify, kSpaceProfile, kSpace, kSpeedProfile, kSpeed, kEverythingProfile, kEverything };
+
+std::optional<Filter> parse_compiler_filter(const std::string& s) {
+  static const std::map<std::string, Filter, std::less<>> kNames = {
+      {"verify-none", Filter::kAssumeVerified}, {"interpret-only", Filter::kVerify},  // obsolete names
+      {"verify-profile", Filter::kVerify},      {"verify-at-runtime", Filter::kVerify},
+      {"balanced", Filter::kSpeed},             {"time", Filter::kSpace},
+      {"extract", Filter::kVerify},             {"quicken", Filter::kVerify},
+      {"assume-verified", Filter::kAssumeVerified}, {"verify", Filter::kVerify},
+      {"space", Filter::kSpace},                {"space-profile", Filter::kSpaceProfile},
+      {"speed", Filter::kSpeed},                {"speed-profile", Filter::kSpeedProfile},
+      {"everything", Filter::kEverything},      {"everything-profile", Filter::kEverythingProfile},
+  };
+  auto it = kNames.find(s);
+  if (it == kNames.end()) return std::nullopt;
+  return it->second;
+}
+
+const char* filter_name(Filter f) {
+  switch (f) {
+    case Filter::kAssumeVerified: return "assume-verified";
+    case Filter::kVerify: return "verify";
+    case Filter::kSpaceProfile: return "space-profile";
+    case Filter::kSpace: return "space";
+    case Filter::kSpeedProfile: return "speed-profile";
+    case Filter::kSpeed: return "speed";
+    case Filter::kEverythingProfile: return "everything-profile";
+    default: return "everything";
+  }
+}
+
+bool depends_on_profile(Filter f) {
+  return f == Filter::kSpaceProfile || f == Filter::kSpeedProfile || f == Filter::kEverythingProfile;
+}
+
+// OatFileAssistant::HasDexFiles: the file holds DEX code (nullopt: unreadable).
+std::optional<bool> has_dex_files(const std::string& path) {
+  std::vector<uint8_t> bytes;
+  try {
+    bytes = libcore_vfs().read_file(path, kMaxSourceSize);
+  } catch (const vfs::VfsError&) {
+    return std::nullopt;
+  }
+  if (is_dex(bytes)) return true;
+  try {
+    return apk::ZipArchive::open(std::move(bytes))->find("classes.dex") != nullptr;
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+
+// GetInstructionSetFromString: IllegalArgumentException for an unknown name.
+void check_instruction_set(Runtime& rt, Handle isa) {
+  if (isa == kNull) rt.throw_npe({});
+  std::string name = rt.string_utf8(isa);
+  if (name != "arm" && name != "arm64" && name != "riscv64" && name != "x86" && name != "x86_64") {
+    rt.throw_new("Ljava/lang/IllegalArgumentException;", "Instruction set " + name + " is invalid.");
+  }
 }
 
 void register_dex_file(rt::NativeRegistry& r) {
   const char* df = "Ldalvik/system/DexFile;";
+  r.bind(df, "openInMemoryDexFilesNative",
+         "([Ljava/nio/ByteBuffer;[[B[I[ILjava/lang/ClassLoader;[Ldalvik/system/DexPathList$Element;)Ljava/lang/Object;",
+         [](Runtime& rt, NativeArgs& a) -> uint64_t { return open_in_memory_dex_files(rt, a); }, S::kPartial,
+         "sans fichier vdex anonyme ni vérification du contexte du chargeur");
+  // The compiler filters (dalvik_system_DexFile.cc over compiler_filter.cc);
+  // the filter itself when it does not change.
+  auto filter_predicate = [](bool (*pred)(Filter)) {
+    return [pred](Runtime& rt, NativeArgs& a) -> uint64_t {
+      if (a.h(0) == kNull) rt.throw_npe({});
+      auto f = parse_compiler_filter(rt.string_utf8(a.h(0)));
+      return rt::ret_bool(f && pred(*f));
+    };
+  };
+  r.bind(df, "isValidCompilerFilter", "(Ljava/lang/String;)Z", filter_predicate([](Filter) { return true; }));
+  r.bind(df, "isProfileGuidedCompilerFilter", "(Ljava/lang/String;)Z", filter_predicate(depends_on_profile));
+  r.bind(df, "isVerifiedCompilerFilter", "(Ljava/lang/String;)Z",
+         filter_predicate([](Filter f) { return f != Filter::kAssumeVerified; }));
+  r.bind(df, "isOptimizedCompilerFilter", "(Ljava/lang/String;)Z",
+         filter_predicate([](Filter f) { return f != Filter::kAssumeVerified && f != Filter::kVerify; }));
+  auto filter_mapping = [](Filter (*map)(Filter)) {
+    return [map](Runtime& rt, NativeArgs& a) -> uint64_t {
+      if (a.h(0) == kNull) rt.throw_npe({});
+      auto f = parse_compiler_filter(rt.string_utf8(a.h(0)));
+      if (!f || map(*f) == *f) return a.h(0);
+      return rt.new_string_utf8(filter_name(map(*f)));
+    };
+  };
+  r.bind(df, "getNonProfileGuidedCompilerFilter", "(Ljava/lang/String;)Ljava/lang/String;", filter_mapping([](Filter f) {
+    return f == Filter::kSpaceProfile ? Filter::kSpace
+           : f == Filter::kSpeedProfile ? Filter::kSpeed
+           : f == Filter::kEverythingProfile ? Filter::kEverything
+                                             : f;
+  }));
+  r.bind(df, "getSafeModeCompilerFilter", "(Ljava/lang/String;)Ljava/lang/String;", filter_mapping([](Filter f) {
+    return f == Filter::kAssumeVerified || f == Filter::kVerify ? f : Filter::kVerify;
+  }));
+  // isReadOnlyJavaDclChecked (an application uid) and isReadOnlyJavaDclEnforced:
+  // the compatibility change kEnforceReadOnlyJavaDcl, as AppCompatCallbacks decides it.
+  r.bind(df, "isReadOnlyJavaDclEnforced", "()Z", [](Runtime& rt, NativeArgs&) -> uint64_t {
+    constexpr uint64_t kEnforceReadOnlyJavaDcl = 218865702;
+    return rt.call_static("Landroid/compat/Compatibility;", "isChangeEnabled", "(J)Z",
+                          {uint32_t(kEnforceReadOnlyJavaDcl), uint32_t(kEnforceReadOnlyJavaDcl >> 32)});
+  });
+  // The dexopt queries, as OatFileAssistant answers them without any oat or
+  // vdex file (AnyAndroid interprets the DEX code and never compiles it).
+  auto existing_file = [](Runtime& rt, Handle name) {
+    if (name == kNull) rt.throw_npe({});
+    std::string path = rt.string_utf8(name);
+    if (!libcore_vfs().exists(path)) rt.throw_new("Ljava/io/FileNotFoundException;", path);
+    return path;
+  };
+  r.bind(df, "getDexOptNeeded", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZZ)I",
+         [existing_file](Runtime& rt, NativeArgs& a) -> uint64_t {
+           std::string path = existing_file(rt, a.h(0));
+           check_instruction_set(rt, a.h(1));
+           if (a.h(2) == kNull) rt.throw_npe({});
+           std::string filter = rt.string_utf8(a.h(2));
+           if (!parse_compiler_filter(filter)) {
+             rt.throw_new("Ljava/lang/IllegalArgumentException;", "Compiler filter " + filter + " is invalid.");
+           }
+           if (a.z(5)) return 0;  // downgrade: kNoDexOptNeeded without a usable oat file
+           auto dex = has_dex_files(path);
+           return rt::ret_int(dex && *dex ? 1 : 0);  // kDex2OatFromScratch
+         }, S::kPartial, "aucun fichier oat ; le contexte du chargeur n'est pas analysé");
+  r.bind(df, "isDexOptNeeded", "(Ljava/lang/String;)Z", [existing_file](Runtime& rt, NativeArgs& a) -> uint64_t {
+    existing_file(rt, a.h(0));
+    return rt::ret_bool(true);  // never up to date without an oat file
+  });
+  r.bind(df, "getDexFileOutputPaths", "(Ljava/lang/String;Ljava/lang/String;)[Ljava/lang/String;",
+         [](Runtime& rt, NativeArgs& a) -> uint64_t {
+           if (a.h(0) == kNull) rt.throw_npe({});
+           check_instruction_set(rt, a.h(1));
+           return kNull;  // no best oat file
+         });
+  r.bind(df, "getDexFileOptimizationStatus", "(Ljava/lang/String;Ljava/lang/String;)[Ljava/lang/String;",
+         [](Runtime& rt, NativeArgs& a) -> uint64_t {
+           if (a.h(0) == kNull) rt.throw_npe({});
+           check_instruction_set(rt, a.h(1));
+           auto dex = has_dex_files(rt.string_utf8(a.h(0)));
+           return string_array(rt, {dex && *dex ? "run-from-apk" : "unknown", "unknown"});
+         });
   r.bind(df, "openDexFileNative",
          "(Ljava/lang/String;Ljava/lang/String;ILjava/lang/ClassLoader;[Ldalvik/system/DexPathList$Element;)"
          "Ljava/lang/Object;",

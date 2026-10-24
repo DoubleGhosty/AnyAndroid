@@ -40,6 +40,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TimeZone;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
 /**
  * Self-test of the libcore paths added to AnyAndroid on 17 October (G2), on AOSP's real libcore:
@@ -75,6 +77,7 @@ public final class LibcoreProbe {
     smallNatives();
     bigIntegers();
     threads();
+    dexFilesInMemory();
     unicode();
     timeZones();
     posix();
@@ -524,6 +527,33 @@ public final class LibcoreProbe {
       child.join();
       return seen[0] + ", priorité " + t.getPriority() + ", " + t.getState() + ", groupe nul " + (t.getThreadGroup() == null)
           + ", fil ordinaire " + seen[1];
+    });
+  }
+
+  // --- DEX files in memory (InMemoryDexClassLoader) ----------------------------------------
+
+  // Two command jars of the image, outside the boot class path: one per loader (each
+  // InMemoryDexClassLoader defines its own classes), from the heap then from native memory.
+  static void dexFilesInMemory() {
+    inMemory("abx.jar", "com.android.commands.abx.Abx", false);
+    inMemory("appwidget.jar", "com.android.commands.appwidget.AppWidget", true);
+  }
+
+  static void inMemory(String jar, String className, boolean direct) {
+    check("InMemoryDexClassLoader, tampon " + (direct ? "direct" : "du tas"), () -> {
+      byte[] dex;
+      try (ZipFile zip = new ZipFile("/system/framework/" + jar)) {
+        ZipEntry entry = zip.getEntry("classes.dex");
+        dex = zip.getInputStream(entry).readAllBytes();
+      }
+      ByteBuffer buffer = direct ? ByteBuffer.allocateDirect(dex.length + 8) : ByteBuffer.allocate(dex.length + 8);
+      buffer.position(8);  // the DEX starts at the buffer's position, not at 0
+      buffer.put(dex).flip().position(8);
+      ClassLoader loader = (ClassLoader) Class.forName("dalvik.system.InMemoryDexClassLoader")
+          .getConstructor(ByteBuffer.class, ClassLoader.class).newInstance(buffer, String.class.getClassLoader());
+      Class<?> c = loader.loadClass(className);
+      return c.getSimpleName() + " par " + c.getClassLoader().getClass().getSimpleName() + ", même chargeur "
+          + (c.getClassLoader() == loader) + ", main " + Arrays.toString(c.getMethod("main", String[].class).getParameterTypes());
     });
   }
 
