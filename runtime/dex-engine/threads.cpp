@@ -256,6 +256,14 @@ void Runtime::thread_main(VmThread* t) {
   } catch (const std::exception& e) {
     log::error("threads", "erreur interne dans le thread " + t->name + " : " + e.what());
   }
+  // Thread::Destroy -> RemoveFromThreadGroup, while the thread is still alive.
+  if (!shutting_down_) {
+    try {
+      call_thread_group(*this, t->peer, "threadTerminated", "(Ljava/lang/Thread;)V");
+    } catch (const JavaThrow&) {
+    } catch (const ThreadKill&) {
+    }
+  }
   t->alive = false;
   t->frames.clear();
   t->scope_depth = 0;

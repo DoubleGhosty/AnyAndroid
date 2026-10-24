@@ -765,5 +765,9 @@ void register_core_classes(NativeRegistry& registry);
 // initializers such as blockerLock), for every Thread object, including those
 // the runtime creates for threads started outside Java.
 void init_thread_object(Runtime& rt, Handle thread);
+// thread.group.<name>(sig) when libcore's ThreadGroup has that method: its
+// bookkeeping of the threads it enumerates (addUnstarted, add,
+// threadStartFailed, threadTerminated). False without a group or method.
+bool call_thread_group(Runtime& rt, Handle thread, std::string_view name, std::string_view sig);
 
 }  // namespace aa::rt

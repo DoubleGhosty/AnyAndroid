@@ -792,7 +792,12 @@ void register_thread(NativeRegistry& r) {
   t.field("threadLocalRandomSeed", "J");
   t.field("threadLocalRandomProbe", "I");
   t.field("threadLocalRandomSecondarySeed", "I");
-  auto init = [](Runtime& rt, NativeArgs& a, Handle target, std::u16string name) -> uint64_t {
+  // libcore's Thread(ThreadGroup, Runnable, String, long, AccessControlContext,
+  // boolean): the group (the creator's when null) counts one more unstarted
+  // thread, and the creator's inheritable thread locals are copied (init2)
+  // unless inheritThreadLocals is false. The stack size, a hint, is ignored.
+  auto init = [](Runtime& rt, NativeArgs& a, Handle group, Handle target, std::u16string name,
+                 bool inherit) -> uint64_t {
     auto p = std::make_unique<ThreadPeer>();
     p->target = target;
     if (name.empty()) {
@@ -802,30 +807,52 @@ void register_thread(NativeRegistry& r) {
     p->name = std::move(name);
     if (auto* cur = rt.peer<ThreadPeer>(rt.current_thread_peer())) p->daemon = cur->daemon;
     a.self().peer = std::move(p);
+    Class* thread = rt.find_class("Ljava/lang/Thread;");
+    if (group != kNull) a.self().fields.at(thread->declared_field("group", "Ljava/lang/ThreadGroup;")->slot) = group;
     init_thread_object(rt, a.h(0));
+    Field* inheritable = thread->declared_field("inheritableThreadLocals", "Ljava/lang/ThreadLocal$ThreadLocalMap;");
+    Handle creator = rt.current_thread_peer();
+    Handle parent_map = creator != kNull ? rt.nonnull(creator, "Thread").fields.at(inheritable->slot) : kNull;
+    if (inherit && parent_map != kNull) {
+      Class* tl = rt.find_class("Ljava/lang/ThreadLocal;");
+      if (Method* copy = rt.find_static(tl, "createInheritedMap",
+                                        "(Ljava/lang/ThreadLocal$ThreadLocalMap;)Ljava/lang/ThreadLocal$ThreadLocalMap;")) {
+        uint32_t arg = parent_map;
+        Handle map = Handle(rt.invoke(copy, &arg, 1));
+        a.self().fields.at(inheritable->slot) = map;
+      }
+    }
+    call_thread_group(rt, a.h(0), "addUnstarted", "()V");
     return 0;
   };
-  t.ctor("()V", [init](Runtime& rt, NativeArgs& a) { return init(rt, a, kNull, u""); });
-  t.ctor("(Ljava/lang/Runnable;)V", [init](Runtime& rt, NativeArgs& a) { return init(rt, a, a.h(1), u""); });
-  t.ctor("(Ljava/lang/String;)V", [init](Runtime& rt, NativeArgs& a) { return init(rt, a, kNull, a.str(1)); });
-  t.ctor("(Ljava/lang/Runnable;Ljava/lang/String;)V",
-         [init](Runtime& rt, NativeArgs& a) { return init(rt, a, a.h(1), a.str(2)); });
-  // The constructors with a ThreadGroup (java.lang.Daemons uses the system
-  // group); the stack size, a hint in Java, is ignored.
-  auto init_in_group = [init](Runtime& rt, NativeArgs& a, Handle target, std::u16string name) -> uint64_t {
-    init(rt, a, target, std::move(name));
-    Field* group = rt.find_class("Ljava/lang/Thread;")->declared_field("group", "Ljava/lang/ThreadGroup;");
-    if (a.h(1) != kNull) a.self().fields.at(group->slot) = a.h(1);  // null: the creator's group
-    return 0;
+  // An explicit name may not be null (libcore: "name cannot be null").
+  auto name_arg = [](Runtime& rt, NativeArgs& a, int index) {
+    if (a.h(index) == kNull) rt.throw_npe("name cannot be null");
+    return a.str(index);
   };
+  t.ctor("()V", [init](Runtime& rt, NativeArgs& a) { return init(rt, a, kNull, kNull, u"", true); });
+  t.ctor("(Ljava/lang/Runnable;)V", [init](Runtime& rt, NativeArgs& a) { return init(rt, a, kNull, a.h(1), u"", true); });
+  t.ctor("(Ljava/lang/String;)V", [init, name_arg](Runtime& rt, NativeArgs& a) {
+    return init(rt, a, kNull, kNull, name_arg(rt, a, 1), true);
+  });
+  t.ctor("(Ljava/lang/Runnable;Ljava/lang/String;)V", [init, name_arg](Runtime& rt, NativeArgs& a) {
+    return init(rt, a, kNull, a.h(1), name_arg(rt, a, 2), true);
+  });
+  // The constructors with a ThreadGroup (java.lang.Daemons uses the system group).
   t.ctor("(Ljava/lang/ThreadGroup;Ljava/lang/Runnable;)V",
-         [init_in_group](Runtime& rt, NativeArgs& a) { return init_in_group(rt, a, a.h(2), u""); });
-  t.ctor("(Ljava/lang/ThreadGroup;Ljava/lang/String;)V",
-         [init_in_group](Runtime& rt, NativeArgs& a) { return init_in_group(rt, a, kNull, a.str(2)); });
-  t.ctor("(Ljava/lang/ThreadGroup;Ljava/lang/Runnable;Ljava/lang/String;)V",
-         [init_in_group](Runtime& rt, NativeArgs& a) { return init_in_group(rt, a, a.h(2), a.str(3)); });
-  t.ctor("(Ljava/lang/ThreadGroup;Ljava/lang/Runnable;Ljava/lang/String;J)V",
-         [init_in_group](Runtime& rt, NativeArgs& a) { return init_in_group(rt, a, a.h(2), a.str(3)); });
+         [init](Runtime& rt, NativeArgs& a) { return init(rt, a, a.h(1), a.h(2), u"", true); });
+  t.ctor("(Ljava/lang/ThreadGroup;Ljava/lang/String;)V", [init, name_arg](Runtime& rt, NativeArgs& a) {
+    return init(rt, a, a.h(1), kNull, name_arg(rt, a, 2), true);
+  });
+  t.ctor("(Ljava/lang/ThreadGroup;Ljava/lang/Runnable;Ljava/lang/String;)V", [init, name_arg](Runtime& rt, NativeArgs& a) {
+    return init(rt, a, a.h(1), a.h(2), name_arg(rt, a, 3), true);
+  });
+  t.ctor("(Ljava/lang/ThreadGroup;Ljava/lang/Runnable;Ljava/lang/String;J)V", [init, name_arg](Runtime& rt, NativeArgs& a) {
+    return init(rt, a, a.h(1), a.h(2), name_arg(rt, a, 3), true);
+  });
+  t.ctor("(Ljava/lang/ThreadGroup;Ljava/lang/Runnable;Ljava/lang/String;JZ)V", [init, name_arg](Runtime& rt, NativeArgs& a) {
+    return init(rt, a, a.h(1), a.h(2), name_arg(rt, a, 3), a.z(6));
+  });
   t.method("run", "()V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     Handle target = thread_peer(rt, a.h(0)).target;
     if (target) rt.call_virtual(target, "run", "()V");
@@ -841,7 +868,13 @@ void register_thread(NativeRegistry& r) {
         break;
       }
     }
-    p.vm = rt.start_thread(a.h(0), text::utf16_to_utf8(p.name), p.daemon);
+    call_thread_group(rt, a.h(0), "add", "(Ljava/lang/Thread;)V");
+    try {
+      p.vm = rt.start_thread(a.h(0), text::utf16_to_utf8(p.name), p.daemon);
+    } catch (const JavaThrow&) {
+      call_thread_group(rt, a.h(0), "threadStartFailed", "(Ljava/lang/Thread;)V");
+      throw;
+    }
     if (p.pending_interrupt) rt.interrupt(p.vm);
     return 0;
   });
@@ -1034,8 +1067,25 @@ void init_thread_object(Runtime& rt, Handle thread) {
     if (main && main->is_static()) {
       rt.ensure_initialized(tg);
       o.fields.at(group->slot) = tg->statics.at(main->slot);
+      // Thread::CreatePeer then NotifyThreadGroup: the group counts the
+      // attached thread as unstarted, then adds it.
+      if (creator == thread) {
+        call_thread_group(rt, thread, "addUnstarted", "()V");
+        call_thread_group(rt, thread, "add", "(Ljava/lang/Thread;)V");
+      }
     }
   }
+}
+
+bool call_thread_group(Runtime& rt, Handle thread, std::string_view name, std::string_view sig) {
+  Field* group = rt.find_class("Ljava/lang/Thread;")->declared_field("group", "Ljava/lang/ThreadGroup;");
+  Handle g = group ? rt.nonnull(thread, "Thread").fields.at(group->slot) : kNull;
+  if (g == kNull) return false;
+  Method* m = rt.resolve_virtual(rt.class_of(g), name, sig);
+  if (!m || m->is_abstract()) return false;
+  uint32_t args[2] = {g, thread};
+  rt.invoke(m, args, sig == "()V" ? 1 : 2);
+  return true;
 }
 
 void register_core_classes(NativeRegistry& r) {

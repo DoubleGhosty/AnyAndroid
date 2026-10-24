@@ -38,6 +38,10 @@ VarHandle.get par réflexion : java.lang.UnsupportedOperationException: VarHandl
 BigInteger.multiply : 4905 bits, modulo 10^18 : 526568355018200002
 BigInteger.divideAndRemainder : quotient -3^1500 true, reste -12345
 BigInteger.modPow : Fermat 1, 5^(10^30) modulo 10^18 : 134675696920069392, -2^-1 : 500000000000000000000
+Thread.sleep(Duration) : au moins 5 ms : true
+pile du fil courant : dalvik.system.VMStack.getThreadStackTrace (natif), java.lang.Thread.getStackTrace, main présent true
+pile d'un autre fil : java.lang.Object.wait (natif), toutes les piles : fil courant true, attente true, après la fin 0
+Thread(groupe, cible, nom, pile, héritage) : fil-5 null, priorité 10, TERMINATED, groupe nul true, fil ordinaire hérité
 Character hors ASCII : true true 12 -2 true true true 453 true true 26
 noms de caractères : <control-0000> ; LATIN SMALL LETTER E WITH ACUTE ; 945
 casse selon la langue : İ 1 οδος STRASSE

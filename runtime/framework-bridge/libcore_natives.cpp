@@ -13,9 +13,12 @@
 #include <cstdio>
 #include <cstring>
 #include <cwctype>
+#include <functional>
 #include <fcntl.h>
 #include <io.h>
 #include <map>
+#include <mutex>
+#include <set>
 #include <thread>
 #include <string>
 #include <string_view>
@@ -243,6 +246,90 @@ void register_system(rt::NativeRegistry& r) {
   // as its blocking waits record it.
   r.bind(th, "nativeGetStatus", "(Z)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     return rt::ret_int(rt.thread_state(a.h(0), a.z(1)));
+  });
+  // The other natives of java_lang_Thread.cc that libcore's bytecode still
+  // reaches (Thread.sleep(Duration), setInterrupt, start(ThreadContainer),
+  // the constructors and priority(int) that the core does not replace).
+  // Thread_sleep: Monitor::Wait on the lock Thread.sleep holds, interruptible,
+  // timed (TIMED_WAITING); a nanosecond remainder waits one more millisecond.
+  r.bind(th, "sleep", "(Ljava/lang/Object;JI)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int64_t ms = a.i64(1);
+    int32_t ns = a.i32(3);
+    if (ms < 0 || ns < 0 || ns > 999999) {
+      rt.throw_new("Ljava/lang/IllegalArgumentException;",
+                   "timeout arguments out of range: ms=" + std::to_string(ms) + " ns=" + std::to_string(ns));
+    }
+    rt.monitor_wait(a.h(0), ms + (ns > 0 && ms < INT64_MAX ? 1 : 0));
+    return 0;
+  });
+  r.bind(th, "yield0", "()V", [](Runtime& rt, NativeArgs&) -> uint64_t {
+    rt.yield_thread();
+    return 0;
+  });
+  r.bind(th, "interrupt0", "()V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (rt::VmThread* t = rt.thread_of_peer(a.h(0)); t && t->alive) rt.interrupt(t);
+    return 0;
+  });
+  // Thread::CreateNativeThread: the core's Thread.start() creates the thread.
+  r.bind(th, "nativeCreate", "(Ljava/lang/Thread;JZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (a.h(0) == kNull) rt.throw_npe({});
+    rt.call_virtual(a.h(0), "start", "()V");
+    return 0;
+  });
+  r.bind(th, "setNativeName", "(Ljava/lang/String;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (rt::VmThread* t = rt.thread_of_peer(a.h(0)); t && a.h(1) != kNull) t->name = rt.string_utf8(a.h(1));
+    return 0;
+  });
+  r.bind(th, "setPriority0", "(II)V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; }, S::kPartial,
+         "priorité gardée par Thread, non appliquée à l'ordonnanceur de l'hôte");
+  // Thread::PriorityToNiceness and NicenessToPriority over the palette's map
+  // (palette_android.cc kNiceValues: priorities 1 to 10).
+  static constexpr int32_t kNiceness[11] = {0, 19, 16, 13, 10, 0, -2, -4, -5, -6, -8};
+  r.bind(th, "nicenessForPriority", "(I)I", [](Runtime&, NativeArgs& a) -> uint64_t {
+    return rt::ret_int(kNiceness[std::clamp(a.i32(0), 1, 10)]);
+  });
+  r.bind(th, "priorityForNiceness", "(I)I", [](Runtime&, NativeArgs& a) -> uint64_t {
+    int32_t niceness = a.i32(0);
+    const int32_t* pm = kNiceness;
+    const int32_t* bound = std::lower_bound(pm + 1, pm + 11, niceness, std::greater<int32_t>());  // niceness decreases
+    if (bound > pm + 10) return rt::ret_int(10);
+    if (bound == pm + 1) return rt::ret_int(1);
+    // The closer of bound[0] and bound[-1], ties towards the higher priority.
+    return rt::ret_int(int32_t(niceness - bound[0] > bound[-1] - niceness ? bound - pm - 1 : bound - pm));
+  });
+  // ThreadList::AllocThreadId / ReleaseThreadId for VirtualThreadContext.
+  struct ThinLockIds {
+    std::mutex lock;
+    std::set<int32_t> used;
+  };
+  static auto* ids = new ThinLockIds;  // never destroyed
+  r.bind(th, "acquireThinLockId", "()I", [](Runtime& rt, NativeArgs&) -> uint64_t {
+    std::lock_guard<std::mutex> guard(ids->lock);
+    for (int32_t id = 1; id <= 0xFFFF; ++id) {
+      if (ids->used.insert(id).second) return rt::ret_int(id);
+    }
+    rt.throw_new("Ljava/lang/InternalError;", "[AnyAndroid] plus d'identifiant de verrou léger");
+  });
+  r.bind(th, "releaseThinLockId", "(I)V", [](Runtime&, NativeArgs& a) -> uint64_t {
+    std::lock_guard<std::mutex> guard(ids->lock);
+    ids->used.erase(a.i32(1));
+    return 0;
+  });
+  // java_lang_ref_FinalizerReference.cc (ReferenceProcessor): the referent
+  // (Reference.get, which FinalizerReference overrides to return the zombie),
+  // and a one-element pending list when the GC has not enqueued the reference.
+  const char* fr = "Ljava/lang/ref/FinalizerReference;";
+  r.bind(fr, "getReferent", "()Ljava/lang/Object;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Method* get = rt.find_class("Ljava/lang/ref/Reference;")->declared_method("get", "()Ljava/lang/Object;");
+    uint32_t self = a.h(0);
+    return rt.invoke(get, &self, 1);
+  });
+  r.bind(fr, "makeCircularListIfUnenqueued", "()Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Field* pending = find_field(rt.class_of(a.h(0)), "pendingNext", "Ljava/lang/ref/Reference;");
+    uint32_t& next = rt.object(a.h(0))->fields.at(pending->slot);
+    if (next != kNull) return rt::ret_bool(false);
+    next = a.h(0);
+    return rt::ret_bool(true);
   });
   // ART applies the niceness with setpriority and returns 0 (errno on
   // failure); the Java side keeps it in Thread.niceness. The host scheduler
@@ -680,6 +767,74 @@ void register_vm(rt::NativeRegistry& r) {
     };
   };
   r.bind(st, "getStackClass2", "()Ljava/lang/Class;", stack_class(3));
+  // dalvik_system_VMStack.cc: the stack of a thread (Thread.getStackTrace,
+  // getAllStackTraces), innermost frame first, from its frames: a thread
+  // other than the caller is parked while the caller holds the GIL. Like the
+  // traces of exceptions, the elements carry no file name nor line number.
+  // Null for a thread that is not alive.
+  auto thread_stack = [](Runtime& rt, Handle thread) -> std::vector<rt::GlobalRef> {
+    rt::VmThread* t = thread == kNull ? nullptr : rt.thread_of_peer(thread);
+    if (thread != kNull && thread == rt.current_thread_peer()) t = rt.current_thread();
+    std::vector<rt::GlobalRef> elements;
+    if (!t || !t->alive) return elements;
+    rt::Class* element = rt.find_class("Ljava/lang/StackTraceElement;");
+    rt.ensure_initialized(element);
+    rt::Method* ctor = element->declared_method("<init>", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V");
+    // The frames vector may grow while the constructor runs (same thread): copy them first.
+    std::vector<std::pair<rt::Method*, bool>> frames;
+    for (auto f = t->frames.rbegin(); f != t->frames.rend(); ++f) frames.emplace_back(f->method, f->pc == rt::kNativePc);
+    for (const auto& [method, native] : frames) {
+      rt::GlobalRef e(rt, rt.alloc(element));
+      rt::GlobalRef cls(rt, rt.new_string_utf8(method->owner->java_name()));
+      Handle name = rt.new_string_utf8(method->name);
+      uint32_t args[5] = {e.get(), cls.get(), name, kNull, uint32_t(native ? -2 : -1)};
+      rt.invoke(ctor, args, 5);
+      elements.push_back(e);
+    }
+    return elements;
+  };
+  auto to_array = [](Runtime& rt, const char* desc, const std::vector<rt::GlobalRef>& items) -> Handle {
+    Handle arr = rt.new_array(desc, int32_t(items.size()));
+    for (size_t i = 0; i < items.size(); ++i) {
+      Handle h = items[i].get();
+      std::memcpy(&rt.array(arr, desc).data[i * 4], &h, 4);
+    }
+    return arr;
+  };
+  r.bind(st, "getThreadStackTrace", "(Ljava/lang/Thread;)[Ljava/lang/StackTraceElement;",
+         [thread_stack, to_array](Runtime& rt, NativeArgs& a) -> uint64_t {
+           std::vector<rt::GlobalRef> elements = thread_stack(rt, a.h(0));
+           if (elements.empty()) return kNull;
+           return to_array(rt, "[Ljava/lang/StackTraceElement;", elements);
+         });
+  // fillStackTraceElements: as many elements as fit, their count returned.
+  r.bind(st, "fillStackTraceElements", "(Ljava/lang/Thread;[Ljava/lang/StackTraceElement;)I",
+         [thread_stack](Runtime& rt, NativeArgs& a) -> uint64_t {
+           if (a.h(1) == kNull) rt.throw_npe({});
+           std::vector<rt::GlobalRef> elements = thread_stack(rt, a.h(0));
+           uint32_t n = std::min<uint32_t>(uint32_t(elements.size()), rt.array(a.h(1), "StackTraceElement[]").length);
+           for (uint32_t i = 0; i < n; ++i) {
+             Handle h = elements[i].get();
+             std::memcpy(&rt.array(a.h(1), "StackTraceElement[]").data[size_t(i) * 4], &h, 4);
+           }
+           return rt::ret_int(int32_t(n));
+         });
+  // getAnnotatedThreadStackTrace: the same frames; the monitors held and the
+  // one awaited are not tracked per frame (heldLocks and blockedOn stay null).
+  r.bind(st, "getAnnotatedThreadStackTrace", "(Ljava/lang/Thread;)[Ldalvik/system/AnnotatedStackTraceElement;",
+         [thread_stack, to_array](Runtime& rt, NativeArgs& a) -> uint64_t {
+           std::vector<rt::GlobalRef> elements = thread_stack(rt, a.h(0));
+           if (elements.empty()) return kNull;
+           rt::Class* annotated = rt.find_class("Ldalvik/system/AnnotatedStackTraceElement;");
+           rt::Field* f = find_field(annotated, "stackTraceElement", "Ljava/lang/StackTraceElement;");
+           std::vector<rt::GlobalRef> items;
+           for (const rt::GlobalRef& e : elements) {
+             rt::GlobalRef item(rt, rt.alloc(annotated));
+             rt.object(item.get())->fields.at(f->slot) = e.get();
+             items.push_back(item);
+           }
+           return to_array(rt, "[Ldalvik/system/AnnotatedStackTraceElement;", items);
+         }, S::kPartial, "verrous tenus et attendus non suivis par cadre");
   // Loaders as ART sees them internally: null for the boot space.
   r.bind(st, "getCallingClassLoader", "()Ljava/lang/ClassLoader;", [](Runtime& rt, NativeArgs&) -> uint64_t {
     const auto& frames = rt.current_thread()->frames;

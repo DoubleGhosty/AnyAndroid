@@ -74,6 +74,7 @@ public final class LibcoreProbe {
     invokeDynamic();
     smallNatives();
     bigIntegers();
+    threads();
     unicode();
     timeZones();
     posix();
@@ -467,6 +468,62 @@ public final class LibcoreProbe {
       return "Fermat " + BigInteger.valueOf(3).modPow(m.subtract(BigInteger.ONE), m) + ", 5^(10^30) modulo 10^18 : "
           + BigInteger.valueOf(5).modPow(BigInteger.TEN.pow(30), m).mod(e18) + ", -2^-1 : "
           + BigInteger.valueOf(-2).modPow(BigInteger.ONE.negate(), BigInteger.TEN.pow(21).add(BigInteger.ONE));
+    });
+  }
+
+  // --- Threads (sleep, stacks, constructors) ---------------------------------------------
+
+  static String frame(StackTraceElement e) {
+    return e.getClassName() + "." + e.getMethodName() + (e.isNativeMethod() ? " (natif)" : "");
+  }
+
+  static void threads() {
+    // Java 19 API, reached by reflection (the host sources compile for Java 17).
+    check("Thread.sleep(Duration)", () -> {
+      long start = System.nanoTime();
+      Thread.class.getMethod("sleep", java.time.Duration.class).invoke(null, java.time.Duration.ofMillis(5));
+      return "au moins 5 ms : " + (System.nanoTime() - start >= 5_000_000L);
+    });
+    check("pile du fil courant", () -> {
+      StackTraceElement[] stack = Thread.currentThread().getStackTrace();
+      boolean main = false;
+      for (StackTraceElement e : stack) main |= e.getClassName().equals(LibcoreProbe.class.getName()) && e.getMethodName().equals("main");
+      return frame(stack[0]) + ", " + frame(stack[1]) + ", main présent " + main;
+    });
+    check("pile d'un autre fil", () -> {
+      Object lock = new Object();
+      Thread waiter = new Thread(() -> {
+        synchronized (lock) {
+          try {
+            lock.wait();
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+        }
+      }, "attente");
+      waiter.start();
+      stateOf(waiter, Thread.State.WAITING);
+      StackTraceElement[] stack = waiter.getStackTrace();
+      Map<Thread, StackTraceElement[]> all = Thread.getAllStackTraces();
+      String result = frame(stack[0]) + ", toutes les piles : fil courant " + all.containsKey(Thread.currentThread())
+          + ", attente " + (all.get(waiter) != null && all.get(waiter).length == stack.length);
+      waiter.interrupt();
+      waiter.join();
+      return result + ", après la fin " + waiter.getStackTrace().length;
+    });
+    check("Thread(groupe, cible, nom, pile, héritage)", () -> {
+      InheritableThreadLocal<String> local = new InheritableThreadLocal<>();
+      local.set("hérité");
+      String[] seen = new String[2];
+      Thread t = new Thread(null, () -> seen[0] = Thread.currentThread().getName() + " " + local.get(), "fil-5", 0, false);
+      t.setPriority(Thread.MAX_PRIORITY);
+      t.start();
+      t.join();
+      Thread child = new Thread(() -> seen[1] = local.get());
+      child.start();
+      child.join();
+      return seen[0] + ", priorité " + t.getPriority() + ", " + t.getState() + ", groupe nul " + (t.getThreadGroup() == null)
+          + ", fil ordinaire " + seen[1];
     });
   }
 
