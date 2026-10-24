@@ -965,7 +965,55 @@ int cmd_libcore(const Args& a) {
   StaticRegistry reg;
   size_t total = 0, bound = 0, core = 0;
   std::map<std::string, std::vector<std::string>> missing;  // class -> methods
-  std::vector<std::string> absent;
+  std::vector<std::string> absent, unreachable;
+  // Callers, in the boot class path, of the methods of the VM core classes.
+  // Those classes are AnyAndroid's, completed by their libcore bytecode: a
+  // private native whose every caller is a method the core replaces never runs.
+  std::map<std::string, std::set<std::string>> callers;
+  auto method_ref = [](const dex::DexFile& d, uint32_t idx) {
+    const dex::MethodId& mid = d.method(idx);
+    return d.type_descriptor(mid.class_idx) + "->" + d.string(mid.name_idx) + d.proto_signature(mid.proto_idx);
+  };
+  for (const auto& d : boot.dex) {
+    for (uint32_t c = 0; c < d->num_class_defs(); ++c) {
+      dex::ClassData cd = d->class_data(d->class_def(c));
+      for (const auto* list : {&cd.direct_methods, &cd.virtual_methods}) {
+        for (const auto& m : *list) {
+          if (!m.code_off) continue;
+          try {
+            dex::CodeItem code = d->code_item(m.code_off);
+            std::span<const uint16_t> insns(code.insns);
+            for (uint32_t pc = 0; pc < insns.size();) {
+              if (uint32_t pu = dex::payload_units(insns, pc)) {
+                pc += pu;
+                continue;
+              }
+              dex::Decoded dec = dex::decode(insns, pc);
+              bool invoke = (dec.op >= 0x6e && dec.op <= 0x78 && dec.op != 0x73) || dec.op == 0xfa || dec.op == 0xfb;
+              if (invoke && rt::is_vm_core_class(d->type_descriptor(d->method(dec.index).class_idx))) {
+                callers[method_ref(*d, dec.index)].insert(method_ref(*d, m.method_idx));
+              }
+              pc += dec.units;
+            }
+          } catch (const FormatError&) {
+          }
+        }
+      }
+    }
+  }
+  auto only_replaced_callers = [&](const std::string& target) {
+    auto it = callers.find(target);
+    if (it == callers.end()) return true;
+    for (const std::string& caller : it->second) {
+      size_t arrow = caller.find("->"), paren = caller.find('(', arrow);
+      std::string cls = caller.substr(0, arrow);
+      if (!rt::is_vm_core_class(cls) ||
+          !reg.registry.lookup_method(cls, caller.substr(arrow + 2, paren - arrow - 2), caller.substr(paren)).method) {
+        return false;
+      }
+    }
+    return true;
+  };
   for (const auto& d : boot.dex) {
     size_t file_total = 0, file_bound = 0;
     for (uint32_t c = 0; c < d->num_class_defs(); ++c) {
@@ -985,6 +1033,8 @@ int cmd_libcore(const Args& a) {
           } else if (reg.registry.binding(desc, name, sig)) {
             ++bound;
             ++file_bound;
+          } else if (vm_core && (m.access_flags & dex::kAccPrivate) && only_replaced_callers(desc + "->" + name + sig)) {
+            unreachable.push_back(text::descriptor_to_java(desc) + "." + name + sig);
           } else if (absent_on_android(desc, name + sig)) {
             absent.push_back(text::descriptor_to_java(desc) + "." + name + sig);
           } else {
@@ -997,8 +1047,9 @@ int cmd_libcore(const Args& a) {
   }
   out("\nTotal : " + std::to_string(total) + " méthodes natives ; " + std::to_string(bound) + " liées par AnyAndroid, " +
       std::to_string(core) + " remplacées par le cœur de la VM (Object, String, Class, Thread, Throwable, réflexion), " +
+      std::to_string(unreachable.size()) + " inatteignables (privées, appelées seulement par des méthodes que le cœur remplace), " +
       std::to_string(absent.size()) + " sans implémentation dans Android 17 lui-même, " +
-      std::to_string(total - bound - core - absent.size()) + " manquantes.\n");
+      std::to_string(total - bound - core - unreachable.size() - absent.size()) + " manquantes.\n");
   // Members of the VM core classes (kept native in libcore mode) that the
   // boot class path references but AnyAndroid does not provide.
   std::set<std::string> core_missing;
@@ -1073,6 +1124,10 @@ int cmd_libcore(const Args& a) {
     if (a.has("--all")) {
       for (const auto& m : methods) out("      " + m + "\n");
     }
+  }
+  if (a.has("--all") && !unreachable.empty()) {
+    out("\nNatives inatteignables (classes du cœur de la VM, appelants remplacés) :\n");
+    for (const auto& m : unreachable) out("  " + m + "\n");
   }
   if (a.has("--all") && !absent.empty()) {
     out("\nNatives sans implémentation dans Android 17 (ni libcore ni ART) :\n");
