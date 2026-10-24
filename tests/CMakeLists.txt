@@ -280,17 +280,22 @@ add_test(NAME fuzz-basic COMMAND aa_fuzz ${S}/basic-activity.apk 3000 1)
 add_test(NAME fuzz-nav COMMAND aa_fuzz ${S}/two-screens.apk 3000 2)
 add_test(NAME fuzz-hello-exec COMMAND aa_fuzz ${S}/hello-dex.apk 3000 3 Lcom/anyandroid/samples/hello/Hello;)
 
-# Under wine, the first wine process of a run starts wineserver, which then
-# holds that test's standard output and error open: CTest waits for those pipes
-# as long as later tests keep wineserver alive, until the test's timeout (the
-# processes themselves have ended). A wineserver started first, detached from
-# every test's pipes, serves the whole run.
+# Under wine, the first wine program of a session starts wineserver and wine's
+# helper processes (services.exe, winedevice.exe, plugplay...), which inherit
+# that program's standard output and error and live as long as the server:
+# CTest then waits for the first test's pipes until the server ends, or until
+# the test's timeout in a full run (the test's own process has ended). The
+# fixture starts the server and the helpers first, detached from every test's
+# pipes. A server already running is kept if it persists (-p30: an earlier run's
+# fixture); another one (the build's apkgen's, say, about to exit) is waited
+# for first (bounded: one kept alive by unrelated wine programs is not the
+# tests' to wait for).
 if(CMAKE_CROSSCOMPILING_EMULATOR)
-  list(GET CMAKE_CROSSCOMPILING_EMULATOR 0 aa_emulator)
-  get_filename_component(aa_emulator ${aa_emulator} NAME)
+  list(GET CMAKE_CROSSCOMPILING_EMULATOR 0 aa_wine)
+  get_filename_component(aa_emulator ${aa_wine} NAME)
   find_program(AA_WINESERVER wineserver)
   if(aa_emulator MATCHES "^wine" AND AA_WINESERVER)
-    add_test(NAME wineserver COMMAND sh -c "'${AA_WINESERVER}' -p30 </dev/null >/dev/null 2>&1; exit 0")
+    add_test(NAME wineserver COMMAND sh -c "exec </dev/null >/dev/null 2>&1; '${AA_WINESERVER}' -p30 || pgrep -a wineserver | grep -q -- ' -p30' || { timeout 30 '${AA_WINESERVER}' -w; '${AA_WINESERVER}' -p30; }; '${aa_wine}' cmd /c exit; exit 0")
     set_tests_properties(wineserver PROPERTIES FIXTURES_SETUP wineserver)
     get_property(aa_tests DIRECTORY PROPERTY TESTS)
     list(REMOVE_ITEM aa_tests wineserver)
