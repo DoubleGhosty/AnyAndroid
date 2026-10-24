@@ -854,9 +854,8 @@ void Runtime::ensure_initialized(Class* cls) {
     log::warn("linker", "échec de l'initialisation de " + cls->java_name() + " :\n" + describe_throwable(t.exception));
     Class* thrown = class_of(t.exception);
     if (thrown && is_assignable(thrown, find_class("Ljava/lang/Error;"))) throw;
-    Handle err = make_throwable(find_class("Ljava/lang/ExceptionInInitializerError;"), u"", false);
-    if (auto* p = peer<ThrowablePeer>(err)) p->cause = t.exception;
-    throw JavaThrow{err};
+    GlobalRef cause(*this, t.exception);
+    throw JavaThrow{make_throwable(find_class("Ljava/lang/ExceptionInInitializerError;"), u"", false, cause.get())};
   } catch (const ThreadKill&) {
     cls->state = Class::State::kFailed;
     threads_cv_.notify_all();
@@ -1530,14 +1529,41 @@ std::string Runtime::disassemble(Method* m) {
 
 // --- Exceptions ------------------------------------------------------------------
 
-Handle Runtime::make_throwable(Class* cls, std::u16string_view message, bool has_message) {
-  Handle h = alloc(cls);
-  auto p = std::make_unique<ThrowablePeer>();
-  p->message = std::u16string(message);
-  p->has_message = has_message;
-  p->stack = capture_stack();
-  object(h)->peer = std::move(p);
-  return h;
+// ART's Thread::ThrowNewWrappedException: the exception's own constructor,
+// chosen by its arguments ((), (String), (Throwable), (String, Throwable)),
+// so that libcore's Throwable sets itself up (initializers,
+// fillInStackTrace). The fields are set directly instead without libcore,
+// without such a constructor, when it fails, on no Java thread, and for the
+// errors that cannot afford it (stack overflow, memory, an exception thrown
+// while constructing another one).
+Handle Runtime::make_throwable(Class* cls, std::u16string_view message, bool has_message, Handle cause) {
+  GlobalRef self(*this, alloc(cls));
+  GlobalRef cause_ref(*this, cause);
+  VmThread* t = running_;
+  bool construct = boot_mode_ && t && t->constructing_exception == 0 && cls->descriptor != "Ljava/lang/StackOverflowError;" &&
+                   cls->descriptor != "Ljava/lang/OutOfMemoryError;";
+  const char* sig = !has_message ? (cause ? "(Ljava/lang/Throwable;)V" : "()V")
+                                 : (cause ? "(Ljava/lang/String;Ljava/lang/Throwable;)V" : "(Ljava/lang/String;)V");
+  if (Method* ctor = construct ? cls->declared_method("<init>", sig) : nullptr) {
+    ++t->constructing_exception;
+    try {
+      ensure_initialized(cls);
+      uint32_t args[3] = {self.get(), 0, 0};
+      uint32_t n = 1;
+      if (has_message) args[n++] = new_string(std::u16string(message));
+      if (cause) args[n++] = cause;
+      invoke(ctor, args, n);
+      --t->constructing_exception;
+      return self.get();
+    } catch (const JavaThrow&) {
+      --t->constructing_exception;  // the fields below
+    } catch (...) {
+      --t->constructing_exception;
+      throw;
+    }
+  }
+  init_throwable_fields(*this, self.get(), has_message ? &message : nullptr, cause);
+  return self.get();
 }
 
 void Runtime::throw_new(std::string_view descriptor, std::u16string_view message) {
@@ -1571,8 +1597,10 @@ std::vector<std::string> Runtime::capture_stack() const {
   if (it != classes_.end()) throwable = it->second.get();
   bool skipping = true;
   for (auto f = frames_.rbegin(); f != frames_.rend() && out.size() < 64; ++f) {
-    // Like fillInStackTrace(), omit the constructors of the throwable itself.
-    if (skipping && f->method->name == "<init>" && is_assignable(f->method->owner, throwable)) continue;
+    // As ART's CountStackDepthVisitor: the frames of the throwable's own
+    // methods (nativeFillInStackTrace, fillInStackTrace, the constructors)
+    // up to the first frame of another class.
+    if (skipping && throwable && is_assignable(f->method->owner, throwable)) continue;
     skipping = false;
     std::string line = f->method->owner->java_name() + "." + f->method->name;
     if (f->pc == kNativePc) {
@@ -1594,15 +1622,33 @@ std::string Runtime::describe_throwable(Handle h) {
     if (!o) break;
     if (depth > 0) out += "Caused by: ";
     out += o->klass->java_name();
-    auto* p = dynamic_cast<ThrowablePeer*>(o->peer.get());
-    if (p && p->has_message) out += ": " + text::utf16_to_utf8(p->message);
+    uint32_t* message = throwable_field(*this, h, "detailMessage", "Ljava/lang/String;");
+    if (message && *message != kNull && as_string(*message)) out += ": " + string_utf8(*message);
     out += "\n";
-    if (p) {
-      for (const auto& line : p->stack) out += "    at " + line + "\n";
-      h = p->cause;
-    } else {
-      break;
+    // The stack: the captured frames (backtrace), else the decoded or set trace.
+    uint32_t* backtrace = throwable_field(*this, h, "backtrace", "Ljava/lang/Object;");
+    uint32_t* trace = throwable_field(*this, h, "stackTrace", "[Ljava/lang/StackTraceElement;");
+    if (auto* bt = backtrace && *backtrace ? peer<BacktracePeer>(*backtrace) : nullptr) {
+      for (const auto& line : bt->frames) out += "    at " + line + "\n";
+    } else if (trace && *trace != kNull) {
+      Class* element = lookup_class("Ljava/lang/StackTraceElement;");
+      Field* cls = element ? element->declared_field("declaringClass", "Ljava/lang/String;") : nullptr;
+      Field* method = element ? element->declared_field("methodName", "Ljava/lang/String;") : nullptr;
+      Field* line = element ? element->declared_field("lineNumber", "I") : nullptr;
+      ArrayObject& arr = array(*trace, "stackTrace");
+      for (uint32_t i = 0; cls && method && line && i < arr.length; ++i) {
+        Handle e;
+        std::memcpy(&e, &arr.data[size_t(i) * 4], 4);
+        Object* eo = object(e);
+        if (!eo) continue;
+        Handle c = eo->fields.at(cls->slot), m = eo->fields.at(method->slot);
+        out += "    at " + (c ? string_utf8(c) : std::string()) + "." + (m ? string_utf8(m) : std::string()) +
+               (int32_t(eo->fields.at(line->slot)) == -2 ? "(Native Method)" : "") + "\n";
+      }
     }
+    uint32_t* cause = throwable_field(*this, h, "cause", "Ljava/lang/Throwable;");
+    if (!cause || *cause == h) break;
+    h = *cause;
   }
   return out;
 }

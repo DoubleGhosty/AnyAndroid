@@ -31,6 +31,9 @@ const-method-handle, champ statique : ()int : 5
 const-method-handle, méthodes d'instance et d'interface : (String)int : 5 ; (CharSequence)int : 3
 const-method-handle, constructeur : (String)StringBuilder : abc
 sérialisation de float[] et double[] : 1.25, NaN 0x7fc00000, -0.0, 3.141592653589793 ; 74 octets
+Throwable sérialisé : java.lang.IllegalStateException: état, cause java.io.IOException: disque, supprimées [java.lang.RuntimeException: supprimée], pile intacte true ; java.io.IOException: lecture
+initCause et setStackTrace : Can't overwrite cause with java.lang.Error: b (cause true) ; Self-causation not permitted ; [a.B.c(B.java:7)] ; figée 0, pile de création aa.host.LibcoreProbe
+printStackTrace(PrintWriter) : java.lang.Exception: haut | Suppressed: java.lang.RuntimeException: à côté | Caused by: java.lang.Error: bas
 serialVersionUID par défaut : -6120085034705743016
 System.getenv : /system, /data, PATH présent true
 ProcessBuilder.start : Cannot run program "sh": error=13, Permission denied

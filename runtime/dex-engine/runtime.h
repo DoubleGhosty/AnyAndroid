@@ -129,21 +129,20 @@ struct ReferencePeer final : NativePeer {
   }
 };
 
+// The state of a Throwable is in libcore's fields (detailMessage, cause,
+// stackTrace, suppressedExceptions, backtrace). Without libcore only, the
+// suppressed exceptions (libcore's List) stay here.
 struct ThrowablePeer final : NativePeer {
-  std::u16string message;
-  bool has_message = false;
-  Handle cause = kNull;
-  std::vector<std::string> stack;
-  Handle stack_trace = kNull;     // StackTraceElement[] once built or set (libcore mode)
   std::vector<Handle> suppressed;  // addSuppressed
-  // Throwable(String, Throwable, boolean, boolean): suppression disabled, no
-  // stack trace (neither captured nor settable).
-  bool suppression_enabled = true, stack_writable = true;
-  void trace(std::vector<Handle>& out) const override {
-    out.push_back(cause);
-    out.push_back(stack_trace);
-    out.insert(out.end(), suppressed.begin(), suppressed.end());
-  }
+  bool suppression_enabled = true;  // Throwable(String, Throwable, false, boolean)
+  void trace(std::vector<Handle>& out) const override { out.insert(out.end(), suppressed.begin(), suppressed.end()); }
+};
+
+// The stack a Throwable captured: the native peer of its backtrace object
+// (Throwable.backtrace, ART's internal stack trace), which
+// Throwable.nativeGetStackTrace turns into StackTraceElements.
+struct BacktracePeer final : NativePeer {
+  std::vector<std::string> frames;
 };
 
 // An annotation_item read from a DEX file: visibility (0 build, 1 runtime,
@@ -356,6 +355,9 @@ struct VmThread {
   // java.lang.Thread.State ordinal (RUNNABLE 1, BLOCKED 2, WAITING 3,
   // TIMED_WAITING 4), set by the owner around its blocking waits.
   int32_t java_state = 1;
+  // Runtime::make_throwable running an exception's constructor: an exception
+  // thrown meanwhile has its fields set directly.
+  int32_t constructing_exception = 0;
   bool alive = true;
   std::condition_variable sleep_cv;
   Monitor* waiting_on = nullptr;
@@ -629,7 +631,10 @@ class Runtime {
   // An Android/Java API the prototype does not implement was called. Logs it,
   // records it and raises java.lang.NoSuchMethodError with an explicit message.
   [[noreturn]] void throw_unsupported(std::string_view api, std::string_view reason = {});
-  Handle make_throwable(Class* cls, std::u16string_view message, bool has_message);
+  // A new exception of class `cls`, with this message (if has_message) and
+  // cause (if any): its own constructor runs, as in ART's
+  // ThrowNewWrappedException, or its fields are set directly.
+  Handle make_throwable(Class* cls, std::u16string_view message, bool has_message, Handle cause = kNull);
   std::string describe_throwable(Handle h);  // "java.lang.X: message\n  at ..."
   std::vector<std::string> capture_stack() const;
 
@@ -762,6 +767,14 @@ void init_thread_object(Runtime& rt, Handle thread);
 // bookkeeping of the threads it enumerates (addUnstarted, add,
 // threadStartFailed, threadTerminated). False without a group or method.
 bool call_thread_group(Runtime& rt, Handle thread, std::string_view name, std::string_view sig);
+// libcore's fields of a Throwable (Android 17): detailMessage, cause (the
+// throwable itself while not initialized), stackTrace, suppressedExceptions,
+// backtrace. Null when `throwable` has no such field.
+uint32_t* throwable_field(Runtime& rt, Handle throwable, std::string_view name, std::string_view type);
+// What Throwable(String, Throwable) leaves in those fields, without running
+// it: the message (if any), the cause (the throwable itself when null), and
+// a backtrace of the current stack.
+void init_throwable_fields(Runtime& rt, Handle throwable, const std::u16string_view* message, Handle cause);
 // Thread::Destroy, as a thread ends: nativePeer cleared (Thread.alive()
 // false), then the waiters on Thread.lock (libcore's join) notified.
 void thread_destroyed(Runtime& rt, Handle thread);

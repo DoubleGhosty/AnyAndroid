@@ -412,6 +412,57 @@ public final class LibcoreProbe {
             + " ; " + bytes.size() + " octets";
       }
     });
+    check("Throwable sérialisé", () -> {
+      IllegalStateException original = new IllegalStateException("état", new IOException("disque"));
+      original.addSuppressed(new RuntimeException("supprimée"));
+      ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+      try (ObjectOutputStream out = new ObjectOutputStream(bytes)) {
+        out.writeObject(original);
+        out.writeObject(new ClassNotFoundException("absente", new IOException("lecture")));
+      }
+      try (ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
+        Throwable back = (Throwable) in.readObject();
+        Throwable missing = (Throwable) in.readObject();
+        return back + ", cause " + back.getCause() + ", supprimées " + Arrays.toString(back.getSuppressed())
+            + ", pile intacte " + Arrays.equals(original.getStackTrace(), back.getStackTrace()) + " ; " + missing.getCause();
+      }
+    });
+    check("initCause et setStackTrace", () -> {
+      Exception e = new Exception("a");
+      e.initCause(null);
+      String overwrite;
+      try {
+        e.initCause(new Error("b"));
+        overwrite = "permis";
+      } catch (IllegalStateException ise) {
+        overwrite = ise.getMessage() + " (cause " + (ise.getCause() == e) + ")";
+      }
+      Exception self = new Exception();
+      String selfCause;
+      try {
+        self.initCause(self);
+        selfCause = "permis";
+      } catch (IllegalArgumentException iae) {
+        selfCause = iae.getMessage();
+      }
+      Exception fixed = new Exception("fixe");
+      fixed.setStackTrace(new StackTraceElement[] {new StackTraceElement("a.B", "c", "B.java", 7)});
+      Exception frozen = new Exception("figée", null, true, false) {};
+      frozen.setStackTrace(fixed.getStackTrace());
+      return overwrite + " ; " + selfCause + " ; " + Arrays.toString(fixed.getStackTrace()) + " ; figée "
+          + frozen.getStackTrace().length + ", pile de création " + e.getStackTrace()[0].getClassName();
+    });
+    check("printStackTrace(PrintWriter)", () -> {
+      java.io.StringWriter text = new java.io.StringWriter();
+      Exception e = new Exception("haut", new Error("bas"));
+      e.addSuppressed(new RuntimeException("à côté"));
+      e.printStackTrace(new java.io.PrintWriter(text, true));
+      List<String> kept = new java.util.ArrayList<>();
+      for (String line : text.toString().split("\n")) {
+        if (!line.startsWith("\tat ") && !line.startsWith("\t\tat ") && !line.trim().startsWith("...")) kept.add(line.trim());
+      }
+      return String.join(" | ", kept);
+    });
     check("serialVersionUID par défaut", () -> String.valueOf(ObjectStreamClass.lookup(SerialPoint.class).getSerialVersionUID()));
     check("System.getenv", () -> System.getenv("ANDROID_ROOT") + ", " + System.getenv().get("ANDROID_DATA")
         + ", PATH présent " + System.getenv().containsKey("PATH"));

@@ -92,24 +92,32 @@ Handle string_array(Runtime& rt, const std::vector<std::u16string>& parts) {
   return arr;
 }
 
-void init_throwable(Runtime& rt, Handle self, const std::u16string* message, Handle cause) {
-  Object& o = rt.nonnull(self, "Throwable");
-  auto p = std::make_unique<ThrowablePeer>();
-  if (message) {
-    p->message = *message;
-    p->has_message = true;
-  }
-  p->cause = cause;
-  p->stack = rt.capture_stack();
-  o.peer = std::move(p);
+constexpr std::string_view kThrowableType = "Ljava/lang/Throwable;";
+constexpr std::string_view kTraceType = "[Ljava/lang/StackTraceElement;";
+constexpr std::string_view kObjectType = "Ljava/lang/Object;";
+
+uint32_t& tfield(Runtime& rt, Handle h, std::string_view name, std::string_view type) {
+  uint32_t* f = throwable_field(rt, h, name, type);
+  if (!f) rt.throw_new("Ljava/lang/NoSuchFieldError;", std::string(name));
+  return *f;
 }
 
+// Without libcore only: the throwable's suppressed exceptions.
 ThrowablePeer& throwable_peer(Runtime& rt, Handle h) {
   Object& o = rt.nonnull(h, "Throwable");
   if (!o.peer) o.peer = std::make_unique<ThrowablePeer>();  // constructor not called
   auto* p = dynamic_cast<ThrowablePeer*>(o.peer.get());
   if (!p) rt.throw_new("Ljava/lang/InternalError;", "état natif de Throwable invalide");
   return *p;
+}
+
+// The constructors without libcore: libcore's initializers and
+// fillInStackTrace(), then the message and, when given (even null), the cause.
+void init_throwable(Runtime& rt, Handle self, const std::u16string* message, Handle cause, bool has_cause) {
+  std::u16string_view text = message ? std::u16string_view(*message) : std::u16string_view();
+  init_throwable_fields(rt, self, message ? &text : nullptr, kNull);
+  if (has_cause) tfield(rt, self, "cause", kThrowableType) = cause;
+  throwable_peer(rt, self);
 }
 
 // A shallow copy of a reference array (Object.clone).
@@ -120,18 +128,29 @@ Handle clone_array(Runtime& rt, Handle src, const char* descriptor) {
   return copy;
 }
 
-// The throwable's StackTraceElement[], built from the captured frames
-// ("pkg.Class.method(pc 0x0012)" or "...(Native Method)": no file or line
-// numbers, -2 marking native methods as in StackTraceElement).
-Handle our_stack_trace(Runtime& rt, Handle self) {
-  if (Handle known = throwable_peer(rt, self).stack_trace) return known;
+// Thread::CreateInternalStackTrace: the current stack, without the frames of
+// the throwable's own methods (capture_stack), held by a backtrace object.
+Handle new_backtrace(Runtime& rt) {
+  Handle bt = rt.alloc(rt.find_class(kObjectType));
+  auto p = std::make_unique<BacktracePeer>();
+  p->frames = rt.capture_stack();
+  rt.object(bt)->peer = std::move(p);
+  return bt;
+}
+
+// Throwable.nativeGetStackTrace: the StackTraceElements of a backtrace
+// ("pkg.Class.method(pc 0x0012)" or "...(Native Method)" frames: no file or
+// line number, -2 marking native methods as in StackTraceElement).
+Handle stack_trace_elements(Runtime& rt, Handle backtrace) {
+  auto* bt = rt.peer<BacktracePeer>(backtrace);
+  if (!bt) return kNull;
   Class* element = rt.lookup_class("Ljava/lang/StackTraceElement;");
   Method* ctor =
       element ? element->declared_method("<init>", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V") : nullptr;
   if (!ctor) rt.throw_unsupported("Ljava/lang/Throwable;->getStackTrace()[Ljava/lang/StackTraceElement;", "sans la libcore");
   rt.ensure_initialized(element);
-  std::vector<std::string> lines = throwable_peer(rt, self).stack;
-  GlobalRef arr(rt, rt.new_array("[Ljava/lang/StackTraceElement;", int32_t(lines.size())));
+  std::vector<std::string> lines = bt->frames;
+  GlobalRef arr(rt, rt.new_array(std::string(kTraceType), int32_t(lines.size())));
   for (size_t i = 0; i < lines.size(); ++i) {
     const std::string& line = lines[i];
     size_t paren = line.find('(');
@@ -147,39 +166,52 @@ Handle our_stack_trace(Runtime& rt, Handle self) {
     Handle h = e.get();
     std::memcpy(&rt.array(arr.get(), "stackTrace").data[i * 4], &h, 4);
   }
-  throwable_peer(rt, self).stack_trace = arr.get();
   return arr.get();
+}
+
+// getOurStackTrace without libcore: computed once from the backtrace; empty
+// when the stack trace is not writable (neither a trace nor a backtrace).
+Handle our_stack_trace(Runtime& rt, Handle self) {
+  if (Handle known = tfield(rt, self, "stackTrace", kTraceType)) return known;
+  Handle bt = tfield(rt, self, "backtrace", kObjectType);
+  if (bt == kNull) return rt.new_array(std::string(kTraceType), 0);
+  Handle elements = stack_trace_elements(rt, bt);
+  tfield(rt, self, "stackTrace", kTraceType) = elements;
+  tfield(rt, self, "backtrace", kObjectType) = kNull;
+  return elements;
 }
 
 void add_throwable_ctors(ClassBuilder& b) {
   b.ctor("()V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    init_throwable(rt, a.h(0), nullptr, kNull);
+    init_throwable(rt, a.h(0), nullptr, kNull, false);
     return 0;
   });
   b.ctor("(Ljava/lang/String;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     std::u16string msg = a.h(1) ? rt.string_value(a.h(1)) : u"";
-    init_throwable(rt, a.h(0), a.h(1) ? &msg : nullptr, kNull);
+    init_throwable(rt, a.h(0), a.h(1) ? &msg : nullptr, kNull, false);
     return 0;
   });
   b.ctor("(Ljava/lang/String;Ljava/lang/Throwable;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     std::u16string msg = a.h(1) ? rt.string_value(a.h(1)) : u"";
-    init_throwable(rt, a.h(0), a.h(1) ? &msg : nullptr, a.h(2));
+    init_throwable(rt, a.h(0), a.h(1) ? &msg : nullptr, a.h(2), true);
     return 0;
   });
+  // Throwable(Throwable cause): the message is cause.toString(), or null.
   b.ctor("(Ljava/lang/Throwable;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     std::u16string msg;
     if (a.h(1)) msg = rt.string_value(a.h(1));
-    init_throwable(rt, a.h(0), a.h(1) ? &msg : nullptr, a.h(1));
+    init_throwable(rt, a.h(0), a.h(1) ? &msg : nullptr, a.h(1), true);
     return 0;
   });
+  // Without suppression, the suppressed list stays empty; without a writable
+  // stack trace, neither a trace nor a backtrace.
   b.ctor("(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     std::u16string msg = a.h(1) ? rt.string_value(a.h(1)) : u"";
-    init_throwable(rt, a.h(0), a.h(1) ? &msg : nullptr, a.h(2));
-    ThrowablePeer& p = throwable_peer(rt, a.h(0));
-    p.suppression_enabled = a.z(3);
+    init_throwable(rt, a.h(0), a.h(1) ? &msg : nullptr, a.h(2), true);
+    throwable_peer(rt, a.h(0)).suppression_enabled = a.z(3);
     if (!a.z(4)) {
-      p.stack_writable = false;
-      p.stack.clear();
+      tfield(rt, a.h(0), "stackTrace", kTraceType) = kNull;
+      tfield(rt, a.h(0), "backtrace", kObjectType) = kNull;
     }
     return 0;
   });
@@ -622,20 +654,38 @@ void register_class(NativeRegistry& r) {
 
 void register_throwables(NativeRegistry& r) {
   auto t = r.define("Ljava/lang/Throwable;", "Ljava/lang/Object;", {"Ljava/io/Serializable;"});
+  // libcore's fields (Android 17), the whole state of a Throwable: its
+  // bytecode (with a boot class path) and the core's methods (without)
+  // share them. Serialization writes them as Android does.
+  t.field("backtrace", std::string(kObjectType));
+  t.field("cause", std::string(kThrowableType));
+  t.field("detailMessage", "Ljava/lang/String;");
+  t.field("stackTrace", std::string(kTraceType));
+  t.field("suppressedExceptions", "Ljava/util/List;");
   add_throwable_ctors(t);
   t.method("getMessage", "()Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    ThrowablePeer& p = throwable_peer(rt, a.h(0));
-    return p.has_message ? rt.new_string(p.message) : kNull;
+    return tfield(rt, a.h(0), "detailMessage", "Ljava/lang/String;");
   });
   t.method("getLocalizedMessage", "()Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     return rt.call_virtual(a.h(0), "getMessage", "()Ljava/lang/String;");
   });
   t.method("getCause", "()Ljava/lang/Throwable;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    return throwable_peer(rt, a.h(0)).cause;
+    Handle cause = tfield(rt, a.h(0), "cause", kThrowableType);
+    return cause == a.h(0) ? kNull : cause;
   });
   t.method("initCause", "(Ljava/lang/Throwable;)Ljava/lang/Throwable;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    throwable_peer(rt, a.h(0)).cause = a.h(1);
-    return a.h(0);
+    Handle self = a.h(0), cause = a.h(1);
+    if (tfield(rt, self, "cause", kThrowableType) != self) {
+      std::u16string what = cause ? rt.string_value(cause) : u"a null";
+      throw JavaThrow{rt.make_throwable(rt.find_class("Ljava/lang/IllegalStateException;"),
+                                        u"Can't overwrite cause with " + what, true, self)};
+    }
+    if (cause == self) {
+      throw JavaThrow{rt.make_throwable(rt.find_class("Ljava/lang/IllegalArgumentException;"), u"Self-causation not permitted",
+                                        true, self)};
+    }
+    tfield(rt, self, "cause", kThrowableType) = cause;
+    return self;
   });
   t.method("toString", "()Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     std::string name = a.self().klass->java_name();
@@ -660,9 +710,6 @@ void register_throwables(NativeRegistry& r) {
     std::memcpy(rt.array(arr, "suppressed").data.data(), items.data(), items.size() * 4);
     return arr;
   });
-  // The stack as StackTraceElement objects (libcore's class): built once from
-  // the captured frames, unless setStackTrace replaced it. getOurStackTrace
-  // is the private one libcore's printStackTrace uses.
   t.method("getOurStackTrace", "()[Ljava/lang/StackTraceElement;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     return our_stack_trace(rt, a.h(0));
   });
@@ -671,26 +718,37 @@ void register_throwables(NativeRegistry& r) {
   });
   t.method("setStackTrace", "([Ljava/lang/StackTraceElement;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     if (a.h(1) == kNull) rt.throw_npe("stackTrace");
-    Handle copy = clone_array(rt, a.h(1), "[Ljava/lang/StackTraceElement;");
-    ArrayObject& arr = rt.array(copy, "stackTrace");
+    GlobalRef copy(rt, clone_array(rt, a.h(1), "[Ljava/lang/StackTraceElement;"));
+    ArrayObject& arr = rt.array(copy.get(), "stackTrace");
     for (uint32_t i = 0; i < arr.length; ++i) {
       Handle e;
       std::memcpy(&e, &arr.data[size_t(i) * 4], 4);
       if (e == kNull) rt.throw_npe("stackTrace[" + std::to_string(i) + "]");
     }
-    ThrowablePeer& p = throwable_peer(rt, a.h(0));
-    if (p.stack_writable) p.stack_trace = copy;
+    if (tfield(rt, a.h(0), "stackTrace", kTraceType) == kNull && tfield(rt, a.h(0), "backtrace", kObjectType) == kNull) {
+      return 0;  // not writable
+    }
+    tfield(rt, a.h(0), "stackTrace", kTraceType) = copy.get();
     return 0;
   });
   t.method("fillInStackTrace", "()Ljava/lang/Throwable;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    ThrowablePeer& p = throwable_peer(rt, a.h(0));
-    if (!p.stack_writable) return a.h(0);
-    p.stack = rt.capture_stack();
-    // Without this native frame and those of fillInStackTrace overrides.
-    while (!p.stack.empty() && p.stack.front().find(".fillInStackTrace(") != std::string::npos) p.stack.erase(p.stack.begin());
-    p.stack_trace = kNull;
-    return a.h(0);
+    Handle self = a.h(0);
+    if (tfield(rt, self, "stackTrace", kTraceType) != kNull || tfield(rt, self, "backtrace", kObjectType) != kNull) {
+      Handle bt = new_backtrace(rt);
+      tfield(rt, self, "backtrace", kObjectType) = bt;
+      tfield(rt, self, "stackTrace", kTraceType) = kNull;
+    }
+    return self;
   });
+  // With a boot class path, Android's bytecode of these methods runs over the
+  // same fields; it captures and decodes the stack through these two natives.
+  t.bytecode_with_libcore({"<init>", "getMessage", "getLocalizedMessage", "getCause", "initCause", "toString",
+                           "printStackTrace", "addSuppressed", "getSuppressed", "getOurStackTrace", "getStackTrace",
+                           "setStackTrace", "fillInStackTrace"});
+  r.bind("Ljava/lang/Throwable;", "nativeFillInStackTrace", "()Ljava/lang/Object;",
+         [](Runtime& rt, NativeArgs&) -> uint64_t { return new_backtrace(rt); });
+  r.bind("Ljava/lang/Throwable;", "nativeGetStackTrace", "(Ljava/lang/Object;)[Ljava/lang/StackTraceElement;",
+         [](Runtime& rt, NativeArgs& a) -> uint64_t { return a.h(0) ? stack_trace_elements(rt, a.h(0)) : kNull; });
 
   struct Def {
     const char* cls;
@@ -747,7 +805,7 @@ void register_throwables(NativeRegistry& r) {
   add_throwable_ctors(ae);
   ae.ctor("(Ljava/lang/Object;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     std::u16string msg = a.h(1) ? rt.string_value(a.h(1)) : u"null";
-    init_throwable(rt, a.h(0), &msg, kNull);
+    init_throwable(rt, a.h(0), &msg, kNull, false);
     return 0;
   });
 }
@@ -1189,6 +1247,34 @@ void init_thread_object(Runtime& rt, Handle thread) {
       }
     }
   }
+}
+
+uint32_t* throwable_field(Runtime& rt, Handle throwable, std::string_view name, std::string_view type) {
+  Object* o = rt.object(throwable);
+  Class* t = rt.lookup_class(kThrowableType);
+  if (!o || !t || !rt.is_assignable(o->klass, t)) return nullptr;
+  Field* f = t->declared_field(name, type);
+  if (!f || f->is_static()) return nullptr;
+  return &o->fields.at(f->slot);
+}
+
+void init_throwable_fields(Runtime& rt, Handle throwable, const std::u16string_view* message, Handle cause) {
+  auto set = [&](std::string_view name, std::string_view type, Handle value) {
+    if (uint32_t* f = throwable_field(rt, throwable, name, type)) *f = value;
+  };
+  // A static of an initialized class of libcore, null otherwise.
+  auto libcore_static = [&](std::string_view cls, std::string_view name, std::string_view type) -> Handle {
+    Class* c = rt.lookup_class(cls);
+    Field* f = c && c->state == Class::State::kInitialized ? c->declared_field(name, type) : nullptr;
+    return f && f->is_static() ? Handle(c->statics.at(f->slot)) : kNull;
+  };
+  set("cause", kThrowableType, cause ? cause : throwable);
+  set("detailMessage", "Ljava/lang/String;", message ? rt.new_string(std::u16string(*message)) : kNull);
+  // Throwable's initializers: libcore's empty stack trace (decoded from the
+  // backtrace on demand) and Collections.emptyList() (suppression enabled).
+  set("stackTrace", kTraceType, libcore_static("Llibcore/util/EmptyArray;", "STACK_TRACE_ELEMENT", kTraceType));
+  set("suppressedExceptions", "Ljava/util/List;", libcore_static("Ljava/util/Collections;", "EMPTY_LIST", "Ljava/util/List;"));
+  set("backtrace", kObjectType, new_backtrace(rt));
 }
 
 void thread_destroyed(Runtime& rt, Handle thread) {

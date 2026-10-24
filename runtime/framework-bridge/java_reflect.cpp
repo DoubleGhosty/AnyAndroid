@@ -194,7 +194,7 @@ uint32_t& invocation_target(Runtime& rt, Handle ite) {
 }
 
 void set_invocation_target(Runtime& rt, Handle ite, Handle target) {
-  if (auto* p = rt.peer<rt::ThrowablePeer>(ite)) p->cause = target;
+  if (uint32_t* cause = rt::throwable_field(rt, ite, "cause", "Ljava/lang/Throwable;")) *cause = target;
   invocation_target(rt, ite) = target;
 }
 
