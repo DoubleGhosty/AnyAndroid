@@ -50,6 +50,9 @@ struct MethodDef {
   std::vector<uint16_t> insns;
   std::vector<Fixup> fixups;
   std::vector<TryDef> tries;
+  // Positions (.line): code unit address and source line, in ascending
+  // address order, written as the method's debug_info_item.
+  std::vector<std::pair<uint32_t, uint32_t>> positions;
 };
 
 struct ClassDef {

@@ -233,6 +233,47 @@ std::vector<uint8_t> write_dex(const std::vector<ClassDef>& classes) {
   };
   std::vector<MapItem> map_items;
 
+  // Debug information (positions only): the encoding of dx and d8, special
+  // opcodes when the deltas fit, DBG_ADVANCE_LINE and DBG_ADVANCE_PC otherwise.
+  std::map<const MethodDef*, uint32_t> debug_off;
+  uint32_t first_debug = 0, debug_count = 0;
+  for (const ClassDef* c : order) {
+    for (const auto* list : {&c->direct_methods, &c->virtual_methods}) {
+      for (const MethodDef& m : *list) {
+        if (!m.has_code || m.positions.empty()) continue;
+        if (debug_count++ == 0) first_debug = uint32_t(w.size());
+        debug_off[&m] = uint32_t(w.size());
+        std::vector<std::string> params;
+        std::string ret;
+        dex::split_signature(m.signature, params, ret);
+        uint32_t address = 0, line = m.positions.front().second;
+        w.uleb128(line);  // line_start
+        w.uleb128(uint32_t(params.size()));
+        for (size_t i = 0; i < params.size(); ++i) w.uleb128(0);  // no parameter name (uleb128p1 of NO_INDEX)
+        for (const auto& [addr, ln] : m.positions) {
+          if (addr < address) throw std::runtime_error("positions non croissantes : " + m.name);
+          uint32_t address_delta = addr - address;
+          int64_t line_delta = int64_t(ln) - int64_t(line);
+          if (line_delta < -4 || line_delta > 10) {  // DBG_LINE_BASE -4, DBG_LINE_RANGE 15
+            w.u8(0x02);  // DBG_ADVANCE_LINE
+            w.sleb128(int32_t(line_delta));
+            line_delta = 0;
+          }
+          if ((line_delta + 4) + 15 * uint64_t(address_delta) + 0x0a > 0xff) {
+            w.u8(0x01);  // DBG_ADVANCE_PC
+            w.uleb128(address_delta);
+            address_delta = 0;
+          }
+          w.u8(uint8_t((line_delta + 4) + 15 * address_delta + 0x0a));  // DBG_FIRST_SPECIAL 0x0a
+          address = addr;
+          line = ln;
+        }
+        w.u8(0x00);  // DBG_END_SEQUENCE
+      }
+    }
+  }
+  if (debug_count) map_items.push_back({0x2003, debug_count, first_debug});
+
   // Code items.
   std::map<const MethodDef*, uint32_t> code_off;
   uint32_t first_code = 0, code_count = 0;
@@ -265,7 +306,7 @@ std::vector<uint8_t> write_dex(const std::vector<ClassDef>& classes) {
         w.u16(m.ins);
         w.u16(m.outs);
         w.u16(uint16_t(m.tries.size()));
-        w.u32(0);  // debug_info_off
+        w.u32(debug_off.count(&m) ? debug_off.at(&m) : 0);  // debug_info_off
         w.u32(uint32_t(insns.size()));
         for (uint16_t u : insns) w.u16(u);
         if (!m.tries.empty()) {

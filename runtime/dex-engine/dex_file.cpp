@@ -492,6 +492,75 @@ CodeItem DexFile::code_item(uint32_t offset) const {
   return code;
 }
 
+int32_t DexFile::line_for_pc(uint32_t code_offset, uint32_t pc) const {
+  // DexFile::DecodeDebugPositionInfo with CodeItemDebugInfoAccessor::
+  // GetLineNumForPc's visitor (libdexfile, android-17.0.0_r1).
+  constexpr uint8_t kEndSequence = 0x00, kAdvancePc = 0x01, kAdvanceLine = 0x02, kStartLocal = 0x03,
+                    kStartLocalExtended = 0x04, kEndLocal = 0x05, kRestartLocal = 0x06, kSetPrologueEnd = 0x07,
+                    kSetEpilogueBegin = 0x08, kSetFile = 0x09, kFirstSpecial = 0x0a;
+  constexpr int kLineBase = -4, kLineRange = 15;
+  uint32_t line_num = uint32_t(-1);
+  try {
+    ByteReader code(std::span<const uint8_t>(data_), code_offset);
+    code.skip(8);
+    const uint32_t debug_info_off = code.u32();
+    // GetDebugInfoStream: 0, or an offset past the data (some applications
+    // write 0xFFFFFFFF), is no debug information.
+    if (debug_info_off == 0 || debug_info_off >= limit_) return -1;
+    ByteReader r(std::span<const uint8_t>(data_), debug_info_off);
+    uint32_t line = r.uleb128();  // line_start
+    const uint32_t parameters = r.uleb128();
+    for (uint32_t i = 0; i < parameters; ++i) r.uleb128();  // parameter_names (uleb128p1)
+    uint32_t address = 0;
+    for (;;) {
+      const uint8_t op = r.u8();
+      switch (op) {
+        case kEndSequence:
+          return int32_t(line_num);
+        case kAdvancePc:
+          address += r.uleb128();
+          break;
+        case kAdvanceLine:
+          line += uint32_t(r.sleb128());
+          break;
+        case kStartLocal:  // register, name, type
+          for (int k = 0; k < 3; ++k) r.uleb128();
+          break;
+        case kStartLocalExtended:  // register, name, type, signature
+          for (int k = 0; k < 4; ++k) r.uleb128();
+          break;
+        case kEndLocal:
+        case kRestartLocal:
+          r.uleb128();
+          break;
+        case kSetPrologueEnd:
+        case kSetEpilogueBegin:
+          break;
+        case kSetFile:
+          r.uleb128();
+          break;
+        default: {
+          const int adjusted = op - kFirstSpecial;
+          address += uint32_t(adjusted / kLineRange);
+          line += uint32_t(kLineBase + adjusted % kLineRange);
+          // Positions come in ascending address order: the last one at or
+          // before pc gives the line.
+          if (address > pc) return int32_t(line_num);
+          line_num = line;
+          if (address == pc) return int32_t(line_num);
+        }
+      }
+    }
+  } catch (const FormatError&) {
+    return int32_t(line_num);  // truncated stream: the positions read so far
+  }
+}
+
+const std::string* DexFile::source_file(const ClassDef& def) const {
+  if (def.source_file_idx == kNoIndex || def.source_file_idx >= num_strings()) return nullptr;
+  return &string(def.source_file_idx);
+}
+
 std::vector<uint32_t> DexFile::type_list(uint32_t offset) const {
   if (offset % 4 != 0) throw_format("type_list non alignée");
   ByteReader r(std::span<const uint8_t>(data_), offset);

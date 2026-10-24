@@ -1,18 +1,17 @@
-/apex/com.android.art/javalib/core-oj.jar!classes.dex : 571 / 615 natives liées
+/apex/com.android.art/javalib/core-oj.jar!classes.dex : 573 / 615 natives liées
 /apex/com.android.art/javalib/core-libart.jar!classes.dex : 328 / 351 natives liées
 /apex/com.android.art/javalib/okhttp.jar!classes.dex : 0 / 0 natives liées
 /apex/com.android.art/javalib/bouncycastle.jar!classes.dex : 0 / 0 natives liées
 /apex/com.android.art/javalib/apache-xml.jar!classes.dex : 0 / 0 natives liées
 /apex/com.android.i18n/javalib/core-icu4j.jar!classes.dex : 69 / 69 natives liées
 
-Total : 1035 méthodes natives ; 968 liées par AnyAndroid, 24 remplacées par le cœur de la VM (Object, String, Class, Thread, Throwable, réflexion), 1 inatteignables (privées, appelées seulement par des méthodes que le cœur remplace), 7 sans implémentation dans Android 17 lui-même, 35 manquantes.
+Total : 1035 méthodes natives ; 970 liées par AnyAndroid, 24 remplacées par le cœur de la VM (Object, String, Class, Thread, Throwable, réflexion), 1 inatteignables (privées, appelées seulement par des méthodes que le cœur remplace), 7 sans implémentation dans Android 17 lui-même, 33 manquantes.
 Membres du cœur de la VM absents à l'exécution (ni le cœur ni le bytecode fusionné) : 28, dont 0 utilisés par une méthode qui peut s'exécuter (--core pour la liste)
 
 Natives manquantes par classe (40 premières, --all pour tout) :
   org.apache.harmony.xml.ExpatParser (11)
   org.apache.harmony.xml.ExpatAttributes (9)
   sun.nio.fs.LinuxWatchService (8)
-  java.lang.StackStreamFactory (2)
   java.lang.Thread (2)
   jdk.internal.vm.Continuation (2)
   libcore.io.Linux (1)

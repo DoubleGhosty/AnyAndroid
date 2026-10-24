@@ -2,13 +2,13 @@
   "metadata": {
     "project": "AnyAndroid for Windows",
     "version": "0.1.0",
-    "generated_at": "2026-10-24T19:04:50.473513+00:00",
+    "generated_at": "2026-10-24T22:42:42.349248+00:00",
     "target": "Android natif sur Windows (sans VM ni hyperviseur)"
   },
   "summary": {
     "overall_percent": 50.0,
     "bridge_percent": 90.0,
-    "libcore_percent": 96.6,
+    "libcore_percent": 96.8,
     "dalvik_percent": 100.0,
     "total_classes": 140,
     "total_members": 977,
@@ -11593,17 +11593,17 @@
   },
   "libcore": {
     "total": 1035,
-    "linked": 968,
+    "linked": 970,
     "vm_core": 24,
-    "done": 1000,
-    "missing": 35,
-    "percent": 96.6,
+    "done": 1002,
+    "missing": 33,
+    "percent": 96.8,
     "modules": [
       {
         "name": "core-oj.jar",
-        "done": 571,
+        "done": 573,
         "total": 615,
-        "percent": 92.8
+        "percent": 93.2
       },
       {
         "name": "core-libart.jar",
@@ -11648,10 +11648,6 @@
       {
         "class": "sun.nio.fs.LinuxWatchService",
         "missing": 8
-      },
-      {
-        "class": "java.lang.StackStreamFactory",
-        "missing": 2
       },
       {
         "class": "java.lang.Thread",

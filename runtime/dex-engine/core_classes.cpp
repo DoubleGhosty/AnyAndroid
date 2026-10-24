@@ -129,41 +129,25 @@ Handle clone_array(Runtime& rt, Handle src, const char* descriptor) {
 }
 
 // Thread::CreateInternalStackTrace: the current stack, without the frames of
-// the throwable's own methods (capture_stack), held by a backtrace object.
+// the throwable's own methods, held by a backtrace object.
 Handle new_backtrace(Runtime& rt) {
   Handle bt = rt.alloc(rt.find_class(kObjectType));
   auto p = std::make_unique<BacktracePeer>();
-  p->frames = rt.capture_stack();
+  p->frames = rt.internal_stack_trace();
   rt.object(bt)->peer = std::move(p);
   return bt;
 }
 
-// Throwable.nativeGetStackTrace: the StackTraceElements of a backtrace
-// ("pkg.Class.method(pc 0x0012)" or "...(Native Method)" frames: no file or
-// line number, -2 marking native methods as in StackTraceElement).
+// Throwable.nativeGetStackTrace (InternalStackTraceToStackTraceElementArray):
+// the StackTraceElements of a backtrace.
 Handle stack_trace_elements(Runtime& rt, Handle backtrace) {
   auto* bt = rt.peer<BacktracePeer>(backtrace);
   if (!bt) return kNull;
-  Class* element = rt.lookup_class("Ljava/lang/StackTraceElement;");
-  Method* ctor =
-      element ? element->declared_method("<init>", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V") : nullptr;
-  if (!ctor) rt.throw_unsupported("Ljava/lang/Throwable;->getStackTrace()[Ljava/lang/StackTraceElement;", "sans la libcore");
-  rt.ensure_initialized(element);
-  std::vector<std::string> lines = bt->frames;
-  GlobalRef arr(rt, rt.new_array(std::string(kTraceType), int32_t(lines.size())));
-  for (size_t i = 0; i < lines.size(); ++i) {
-    const std::string& line = lines[i];
-    size_t paren = line.find('(');
-    size_t dot = line.rfind('.', paren);
-    std::string cls = dot == std::string::npos ? std::string() : line.substr(0, dot);
-    std::string method = line.substr(dot == std::string::npos ? 0 : dot + 1, paren - (dot == std::string::npos ? 0 : dot + 1));
-    bool native = line.find("(Native Method)") != std::string::npos;
-    GlobalRef e(rt, rt.alloc(element));
-    GlobalRef c(rt, rt.new_string_utf8(cls));
-    Handle m = rt.new_string_utf8(method);
-    uint32_t args[5] = {e.get(), c.get(), m, kNull, uint32_t(native ? -2 : -1)};
-    rt.invoke(ctor, args, 5);
-    Handle h = e.get();
+  // The frames are copied: the backtrace may be collected meanwhile.
+  std::vector<TraceFrame> frames = bt->frames;
+  GlobalRef arr(rt, rt.new_array(std::string(kTraceType), int32_t(frames.size())));
+  for (size_t i = 0; i < frames.size(); ++i) {
+    Handle h = rt.stack_trace_element(frames[i]);
     std::memcpy(&rt.array(arr.get(), "stackTrace").data[i * 4], &h, 4);
   }
   return arr.get();

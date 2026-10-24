@@ -4,4 +4,4 @@ lambda : ok
 services : aa.demo -> même objet, absent -> null, liste aa.demo,accessibility,activity,activity_task,audio,display,input,input_method,notification,package,permissionmgr,window
 chargeurs : /data/app/com.anyandroid.samples.hello/base.apk
   Hello -> son PathClassLoader, forName même classe, amorçage ne la voit pas, Probe -> BootClassLoader, entrées com.anyandroid.samples.hello.Hello
-pile : aa.host.Probe.stackTraces, java.lang.IllegalStateException: sonde, at aa.host.Probe.stackTraces(Unknown Source), supprimées 1
+pile : aa.host.Probe.stackTraces, java.lang.IllegalStateException: sonde, at aa.host.Probe.stackTraces(Probe.java:77), supprimées 1

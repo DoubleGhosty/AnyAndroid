@@ -377,7 +377,8 @@ TEST(invocation_target_exception_from_bytecode) {
     // creating method (constructors omitted), then the target as its cause.
     auto ite = rt::Handle(runtime->call_static("LIteTest;", "make", "()Ljava/lang/reflect/InvocationTargetException;"));
     std::string trace = runtime->describe_throwable(ite);
-    CHECK(trace.starts_with("java.lang.reflect.InvocationTargetException\n    at IteTest.make(pc "));
+    // No source file in this DEX: ART 17 names it after the file's SHA-1.
+    CHECK(trace.starts_with("java.lang.reflect.InvocationTargetException\n    at IteTest.make(dex-id-"));
     CHECK(trace.find("Caused by: java.lang.IllegalStateException: cible\n") != std::string::npos);
   }
 }

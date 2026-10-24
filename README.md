@@ -63,7 +63,7 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
   sur les natives de conscrypt, réécrites ; le **réseau** (sockets TCP/UDP, résolution de noms, NIO
   réseau avec sélecteur et canaux asynchrones) sur Winsock, **AF_UNIX** (flux, datagrammes,
   `SOCK_SEQPACKET`, `SCM_RIGHTS`) et les **liens symboliques** du bac à sable (e2e `host-net`,
-  `host-nio`, `host-libcore`) ; 968 des 1035 natives de la libcore sont liées, 35 manquent ; `Unsafe`, `libcore.io.Memory`, les `ByteBuffer` directs et
+  `host-nio`, `host-libcore`) ; 970 des 1035 natives de la libcore sont liées, 33 manquent (piles d'appels avec fichier et ligne, `StackWalker`) ; `Unsafe`, `libcore.io.Memory`, les `ByteBuffer` directs et
   `mmap` sur une mémoire native émulée (adresses étiquetées vérifiées à chaque accès, budget global).
   Côté `framework.jar`, `Resources.getSystem()` lit le vrai `framework-res.apk` de l'image.
 - **Démarrage d'applications par le vrai framework** ([ADR-006](docs/adr/ADR-006-demarrage-applications.md),

@@ -285,10 +285,10 @@ UnixNativeDispatcher). Hors de cette plage : 0x0b01 DirStream (opendir de sun.ni
    libcore ; `libcore natives --core` à 0 membre absent atteignable ; liaisons orphelines à 0) :
    réseau, NIO réseau, epoll, AF_UNIX et `SCM_RIGHTS`, liens symboliques, `UnixNativeDispatcher`,
    `VMDebug` et `ZygoteHooks` sont faits (e2e `host-net`, `host-nio`, `host-libcore`). Restent
-   les 35 natives de `libcore natives --libcore-only` (`Expat` 20, `LinuxWatchService` 8,
-   `StackStreamFactory` 2, fils virtuels 4, `mkfifo` 1), les finaliseurs, la lecture seule du
-   chargement dynamique de code ; relancer la CI Windows dès que le compte GitHub Actions
-   fonctionne. Après chaque changement de couverture, régénérer
+   les 33 natives de `libcore natives --libcore-only` (`Expat` 20, `LinuxWatchService` 8,
+   fils virtuels 4, `mkfifo` 1 ; `StackStreamFactory` et les numéros de ligne sont faits), les
+   finaliseurs, la lecture seule du chargement dynamique de code ; relancer la CI Windows dès
+   que le compte GitHub Actions fonctionne. Après chaque changement de couverture, régénérer
    `docs/compatibility/libcore-natives.txt` (lu par `tools/progress.py`) avec la commande exacte.
 3. **G4 : code natif** : chargeur ELF et bionic. L'[évaluation d'ANDROWIN](evaluations/ANDROWIN.md)
    décrit ntdroid (ART réel dans un processus Windows par interception d'appels système) : c'est

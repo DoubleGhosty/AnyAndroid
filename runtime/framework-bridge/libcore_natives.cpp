@@ -872,29 +872,18 @@ void register_vm(rt::NativeRegistry& r) {
   };
   r.bind(st, "getStackClass2", "()Ljava/lang/Class;", stack_class(3));
   // dalvik_system_VMStack.cc: the stack of a thread (Thread.getStackTrace,
-  // getAllStackTraces), innermost frame first, from its frames: a thread
-  // other than the caller is parked while the caller holds the GIL. Like the
-  // traces of exceptions, the elements carry no file name nor line number.
-  // Null for a thread that is not alive.
+  // getAllStackTraces), innermost frame first: CreateInternalStackTrace then
+  // InternalStackTraceToStackTraceElementArray. A thread other than the
+  // caller is parked while the caller holds the GIL. Empty for a thread that
+  // is not alive.
   auto thread_stack = [](Runtime& rt, Handle thread) -> std::vector<rt::GlobalRef> {
     rt::VmThread* t = thread == kNull ? nullptr : rt.thread_of_peer(thread);
     if (thread != kNull && thread == rt.current_thread_peer()) t = rt.current_thread();
     std::vector<rt::GlobalRef> elements;
     if (!t || !t->alive) return elements;
-    rt::Class* element = rt.find_class("Ljava/lang/StackTraceElement;");
-    rt.ensure_initialized(element);
-    rt::Method* ctor = element->declared_method("<init>", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V");
-    // The frames vector may grow while the constructor runs (same thread): copy them first.
-    std::vector<std::pair<rt::Method*, bool>> frames;
-    for (auto f = t->frames.rbegin(); f != t->frames.rend(); ++f) frames.emplace_back(f->method, f->pc == rt::kNativePc);
-    for (const auto& [method, native] : frames) {
-      rt::GlobalRef e(rt, rt.alloc(element));
-      rt::GlobalRef cls(rt, rt.new_string_utf8(method->owner->java_name()));
-      Handle name = rt.new_string_utf8(method->name);
-      uint32_t args[5] = {e.get(), cls.get(), name, kNull, uint32_t(native ? -2 : -1)};
-      rt.invoke(ctor, args, 5);
-      elements.push_back(e);
-    }
+    // Taken before the elements are made: the frames change while they are.
+    std::vector<rt::TraceFrame> frames = rt.internal_stack_trace(t);
+    for (const rt::TraceFrame& f : frames) elements.emplace_back(rt, rt.stack_trace_element(f));
     return elements;
   };
   auto to_array = [](Runtime& rt, const char* desc, const std::vector<rt::GlobalRef>& items) -> Handle {
@@ -3287,6 +3276,100 @@ void register_invoke(rt::NativeRegistry& r) {
       invoke_custom});
 }
 
+// --- java.lang.StackStreamFactory (StackWalker): java_lang_StackStreamFactory.cc and
+// Thread::InternalStackTraceToStackFrameInfoArray (thread.cc), android-17.0.0_r1.
+
+constexpr int64_t kFillClassRefsOnly = 0x2;  // StackStreamFactory.FILL_CLASS_REFS_ONLY
+
+// InitStackFrameInfo: the fields of a StackFrameInfo for one frame.
+void init_stack_frame_info(Runtime& rt, Handle frame, const rt::TraceFrame& f) {
+  rt::Method* m = f.method;
+  int32_t line = -1;
+  std::optional<std::string> file;
+  if (!m->interface_method) {  // a proxy method has no source file and line -1
+    line = rt::Runtime::line_number(m, f.dex_pc);
+    if (line == -1) {
+      // Without a line (no debug information), the dex pc and no file name.
+      line = int32_t(f.dex_pc);
+    } else if (const std::string* source = rt::Runtime::source_file(m->owner)) {
+      file = *source;
+    }
+  }
+  rt::Method* iface = m->interface_method ? m->interface_method : m;
+  rt::GlobalRef name(rt, rt.new_string_utf8(iface->name));
+  rt::GlobalRef file_name(rt, file ? rt.new_string_utf8(*file) : kNull);
+  // ClassLinker::ResolveMethodType of the interface method's prototype.
+  rt::DexCache* cache = iface->owner->dex_cache;
+  rt::GlobalRef type(rt, cache && iface->dex == cache->dex
+                            ? rt.resolve_method_type(iface, iface->dex->method(iface->method_idx).proto_idx)
+                            : create_method_type(rt, type_from_signature(rt, iface->signature)));
+  rt::Object& o = rt.nonnull(frame, "StackFrameInfo");
+  auto set = [&](const char* field, const char* type_desc, uint32_t v) {
+    rt::Field* fld = find_field(o.klass, field, type_desc);
+    if (!fld) rt.throw_new("Ljava/lang/InternalError;", std::string("StackFrameInfo.") + field + " absent");
+    o.fields.at(fld->slot) = v;
+  };
+  set("declaringClass", "Ljava/lang/Class;", rt.class_mirror(m->owner));
+  set("methodType", "Ljava/lang/invoke/MethodType;", type.get());
+  set("methodName", "Ljava/lang/String;", name.get());
+  set("fileName", "Ljava/lang/String;", file_name.get());
+  set("lineNumber", "I", uint32_t(line));
+  set("bci", "I", f.dex_pc);
+}
+
+void register_stack_walker(rt::NativeRegistry& r) {
+  const char* ssf = "Ljava/lang/StackStreamFactory;";
+  // nativeGetStackAnchor: the internal stack trace of the current thread
+  // (Thread::CreateInternalStackTrace), which LibcoreAnchor keeps.
+  r.bind(ssf, "nativeGetStackAnchor", "()Ljava/lang/Object;", [](Runtime& rt, NativeArgs&) -> uint64_t {
+    auto trace = std::make_unique<rt::BacktracePeer>();
+    trace->frames = rt.internal_stack_trace();
+    Handle anchor = rt.alloc(rt.find_class("Ljava/lang/Object;"));
+    rt.object(anchor)->peer = std::move(trace);
+    return anchor;
+  });
+  // nativeFetchStackFrameInfo(mode, anchor, startLevel, batchSize,
+  // startBufferIndex, frames): fills frames from startBufferIndex with the
+  // anchor's frames from startLevel, at most batchSize of them, and returns
+  // the end index. With FILL_CLASS_REFS_ONLY the buffer receives the
+  // declaring classes, otherwise it holds StackFrameInfo objects to fill
+  // (stopping at the first that is not one).
+  r.bind(ssf, "nativeFetchStackFrameInfo", "(JLjava/lang/Object;III[Ljava/lang/Object;)I",
+         [](Runtime& rt, NativeArgs& a) -> uint64_t {
+           const int64_t mode = a.i64(0);
+           const Handle anchor = a.h(2), buffer = a.h(6);
+           const int32_t start_level = a.i32(3), batch_size = a.i32(4), start_index = a.i32(5);
+           if (anchor == kNull) return rt::ret_int(start_level);
+           rt.nonnull(buffer, "frameBuffer");
+           auto* trace = rt.peer<rt::BacktracePeer>(anchor);
+           std::vector<rt::TraceFrame> frames;
+           if (trace) frames = trace->frames;
+           const int32_t depth = int32_t(frames.size());
+           int32_t end = start_index;
+           if (start_level < 0 || start_level >= depth) return rt::ret_int(end);
+           const int32_t buffer_size = int32_t(rt.array(buffer, "frameBuffer").length);
+           if (start_index < 0 || start_index >= buffer_size) return rt::ret_int(end);
+           const bool class_refs = (mode & kFillClassRefsOnly) != 0;
+           rt::Class* sfi = rt.find_class("Ljava/lang/StackFrameInfo;");
+           for (int32_t i = start_level; i < depth; ++i) {
+             if (int64_t(end) >= int64_t(start_index) + batch_size || end >= buffer_size) break;
+             auto& data = rt.array(buffer, "frameBuffer").data;
+             if (class_refs) {
+               Handle c = rt.class_mirror(frames[size_t(i)].method->owner);
+               std::memcpy(&data[size_t(end) * 4], &c, 4);
+             } else {
+               Handle frame;
+               std::memcpy(&frame, &data[size_t(end) * 4], 4);
+               // A buffer slot libcore did not fill: stop here.
+               if (frame == kNull || !rt.is_assignable(rt.object(frame)->klass, sfi)) break;
+               init_stack_frame_info(rt, frame, frames[size_t(i)]);
+             }
+             ++end;
+           }
+           return rt::ret_int(end);
+         });
+}
+
 }  // namespace
 
 namespace {
@@ -3355,6 +3438,7 @@ void register_libcore_natives(rt::NativeRegistry& r) {
   register_unsafe(r);
   register_direct_buffers(r);
   register_invoke(r);
+  register_stack_walker(r);
   register_libcore_charsets(r);
   register_libcore_files(r);
   register_libcore_net(r);

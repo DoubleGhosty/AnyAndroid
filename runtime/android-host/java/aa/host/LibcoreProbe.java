@@ -83,6 +83,7 @@ public final class LibcoreProbe {
     smallNatives();
     bigIntegers();
     threads();
+    stacks();
     dexFilesInMemory();
     unicode();
     timeZones();
@@ -567,6 +568,61 @@ public final class LibcoreProbe {
 
   static String frame(StackTraceElement e) {
     return e.getClassName() + "." + e.getMethodName() + (e.isNativeMethod() ? " (natif)" : "");
+  }
+
+  // --- Stack traces: line numbers, StackWalker (StackStreamFactory) ---------------------
+
+  /** The class of the caller of this method's caller (StackWalker.getCallerClass). */
+  static Class<?> callerOfCaller() {
+    return StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass();
+  }
+
+  /** The frames of `deep` on the stack once `n` calls deep: walks past the first batches. */
+  static long deep(int n) {
+    if (n > 0) return deep(n - 1);
+    return StackWalker.getInstance().walk(s -> s.filter(f -> f.getMethodName().equals("deep")).count());
+  }
+
+  /** Whether Method.invoke's frame is shown with and without SHOW_REFLECT_FRAMES. */
+  static String reflectFrames() {
+    boolean shown = StackWalker.getInstance(StackWalker.Option.SHOW_REFLECT_FRAMES)
+        .walk(s -> s.anyMatch(f -> f.getClassName().equals("java.lang.reflect.Method")));
+    boolean hidden = StackWalker.getInstance()
+        .walk(s -> s.anyMatch(f -> f.getClassName().equals("java.lang.reflect.Method")));
+    return "Method.invoke montré " + shown + ", masqué " + !hidden;
+  }
+
+  static void stacks() {
+    check("numéros de ligne", () -> {
+      StackTraceElement a = new Throwable().getStackTrace()[0];
+      StackTraceElement b = new Throwable().getStackTrace()[0];
+      StackTraceElement libcore = Thread.currentThread().getStackTrace()[1];
+      return a.getFileName() + ", ligne suivante " + (b.getLineNumber() - a.getLineNumber()) + ", positive "
+          + (a.getLineNumber() > 0) + " ; " + libcore;
+    });
+    check("StackWalker", () -> {
+      StackWalker walker = StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
+      StackWalker.StackFrame top = walker.walk(s -> s.findFirst()).get();
+      boolean main = walker.walk(s -> s.anyMatch(
+          f -> f.getMethodName().equals("main") && f.getDeclaringClass() == LibcoreProbe.class));
+      StackTraceElement element = top.toStackTraceElement();
+      return top.getDeclaringClass().getSimpleName() + ", " + top.getFileName() + ", type " + top.getMethodType()
+          + " " + top.getDescriptor() + ", ligne positive " + (top.getLineNumber() > 0) + ", bci positif "
+          + (top.getByteCodeIndex() >= 0) + ", élément " + element.getFileName() + " même ligne "
+          + (element.getLineNumber() == top.getLineNumber()) + ", main présent " + main;
+    });
+    check("StackWalker, appelant et lots", () -> {
+      String noRetain;
+      try {
+        StackWalker.getInstance().walk(s -> s.findFirst()).get().getDeclaringClass();
+        noRetain = "permis";
+      } catch (UnsupportedOperationException e) {
+        noRetain = "UnsupportedOperationException";
+      }
+      return "appelant " + callerOfCaller().getSimpleName() + ", " + deep(40) + " cadres de deep, sans "
+          + "RETAIN_CLASS_REFERENCE " + noRetain + ", "
+          + LibcoreProbe.class.getDeclaredMethod("reflectFrames").invoke(null);
+    });
   }
 
   static void threads() {

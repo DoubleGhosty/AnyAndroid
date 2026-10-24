@@ -210,9 +210,10 @@ int64_t literal64(const Literal& l) {
 }
 
 struct Item {
-  enum class Kind { kLabel, kInsn, kPayload, kPadding } kind;
+  enum class Kind { kLabel, kInsn, kPayload, kPadding, kPosition } kind;
   int line = 0;
   std::string label;
+  uint32_t source_line = 0;  // .line
   // Instruction.
   int opcode = -1;
   std::vector<std::string> operands;
@@ -293,9 +294,15 @@ class MethodAssembler {
             i = parse_payload(i);
           } else if (d == ".annotation") {
             while (i < body_.size() && body_[i].text != ".end annotation") ++i;
-          } else if (d == ".line" || d == ".prologue" || d == ".epilogue" || d == ".param" || d == ".end" ||
-                     d == ".local" || d == ".restart" || d == ".source") {
-            // Debug information: ignored.
+          } else if (d == ".line") {
+            if (words.size() != 2) throw Error(".line attend un numéro de ligne");
+            Item it{Item::Kind::kPosition};
+            it.line = ln.number;
+            it.source_line = uint32_t(std::stoul(words[1], nullptr, 0));
+            items_.push_back(std::move(it));
+          } else if (d == ".prologue" || d == ".epilogue" || d == ".param" || d == ".end" || d == ".local" ||
+                     d == ".restart" || d == ".source") {
+            // Other debug information: ignored.
           } else {
             throw Error("directive inconnue " + d);
           }
@@ -412,6 +419,11 @@ class MethodAssembler {
           break;
         case Item::Kind::kPadding:
           break;
+        case Item::Kind::kPosition:
+          // The line of the next instruction; a later .line at the same address replaces it.
+          if (!m_.positions.empty() && m_.positions.back().first == addr) m_.positions.pop_back();
+          m_.positions.emplace_back(addr, it.source_line);
+          break;
       }
       out.push_back(std::move(it));
     }
@@ -503,7 +515,7 @@ class MethodAssembler {
       }
     }
     for (const Item& it : items_) {
-      if (it.kind == Item::Kind::kLabel) continue;
+      if (it.kind == Item::Kind::kLabel || it.kind == Item::Kind::kPosition) continue;
       if (out.size() != it.addr) fail(it.line, "erreur interne d'adressage");
       if (it.kind == Item::Kind::kPadding) {
         out.push_back(0);

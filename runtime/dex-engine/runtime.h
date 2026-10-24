@@ -138,11 +138,20 @@ struct ThrowablePeer final : NativePeer {
   void trace(std::vector<Handle>& out) const override { out.insert(out.end(), suppressed.begin(), suppressed.end()); }
 };
 
-// The stack a Throwable captured: the native peer of its backtrace object
-// (Throwable.backtrace, ART's internal stack trace), which
-// Throwable.nativeGetStackTrace turns into StackTraceElements.
+// A frame of an internal stack trace (ART's methods-and-PCs array): the dex
+// pc of the frame's current instruction, or kNativePc (dex::kDexNoIndex) for
+// a method run natively (declared native, implemented by the bridge, or a
+// proxy method).
+struct TraceFrame {
+  Method* method = nullptr;
+  uint32_t dex_pc = 0;
+};
+
+// An internal stack trace (Thread::CreateInternalStackTrace): the native peer
+// of a Throwable's backtrace object, which Throwable.nativeGetStackTrace turns
+// into StackTraceElements, and of StackStreamFactory's stack anchor.
 struct BacktracePeer final : NativePeer {
-  std::vector<std::string> frames;
+  std::vector<TraceFrame> frames;
 };
 
 // An annotation_item read from a DEX file: visibility (0 build, 1 runtime,
@@ -651,7 +660,21 @@ class Runtime {
   // ThrowNewWrappedException, or its fields are set directly.
   Handle make_throwable(Class* cls, std::u16string_view message, bool has_message, Handle cause = kNull);
   std::string describe_throwable(Handle h);  // "java.lang.X: message\n  at ..."
-  std::vector<std::string> capture_stack() const;
+  // Thread::CreateInternalStackTrace: the frames of `t` (the current thread
+  // when null), innermost first, without the leading frames of Throwable's
+  // own methods (constructors, fillInStackTrace).
+  std::vector<TraceFrame> internal_stack_trace(const VmThread* t = nullptr) const;
+  // ArtMethod::GetLineNumFromDexPC for a method that is not a proxy one: -2
+  // for a frame run natively or a method without code, the line of the dex pc
+  // (DexFile::line_for_pc), -1 without debug information.
+  static int32_t line_number(const Method* m, uint32_t dex_pc);
+  // Class::GetSourceFile: nullptr for a class without one (generated
+  // classes, no source_file_idx).
+  static const std::string* source_file(const Class* c);
+  // CreateStackTraceElement (thread.cc): the StackTraceElement of a frame.
+  Handle stack_trace_element(const TraceFrame& f);
+  // StackTraceElement.toString() of that element: "pkg.C.m(C.java:12)".
+  std::string describe_frame(const TraceFrame& f) const;
 
   // --- Diagnostics ---------------------------------------------------------
   struct Stats {

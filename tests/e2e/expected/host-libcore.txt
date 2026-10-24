@@ -51,6 +51,9 @@ Thread(groupe, cible, nom, pile, héritage) : fil-5 null, priorité 10, TERMINAT
 Thread.toString et identifiant : Thread[nommé,5,main] puis Thread[nommé,5,], identifiant stable true, main main true
 Thread.ofPlatform : plate-7 démon true priorité 3 NEW, exécuté par plate-7, TERMINATED
 Executors.newThreadPerTaskExecutor : par-tâche, terminé true
+numéros de ligne : LibcoreProbe.java, ligne suivante 1, positive true ; java.lang.Thread.getStackTrace(Thread.java:2849)
+StackWalker : LibcoreProbe, LibcoreProbe.java, type ()String ()Ljava/lang/String;, ligne positive true, bci positif true, élément LibcoreProbe.java même ligne true, main présent true
+StackWalker, appelant et lots : appelant LibcoreProbe, 41 cadres de deep, sans RETAIN_CLASS_REFERENCE UnsupportedOperationException, Method.invoke montré true, masqué true
 InMemoryDexClassLoader, tampon du tas : Abx par InMemoryDexClassLoader, même chargeur true, main [class [Ljava.lang.String;]
 InMemoryDexClassLoader, tampon direct : AppWidget par InMemoryDexClassLoader, même chargeur true, main [class [Ljava.lang.String;]
 Character hors ASCII : true true 12 -2 true true true 453 true true 26

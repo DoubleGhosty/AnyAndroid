@@ -495,6 +495,88 @@ TEST(interpreter_exceptions) {
   CHECK_EQ(vm.thrown("npe", "()I"), std::string("java.lang.NullPointerException"));
 }
 
+namespace {
+
+// Positions (.line) as the assembler writes them: special opcodes, a line
+// going back, DBG_ADVANCE_LINE (a jump of more than 10 lines) and
+// DBG_ADVANCE_PC (more than 16 code units).
+const char* kLines = R"SMALI(
+.class public LLines;
+.super Ljava/lang/Object;
+.source "Lines.java"
+
+.method public static make()Ljava/lang/Throwable;
+    .registers 2
+    .line 10
+    const/4 v0, 0x0
+    .line 9
+    nop
+    .line 40
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    .line 41
+    new-instance v0, Ljava/lang/Throwable;
+    invoke-direct {v0}, Ljava/lang/Throwable;-><init>()V
+    return-object v0
+.end method
+)SMALI";
+
+const char* kNoLines = R"SMALI(
+.class public LNoLines;
+.super Ljava/lang/Object;
+
+.method public static make()Ljava/lang/Throwable;
+    .registers 2
+    nop
+    new-instance v0, Ljava/lang/Throwable;
+    invoke-direct {v0}, Ljava/lang/Throwable;-><init>()V
+    return-object v0
+.end method
+)SMALI";
+
+}  // namespace
+
+TEST(stack_traces_carry_source_lines) {
+  Vm vm({tool::assemble_smali(kLines, "lines.smali"), tool::assemble_smali(kNoLines, "nolines.smali")});
+  // DexFile::line_for_pc (GetLineNumForPc): the last position at or before the pc.
+  auto code_of = [&](const char* cls) {
+    auto cd = vm.dex->class_data(vm.dex->class_def(*vm.dex->find_class_def(cls)));
+    return cd.direct_methods.at(0).code_off;
+  };
+  const uint32_t code = code_of("LLines;");
+  CHECK_EQ(vm.dex->line_for_pc(code, 0), 10);
+  CHECK_EQ(vm.dex->line_for_pc(code, 1), 9);
+  CHECK_EQ(vm.dex->line_for_pc(code, 2), 40);
+  CHECK_EQ(vm.dex->line_for_pc(code, 20), 40);
+  CHECK_EQ(vm.dex->line_for_pc(code, 21), 41);
+  CHECK_EQ(vm.dex->line_for_pc(code, 26), 41);
+  CHECK_EQ(vm.dex->line_for_pc(code_of("LNoLines;"), 3), -1);
+  // CreateStackTraceElement: file and line, or the dex pc and a name made
+  // from the file's SHA-1 without debug information.
+  std::string with = vm.rt->describe_throwable(rt::Handle(vm.call("make", "()Ljava/lang/Throwable;", {}, "LLines;")));
+  CHECK_EQ(with, std::string("java.lang.Throwable\n    at Lines.make(Lines.java:41)\n"));
+  std::string without = vm.rt->describe_throwable(rt::Handle(vm.call("make", "()Ljava/lang/Throwable;", {}, "LNoLines;")));
+  CHECK(text::starts_with(without, "java.lang.Throwable\n    at NoLines.make(dex-id-"));
+  CHECK(without.find(":3)\n") != std::string::npos);
+}
+
 TEST(interpreter_objects_and_dispatch) {
   Vm vm = Vm::standard();
   CHECK_EQ(int32_t(vm.call("dispatch", "()I")), 25);

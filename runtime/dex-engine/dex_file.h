@@ -238,6 +238,13 @@ class DexFile {
 
   ClassData class_data(const ClassDef& def) const;
   CodeItem code_item(uint32_t offset) const;
+  // The line of `pc` (in code units) in the code item at `code_offset`, from
+  // its debug_info_item, as ART's GetLineNumForPc: the line of the last
+  // position entry at or before `pc`; -1 without debug information or
+  // before the first entry.
+  int32_t line_for_pc(uint32_t code_offset, uint32_t pc) const;
+  // The class's source file (source_file_idx), nullptr when it has none.
+  const std::string* source_file(const ClassDef& def) const;
   std::vector<uint32_t> type_list(uint32_t offset) const;
   std::vector<EncodedValue> encoded_array(uint32_t offset) const;
   // Complete annotations directory (class, fields, methods, parameters).

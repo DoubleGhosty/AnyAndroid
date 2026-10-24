@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <deque>
 #include <set>
+#include <optional>
 
 #include "common/bytes.h"
 #include "common/clock.h"
@@ -1589,31 +1590,116 @@ void Runtime::throw_unsupported(std::string_view api, std::string_view reason) {
   throw_new("Ljava/lang/NoSuchMethodError;", "[AnyAndroid] API non implémentée : " + a);
 }
 
-std::vector<std::string> Runtime::capture_stack() const {
-  std::vector<std::string> out;
-  if (!running_) return out;
-  const std::vector<Frame>& frames_ = running_->frames;
+std::vector<TraceFrame> Runtime::internal_stack_trace(const VmThread* t) const {
+  std::vector<TraceFrame> out;
+  if (!t) t = running_;
+  if (!t) return out;
   Class* throwable = nullptr;
   auto it = classes_.find("Ljava/lang/Throwable;");
   if (it != classes_.end()) throwable = it->second.get();
   bool skipping = true;
-  for (auto f = frames_.rbegin(); f != frames_.rend() && out.size() < 64; ++f) {
-    // As ART's CountStackDepthVisitor: the frames of the throwable's own
-    // methods (nativeFillInStackTrace, fillInStackTrace, the constructors)
-    // up to the first frame of another class.
+  for (auto f = t->frames.rbegin(); f != t->frames.rend(); ++f) {
+    // FetchStackTraceVisitor: the frames up to and including the exception's
+    // constructor (methods of Throwable's subclasses) are skipped.
     if (skipping && throwable && is_assignable(f->method->owner, throwable)) continue;
     skipping = false;
-    std::string line = f->method->owner->java_name() + "." + f->method->name;
-    if (f->pc == kNativePc) {
-      line += "(Native Method)";
-    } else {
-      char buf[24];
-      std::snprintf(buf, sizeof buf, "(pc 0x%04x)", f->pc);
-      line += buf;
-    }
-    out.push_back(std::move(line));
+    // A proxy method has no dex pc (BuildInternalStackTraceVisitor).
+    out.push_back({f->method, f->method->interface_method ? kNativePc : f->pc});
   }
   return out;
+}
+
+int32_t Runtime::line_number(const Method* m, uint32_t dex_pc) {
+  // A frame without dex pc is a method run natively: ART's native methods.
+  if (dex_pc == kNativePc) return -2;
+  // annotations::GetLineNumFromPC: -2 without a code item.
+  if (!m->dex || m->code_off == 0) return -2;
+  return m->dex->line_for_pc(m->code_off, dex_pc);
+}
+
+const std::string* Runtime::source_file(const Class* c) {
+  if (!c->dex_cache || !c->dex_cache->dex) return nullptr;
+  const dex::DexFile& dex = *c->dex_cache->dex;
+  return dex.source_file(dex.class_def(c->class_def_idx));
+}
+
+namespace {
+
+// The fields CreateStackTraceElement (thread.cc, android-17.0.0_r1) gives a
+// StackTraceElement.
+struct ElementFields {
+  std::string declaring_class;
+  std::string method_name;
+  std::optional<std::string> file_name;
+  int32_t line_number = -1;
+};
+
+ElementFields element_fields(const TraceFrame& f) {
+  ElementFields e;
+  const Method* m = f.method;
+  e.declaring_class = m->owner->java_name();
+  if (m->interface_method) {  // a proxy method: no source file, line -1
+    e.method_name = m->interface_method->name;
+    return e;
+  }
+  e.method_name = m->name;
+  e.line_number = Runtime::line_number(m, f.dex_pc);
+  if (const std::string* file = Runtime::source_file(m->owner)) {
+    e.file_name = *file;
+  } else if (m->owner->dex_cache && m->owner->dex_cache->dex) {
+    // An artificial name from the SHA-1 of the dex file (header signature).
+    static const char kHex[] = "0123456789abcdef";
+    std::string name = "dex-id-";
+    for (uint8_t b : m->owner->dex_cache->dex->header().signature) {
+      name += kHex[b >> 4];
+      name += kHex[b & 15];
+    }
+    e.file_name = std::move(name);
+  }
+  // Without a line, the line number field holds the dex pc.
+  if (e.line_number == -1) e.line_number = int32_t(f.dex_pc);
+  return e;
+}
+
+// StackTraceElement.toString (Android's version: "Unknown Source:<dex pc>").
+std::string element_text(std::string_view cls, std::string_view method, const std::optional<std::string>& file,
+                         int32_t line) {
+  std::string s = std::string(cls) + "." + std::string(method);
+  if (line == -2) return s + "(Native Method)";
+  if (file) return s + "(" + *file + (line >= 0 ? ":" + std::to_string(line) : std::string()) + ")";
+  return s + (line >= 0 ? "(Unknown Source:" + std::to_string(line) + ")" : "(Unknown Source)");
+}
+
+}  // namespace
+
+Handle Runtime::stack_trace_element(const TraceFrame& f) {
+  // mirror::StackTraceElement::Alloc: the four fields set without running a
+  // constructor.
+  Class* element = lookup_class("Ljava/lang/StackTraceElement;");
+  Field* cls_field = element ? element->declared_field("declaringClass", "Ljava/lang/String;") : nullptr;
+  Field* method_field = element ? element->declared_field("methodName", "Ljava/lang/String;") : nullptr;
+  Field* file_field = element ? element->declared_field("fileName", "Ljava/lang/String;") : nullptr;
+  Field* line_field = element ? element->declared_field("lineNumber", "I") : nullptr;
+  if (!cls_field || !method_field || !file_field || !line_field) {
+    throw_unsupported("Ljava/lang/Throwable;->getStackTrace()[Ljava/lang/StackTraceElement;", "sans la libcore");
+  }
+  ensure_initialized(element);
+  ElementFields e = element_fields(f);
+  GlobalRef obj(*this, alloc(element));
+  GlobalRef cls(*this, new_string_utf8(e.declaring_class));
+  GlobalRef method(*this, new_string_utf8(e.method_name));
+  Handle file = e.file_name ? new_string_utf8(*e.file_name) : kNull;
+  std::vector<uint32_t>& fields = object(obj.get())->fields;
+  fields.at(cls_field->slot) = cls.get();
+  fields.at(method_field->slot) = method.get();
+  fields.at(file_field->slot) = file;
+  fields.at(line_field->slot) = uint32_t(e.line_number);
+  return obj.get();
+}
+
+std::string Runtime::describe_frame(const TraceFrame& f) const {
+  ElementFields e = element_fields(f);
+  return element_text(e.declaring_class, e.method_name, e.file_name, e.line_number);
 }
 
 std::string Runtime::describe_throwable(Handle h) {
@@ -1629,24 +1715,35 @@ std::string Runtime::describe_throwable(Handle h) {
     // The stack: the captured frames (backtrace), else the decoded or set trace.
     uint32_t* backtrace = throwable_field(*this, h, "backtrace", "Ljava/lang/Object;");
     uint32_t* trace = throwable_field(*this, h, "stackTrace", "[Ljava/lang/StackTraceElement;");
+    // At most kShown frames: a StackOverflowError has a thousand.
+    constexpr size_t kShown = 64;
+    size_t frames = 0;
     if (auto* bt = backtrace && *backtrace ? peer<BacktracePeer>(*backtrace) : nullptr) {
-      for (const auto& line : bt->frames) out += "    at " + line + "\n";
+      frames = bt->frames.size();
+      for (size_t i = 0; i < frames && i < kShown; ++i) out += "    at " + describe_frame(bt->frames[i]) + "\n";
     } else if (trace && *trace != kNull) {
       Class* element = lookup_class("Ljava/lang/StackTraceElement;");
       Field* cls = element ? element->declared_field("declaringClass", "Ljava/lang/String;") : nullptr;
       Field* method = element ? element->declared_field("methodName", "Ljava/lang/String;") : nullptr;
+      Field* file = element ? element->declared_field("fileName", "Ljava/lang/String;") : nullptr;
       Field* line = element ? element->declared_field("lineNumber", "I") : nullptr;
       ArrayObject& arr = array(*trace, "stackTrace");
-      for (uint32_t i = 0; cls && method && line && i < arr.length; ++i) {
+      frames = arr.length;
+      for (uint32_t i = 0; cls && method && file && line && i < arr.length && i < kShown; ++i) {
         Handle e;
         std::memcpy(&e, &arr.data[size_t(i) * 4], 4);
         Object* eo = object(e);
         if (!eo) continue;
-        Handle c = eo->fields.at(cls->slot), m = eo->fields.at(method->slot);
-        out += "    at " + (c ? string_utf8(c) : std::string()) + "." + (m ? string_utf8(m) : std::string()) +
-               (int32_t(eo->fields.at(line->slot)) == -2 ? "(Native Method)" : "") + "\n";
+        Handle c = eo->fields.at(cls->slot), m = eo->fields.at(method->slot), fn = eo->fields.at(file->slot);
+        std::optional<std::string> file_name;
+        if (fn) file_name = string_utf8(fn);
+        out += "    at " +
+               element_text(c ? string_utf8(c) : std::string(), m ? string_utf8(m) : std::string(), file_name,
+                            int32_t(eo->fields.at(line->slot))) +
+               "\n";
       }
     }
+    if (frames > kShown) out += "    ... " + std::to_string(frames - kShown) + " cadres de plus\n";
     uint32_t* cause = throwable_field(*this, h, "cause", "Ljava/lang/Throwable;");
     if (!cause || *cause == h) break;
     h = *cause;
