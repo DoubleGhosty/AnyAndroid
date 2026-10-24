@@ -273,10 +273,13 @@ Fait et vérifié (voir STATUS.md pour le détail) :
    `startActivityForResult`), puis une vraie application de la GSI (`Music`) affichée et
    utilisable. Les motifs de césure `.hyb` et le pilotage déterministe des tests sont à concevoir
    sur l'horloge commune (`common/clock.h`).
-2. **Fin de G2** (les ajouts du 17 octobre sont vérifiés par `e2e-host-libcore` ; liaisons
-   orphelines à 0 ; `VerifyAccess` porté) : `invoke-custom`, `const-method-handle`,
-   `const-method-type`, puis les natives de libcore encore absentes (`libcore natives --all`) ;
-   relancer la CI Windows dès que le compte GitHub Actions fonctionne.
+2. **Fin de G2** (faits et vérifiés par `e2e-host-libcore` : `invoke-custom`, `NativeBN`, ICU par
+   ICU4J, `InMemoryDexClassLoader`, piles des fils, `Thread` et `Throwable` sur les champs de
+   libcore ; `libcore natives --core` à 0 membre absent atteignable ; liaisons orphelines à 0) :
+   les natives de libcore encore absentes (`libcore natives --all`, 253 : sockets et NIO réseau,
+   `Expat`, `UnixNativeDispatcher`, `VMDebug`, `ZygoteHooks`…), les finaliseurs, les fils
+   virtuels (`Continuation`), la lecture seule du chargement dynamique de code ; relancer la CI
+   Windows dès que le compte GitHub Actions fonctionne.
 3. **G4 : code natif** : chargeur ELF et bionic. L'[évaluation d'ANDROWIN](evaluations/ANDROWIN.md)
    décrit ntdroid (ART réel dans un processus Windows par interception d'appels système) : c'est
    la référence pour un **processus hôte isolé** dédié au code natif ; l'option « ART réel à la
@@ -286,6 +289,17 @@ Fait et vérifié (voir STATUS.md pour le détail) :
 
 ## 10. Savoir-faire technique
 
+- **Classes du cœur et bytecode de libcore** : `Object`, `String`, `Class`, `Thread`,
+  `Throwable`… sont celles du registre, complétées à l'exécution par le bytecode de libcore
+  (méthodes et champs statiques ; les champs d'instance sont ceux de la disposition native). Une
+  méthode du registre marquée `bytecode_with_libcore` cède la place au bytecode d'Android quand un
+  chemin d'amorçage est chargé : c'est le cas des constructeurs et accesseurs de `Thread` et de
+  `Throwable`, dont l'état est dans les champs de libcore (`name`, `tid`, `nativePeer`…,
+  `detailMessage`, `cause`, `backtrace`…). `libcore natives --core` liste les membres du cœur
+  qu'aucune des deux sources ne fournit et que du code exécutable atteint : il doit rester à 0.
+- **Exceptions du runtime** : `make_throwable` exécute le constructeur de l'exception comme
+  `ThrowNewWrappedException` d'ART ; il pose les champs directement pour `StackOverflowError`,
+  `OutOfMemoryError` et toute exception levée pendant la construction d'une autre.
 - **Arguments des natives** (`NativeArgs`) : en mots de 32 bits. Natives d'instance : l'argument
   0 est `this`. Un `long`/`double` prend **deux** mots : pour `(JFF)V` statique, `i64(0)` puis
   `f32(2)`, `f32(3)` ; pour `(JJI)Z`, `i64(0)`, `i64(2)`, `i32(4)`. Une erreur d'indice ne plante

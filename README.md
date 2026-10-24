@@ -22,9 +22,8 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
   doublons, traversée de chemins), manifeste binaire, DEX 035 à 040, multi-DEX, bibliothèques
   natives ELF, signature v1/v2, APK éclatés et bundles `.apks`/`.xapk`, API de la plateforme
   utilisées avec leur statut, verdict de compatibilité.
-- **Interpréteur Dalvik** : jeu d'instructions complet (sauf `invoke-custom` et les constantes
-  `const-method-handle`/`const-method-type`),
-  exceptions, héritage et interfaces, initialisation des classes, vérification structurelle du
+- **Interpréteur Dalvik** : jeu d'instructions complet (`invoke-polymorphic`, `invoke-custom` et
+  les constantes `const-method-handle`/`const-method-type` comprises, portés d'ART), exceptions, héritage et interfaces, initialisation des classes, vérification structurelle du
   bytecode, limites de pile, d'objets et d'instructions.
 - **Runtime G1** ([ADR-003](docs/adr/ADR-003-runtime-threads-gc-jni.md)) :
   - vrais threads Windows (`Thread`, `synchronized`, `wait`/`notify`, `sleep`, `join`, `interrupt`)

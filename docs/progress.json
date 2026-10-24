@@ -2,7 +2,7 @@
   "metadata": {
     "project": "AnyAndroid for Windows",
     "version": "0.1.0",
-    "generated_at": "2026-10-23T18:58:11.957198+00:00",
+    "generated_at": "2026-10-24T04:35:03.875618+00:00",
     "target": "Android natif sur Windows (sans VM ni hyperviseur)"
   },
   "summary": {
@@ -40,10 +40,10 @@
       {
         "id": "G2",
         "name": "Vraie libcore d'AOSP (Android 17)",
-        "description": "NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART (ADR-004). Ajouts du 17 octobre vérifiés et corrigés sur la vraie libcore (e2e `host-libcore`) : E/S scatter-gather, POSIX résiduel, `MethodHandle` porté d'ART, réflexion par les vraies classes de libcore, annotations par `AnnotationFactory`, `Proxy`, fuseaux horaires. Reste : 166 liaisons orphelines (surtout `Unsafe`), contrôle d'accès de la réflexion, `invoke-custom`",
-        "progress": 96,
+        "description": "NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART (ADR-004). Vérifié sur la vraie libcore (e2e `host-libcore`, 60 lignes) : E/S scatter-gather, POSIX résiduel, `MethodHandle` porté d'ART, `invoke-custom`, `const-method-handle` et `const-method-type`, réflexion par les vraies classes de libcore, annotations, `Proxy`, `VerifyAccess`, fuseaux horaires, `NativeBN` (BigInteger), `Character` et ICU par ICU4J avec les données ICU de l'image, sérialisation, `InMemoryDexClassLoader` et filtres de compilation, piles des fils et `ThreadGroup`. `Thread` et `Throwable` gardent leur état dans les champs de libcore et exécutent le bytecode d'Android 17 (`Thread.ofPlatform`, `ThreadContainer`, sérialisation des exceptions, `initCause`, `printStackTrace` au format d'Android) ; `AtomicXFieldUpdater` et `findVirtual` sur une méthode par défaut fonctionnent. `libcore natives --core` : 0 membre absent du cœur atteignable ; 0 liaison orpheline. Reste : 253 natives de libcore (sockets et NIO réseau, `Expat`, `UnixNativeDispatcher`, `VMDebug`, `ZygoteHooks`, `StackStreamFactory`…), les finaliseurs (jamais exécutés), les fils virtuels (`Continuation`), l'application de la lecture seule au chargement dynamique de code, et ni fichier ni numéro de ligne dans les `StackTraceElement`",
+        "progress": 97,
         "weight": 10,
-        "status": "NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART (ADR-004). Ajouts du 17 octobre vérifiés et corrigés sur la vraie libcore (e2e `host-libcore`) : E/S scatter-gather, POSIX résiduel, `MethodHandle` porté d'ART, réflexion par les vraies classes de libcore, annotations par `AnnotationFactory`, `Proxy`, fuseaux horaires. Reste : 166 liaisons orphelines (surtout `Unsafe`), contrôle d'accès de la réflexion, `invoke-custom`",
+        "status": "NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART (ADR-004). Vérifié sur la vraie libcore (e2e `host-libcore`, 60 lignes) : E/S scatter-gather, POSIX résiduel, `MethodHandle` porté d'ART, `invoke-custom`, `const-method-handle` et `const-method-type`, réflexion par les vraies classes de libcore, annotations, `Proxy`, `VerifyAccess`, fuseaux horaires, `NativeBN` (BigInteger), `Character` et ICU par ICU4J avec les données ICU de l'image, sérialisation, `InMemoryDexClassLoader` et filtres de compilation, piles des fils et `ThreadGroup`. `Thread` et `Throwable` gardent leur état dans les champs de libcore et exécutent le bytecode d'Android 17 (`Thread.ofPlatform`, `ThreadContainer`, sérialisation des exceptions, `initCause`, `printStackTrace` au format d'Android) ; `AtomicXFieldUpdater` et `findVirtual` sur une méthode par défaut fonctionnent. `libcore natives --core` : 0 membre absent du cœur atteignable ; 0 liaison orpheline. Reste : 253 natives de libcore (sockets et NIO réseau, `Expat`, `UnixNativeDispatcher`, `VMDebug`, `ZygoteHooks`, `StackStreamFactory`…), les finaliseurs (jamais exécutés), les fils virtuels (`Continuation`), l'application de la lecture seule au chargement dynamique de code, et ni fichier ni numéro de ligne dans les `StackTraceElement`",
         "adr": "ADR-004",
         "state": "in_progress"
       },
