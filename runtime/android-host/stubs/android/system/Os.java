@@ -31,6 +31,20 @@ public final class Os {
     throw new RuntimeException("stub");
   }
 
+  public static FileDescriptor[] pipe2(int flags) throws ErrnoException {
+    throw new RuntimeException("stub");
+  }
+
+  public static int read(FileDescriptor fd, byte[] bytes, int byteOffset, int byteCount)
+      throws ErrnoException, java.io.InterruptedIOException {
+    throw new RuntimeException("stub");
+  }
+
+  public static int write(FileDescriptor fd, byte[] bytes, int byteOffset, int byteCount)
+      throws ErrnoException, java.io.InterruptedIOException {
+    throw new RuntimeException("stub");
+  }
+
   public static FileDescriptor dup(FileDescriptor oldFd) throws ErrnoException {
     throw new RuntimeException("stub");
   }

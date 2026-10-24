@@ -244,6 +244,12 @@ void socket_status_flags(int32_t fd, int32_t flags);
 // AsynchronousCloseMonitor.signalBlockedThreads: the threads blocked on the
 // socket stop waiting (SocketException "Socket closed").
 void signal_socket(int32_t fd);
+// NIO's read/readv or write/writev of a socket or pipe (FileDispatcherImpl,
+// IOUtil.c convertReturnVal): bytes, or IOStatus EOF, UNAVAILABLE (would
+// block) or INTERRUPTED (NativeThread.signal); nullopt when `fd` is neither.
+std::optional<int64_t> nio_socket_io(rt::Runtime& rt, int32_t fd, std::span<const std::span<uint8_t>> buffers, bool reading);
+// The buffers of an array of `count` struct iovec in native memory.
+std::vector<std::span<uint8_t>> native_iovecs(rt::Runtime& rt, int64_t address, int32_t count, bool write);
 
 void register_libcore_nio(rt::NativeRegistry& r);
 void register_libcore_zip(rt::NativeRegistry& r);

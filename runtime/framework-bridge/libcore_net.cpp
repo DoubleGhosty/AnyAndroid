@@ -17,6 +17,7 @@
 #include <mstcpip.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -34,6 +35,7 @@
 
 #include "common/text.h"
 #include "framework-bridge/internal.h"
+#include "framework-bridge/native_memory.h"
 #include "vfs/vfs.h"
 
 // Winsock values older MinGW headers lack.
@@ -200,18 +202,23 @@ void ensure_winsock() {
 
 // A socket of the emulated process. Reads and writes reaching it through the
 // Vfs directly (other paths than libcore's descriptor natives) never block.
+// A pipe (pipe2, IOUtil.makePipe) is one too: Windows has no pipe that WSAPoll
+// waits on with sockets, so its ends are a pair of loopback sockets, as in
+// OpenJDK's Windows PipeImpl.
 class NetSocket final : public vfs::OpenFile {
  public:
-  NetSocket(SOCKET handle, int32_t family_, int32_t type_, int32_t protocol_, int win_af_)
-      : family(family_), type(type_), protocol(protocol_), win_af(win_af_), ino(next_ino()), handle_(handle) {}
+  enum class Pipe { kNone, kRead, kWrite };
+  NetSocket(SOCKET handle, int32_t family_, int32_t type_, int32_t protocol_, int win_af_, Pipe pipe_ = Pipe::kNone)
+      : family(family_), type(type_), protocol(protocol_), win_af(win_af_), pipe(pipe_), ino(next_ino()),
+        handle_(handle) {}
   ~NetSocket() override { closesocket(handle_); }
   NetSocket(const NetSocket&) = delete;
   NetSocket& operator=(const NetSocket&) = delete;
 
   vfs::VStat stat() override {
     vfs::VStat st;
-    st.type = vfs::NodeType::kSocket;
-    st.mode = 0140777;  // S_IFSOCK, as the kernel reports sockets
+    st.type = pipe == Pipe::kNone ? vfs::NodeType::kSocket : vfs::NodeType::kFifo;
+    st.mode = pipe == Pipe::kNone ? 0140777 : 010600;  // S_IFSOCK, S_IFIFO, as the kernel reports them
     st.ino = ino;
     return st;
   }
@@ -234,6 +241,7 @@ class NetSocket final : public vfs::OpenFile {
   // The Winsock family: AF_INET for an AF_INET6 socket of a host without
   // IPv6, which then takes IPv4 and IPv4-mapped addresses only.
   const int win_af;
+  const Pipe pipe;
   const uint64_t ino;
   std::atomic<bool> nonblocking{false};  // O_NONBLOCK of the open file
   std::atomic<bool> connecting{false};   // a non-blocking connect in progress
@@ -265,8 +273,23 @@ std::shared_ptr<NetSocket> socket_arg(Runtime& rt, Handle java_fd, const char* f
   int32_t fd = fd_of(rt, java_fd);
   if (fd < 0 || (fd > 2 && !libcore_vfs().is_open(fd))) throw_errno(rt, function, lx::kEBADF);
   auto s = socket_of(fd);
-  if (!s) throw_errno(rt, function, lx::kENOTSOCK);
+  if (!s || s->pipe != NetSocket::Pipe::kNone) throw_errno(rt, function, lx::kENOTSOCK);
   return s;
+}
+
+// The Linux errno of a failed I/O on `s`: a pipe whose other end is closed
+// fails writes with EPIPE (its loopback connection is reset or shut down).
+int32_t io_errno(const NetSocket& s, int wsa, bool sending) {
+  if (s.pipe != NetSocket::Pipe::kNone && sending &&
+      (wsa == WSAECONNRESET || wsa == WSAECONNABORTED || wsa == WSAESHUTDOWN)) {
+    return lx::kEPIPE;
+  }
+  return linux_errno(wsa, sending);
+}
+
+// read(2) on a pipe's write end, write(2) on its read end: EBADF.
+bool wrong_pipe_end(const NetSocket& s, bool sending) {
+  return s.pipe == (sending ? NetSocket::Pipe::kRead : NetSocket::Pipe::kWrite);
 }
 
 // What a close signalled from another thread throws: SocketException for the
@@ -282,15 +305,18 @@ std::shared_ptr<NetSocket> socket_arg(Runtime& rt, Handle java_fd, const char* f
   throw rt::JavaThrow{e};
 }
 
-enum class Wait { kReady, kTimeout, kClosed };
+enum class Wait { kReady, kTimeout, kClosed, kInterrupted };
 
 // AsynchronousCloseMonitor: the waits blocked on descriptor numbers, which
 // signalBlockedThreads(fd) interrupts. By number, as in libcore: a close
 // (closeAndSignalBlockedThreads) or PlainSocketImpl's dup2 of its marker
 // descriptor over the socket's number wakes whoever waits on that number.
+// NIO's waits also name their thread: NativeThread.signal(thread), the
+// signal that makes Linux's blocking call fail with EINTR, interrupts them.
 struct BlockedWait {
   std::vector<int32_t> fds;
-  std::atomic<bool> signaled{false};
+  uint32_t thread = 0;  // VmThread id for NIO's waits, else 0
+  std::atomic<Wait> signal{Wait::kReady};  // kClosed or kInterrupted once signalled
 };
 
 std::mutex& blocked_lock() {
@@ -305,8 +331,9 @@ std::vector<BlockedWait*>& blocked_waits() {
 
 class WaitRegistration {
  public:
-  explicit WaitRegistration(std::vector<int32_t> fds) {
+  explicit WaitRegistration(std::vector<int32_t> fds, uint32_t thread = 0) {
     wait_.fds = std::move(fds);
+    wait_.thread = thread;
     std::lock_guard<std::mutex> guard(blocked_lock());
     blocked_waits().push_back(&wait_);
   }
@@ -317,11 +344,18 @@ class WaitRegistration {
   }
   WaitRegistration(const WaitRegistration&) = delete;
   WaitRegistration& operator=(const WaitRegistration&) = delete;
-  bool signaled() const { return wait_.signaled; }
+  bool signaled() const { return wait_.signal != Wait::kReady; }
+  Wait signal() const { return wait_.signal; }
 
  private:
   BlockedWait wait_;
 };
+
+// The id NativeThread.current() gives the running thread (never 0).
+uint32_t current_thread_id(Runtime& rt) {
+  rt::VmThread* t = rt.current_thread();
+  return t ? t->id : 0;
+}
 
 // The socket's pending error (SO_ERROR), as Winsock reports it.
 int pending_error(SOCKET s) {
@@ -333,18 +367,19 @@ int pending_error(SOCKET s) {
 
 // Waits, the GIL released, until the socket is ready for `events`
 // (POLLRDNORM, POLLWRNORM), fails or hangs up, a close is signalled from
-// another thread, or the timeout (microseconds; 0: none) expires. A failed
+// another thread, or the timeout (microseconds; 0: none) expires; an
+// `interruptible` wait (NIO's) also ends on NativeThread.signal. A failed
 // connect is also seen through SO_ERROR, which WSAPoll does not report on
 // every Windows version.
-Wait wait_socket(Runtime& rt, NetSocket& s, int32_t fd, short events, int64_t timeout_us) {
+Wait wait_socket(Runtime& rt, NetSocket& s, int32_t fd, short events, int64_t timeout_us, bool interruptible = false) {
   using Clock = std::chrono::steady_clock;
   const auto deadline = Clock::now() + std::chrono::microseconds(timeout_us);
   Wait result = Wait::kReady;
-  WaitRegistration registration({fd});
+  WaitRegistration registration({fd}, interruptible ? current_thread_id(rt) : 0);
   rt.run_blocking([&] {
     for (;;) {
       if (registration.signaled()) {
-        result = Wait::kClosed;
+        result = registration.signal();
         return;
       }
       int slice = 50;
@@ -378,11 +413,12 @@ int64_t retry(Runtime& rt, NetSocket& s, int32_t fd, const char* function, short
     if (r >= 0) return r;
     int err = WSAGetLastError();
     if (err == WSAEINTR) continue;
-    if (err != WSAEWOULDBLOCK || s.nonblocking || dontwait) throw_errno(rt, function, linux_errno(err, sending));
+    if (err != WSAEWOULDBLOCK || s.nonblocking || dontwait) throw_errno(rt, function, io_errno(s, err, sending));
     switch (wait_socket(rt, s, fd, events, timeout_us)) {
       case Wait::kClosed: throw_closed(rt, io, function);
       case Wait::kTimeout: throw_errno(rt, function, lx::kEAGAIN);
-      case Wait::kReady: break;
+      case Wait::kReady:
+      case Wait::kInterrupted: break;
     }
   }
 }
@@ -522,20 +558,28 @@ std::pair<Handle, int32_t> inet_and_port(Runtime& rt, Handle isa) {
 // The address of an InetAddress for a call on socket `s`: IPv4-mapped for an
 // AF_INET6 socket, plain IPv4 when its Winsock socket is AF_INET (no IPv6 on
 // the host), where an IPv6 address cannot be reached.
-Endpoint endpoint_for(Runtime& rt, NetSocket& s, Handle inet, int32_t port, const char* function) {
-  Endpoint e = to_sockaddr(rt, inet, port, s.family == lx::kAfInet6 && s.win_af == AF_INET6);
-  if (s.win_af != AF_INET || e.ss.ss_family != AF_INET6) return e;
+// An IPv6 endpoint for a Winsock AF_INET socket: the IPv4 one of a mapped or
+// unspecified address; false for another IPv6 address.
+bool to_ipv4(const Endpoint& e, Endpoint& v4) {
   const auto& sin6 = reinterpret_cast<const sockaddr_in6&>(e.ss);
   bool unspecified = IN6_IS_ADDR_UNSPECIFIED(&sin6.sin6_addr), mapped = IN6_IS_ADDR_V4MAPPED(&sin6.sin6_addr);
-  if (!unspecified && !mapped) {
-    throw_errno(rt, function, std::string_view(function) == "bind" ? lx::kEADDRNOTAVAIL : lx::kENETUNREACH);
-  }
-  Endpoint v4;
+  if (!unspecified && !mapped) return false;
+  v4 = Endpoint{};
   auto& sin = reinterpret_cast<sockaddr_in&>(v4.ss);
   sin.sin_family = AF_INET;
   sin.sin_port = sin6.sin6_port;
   if (mapped) std::memcpy(&sin.sin_addr, &sin6.sin6_addr.s6_addr[12], 4);
   v4.len = sizeof(sockaddr_in);
+  return true;
+}
+
+Endpoint endpoint_for(Runtime& rt, NetSocket& s, Handle inet, int32_t port, const char* function) {
+  Endpoint e = to_sockaddr(rt, inet, port, s.family == lx::kAfInet6 && s.win_af == AF_INET6);
+  if (s.win_af != AF_INET || e.ss.ss_family != AF_INET6) return e;
+  Endpoint v4;
+  if (!to_ipv4(e, v4)) {
+    throw_errno(rt, function, std::string_view(function) == "bind" ? lx::kEADDRNOTAVAIL : lx::kENETUNREACH);
+  }
   return v4;
 }
 
@@ -689,65 +733,95 @@ std::optional<WinOption> win_option(int32_t level, int32_t option) {
   }
 }
 
-int32_t get_int_option(Runtime& rt, NetSocket& s, int32_t level, int32_t option) {
+// getsockopt(2) of an int option into `value`: 0, else the Linux errno.
+int32_t int_option(NetSocket& s, int32_t level, int32_t option, int32_t& value) {
   if (level == lx::kSolSocket) {
     switch (option) {
-      case lx::kSoType: return s.type;
-      case lx::kSoDomain: return s.family;
-      case lx::kSoProtocol: return s.protocol != 0 ? s.protocol : s.type == lx::kSockStream ? IPPROTO_TCP : IPPROTO_UDP;
+      case lx::kSoType: value = s.type; return 0;
+      case lx::kSoDomain: value = s.family; return 0;
+      case lx::kSoProtocol:
+        value = s.protocol != 0 ? s.protocol : s.type == lx::kSockStream ? IPPROTO_TCP : IPPROTO_UDP;
+        return 0;
       case lx::kSoError: {
         int err = pending_error(s.handle());
         s.connecting = false;
-        return err == 0 ? 0 : linux_errno(err);
+        value = err == 0 ? 0 : linux_errno(err);
+        return 0;
       }
       case lx::kSoReuseaddr:
-        if (s.type == lx::kSockStream) return s.reuseaddr;
-        break;
-      case lx::kSoReuseport: return 0;
+        if (s.type != lx::kSockStream) break;
+        value = s.reuseaddr;
+        return 0;
+      case lx::kSoReuseport: value = 0; return 0;
       default: break;
     }
   }
-  if (level == lx::kIpprotoIp && option == lx::kIpMulticastAll) return s.multicast_all;
-  auto w = win_option(level, option);
-  if (!w) throw_errno(rt, "getsockopt", lx::kENOPROTOOPT);
-  DWORD value = 0;
-  int len = sizeof value;
-  if (getsockopt(s.handle(), w->level, w->name, reinterpret_cast<char*>(&value), &len) == SOCKET_ERROR) {
-    throw_errno(rt, "getsockopt", linux_errno(WSAGetLastError()));
+  if (level == lx::kIpprotoIp && option == lx::kIpMulticastAll) {
+    value = s.multicast_all;
+    return 0;
   }
-  if (len == 1) value &= 0xff;  // BOOLEAN-sized options
-  return int32_t(value);
+  auto w = win_option(level, option);
+  if (!w) return lx::kENOPROTOOPT;
+  DWORD v = 0;
+  int len = sizeof v;
+  if (getsockopt(s.handle(), w->level, w->name, reinterpret_cast<char*>(&v), &len) == SOCKET_ERROR) {
+    return linux_errno(WSAGetLastError());
+  }
+  if (len == 1) v &= 0xff;  // BOOLEAN-sized options
+  value = int32_t(v);
+  return 0;
+}
+
+// setsockopt(2) of an int option: 0, else the Linux errno.
+int32_t set_option(NetSocket& s, int32_t level, int32_t option, int32_t value) {
+  if (level == lx::kSolSocket && option == lx::kSoReuseaddr && s.type == lx::kSockStream) {
+    s.reuseaddr = value != 0;  // Linux's rebinding after TIME_WAIT is Windows' default
+    return 0;
+  }
+  if (level == lx::kSolSocket && option == lx::kSoReuseport) return lx::kENOPROTOOPT;
+  if (level == lx::kIpprotoIp && option == lx::kIpMulticastAll) {
+    s.multicast_all = value != 0;
+    return 0;
+  }
+  auto w = win_option(level, option);
+  if (!w) return lx::kENOPROTOOPT;
+  DWORD v = DWORD(value);
+  if (setsockopt(s.handle(), w->level, w->name, reinterpret_cast<const char*>(&v), sizeof v) == SOCKET_ERROR) {
+    return linux_errno(WSAGetLastError());
+  }
+  return 0;
+}
+
+int32_t get_int_option(Runtime& rt, NetSocket& s, int32_t level, int32_t option) {
+  int32_t value = 0;
+  if (int32_t err = int_option(s, level, option, value)) throw_errno(rt, "getsockopt", err);
+  return value;
 }
 
 void set_int_option(Runtime& rt, NetSocket& s, int32_t level, int32_t option, int32_t value) {
-  if (level == lx::kSolSocket && option == lx::kSoReuseaddr && s.type == lx::kSockStream) {
-    s.reuseaddr = value != 0;  // Linux's rebinding after TIME_WAIT is Windows' default
-    return;
-  }
-  if (level == lx::kSolSocket && option == lx::kSoReuseport) throw_errno(rt, "setsockopt", lx::kENOPROTOOPT);
-  if (level == lx::kIpprotoIp && option == lx::kIpMulticastAll) {
-    s.multicast_all = value != 0;
-    return;
-  }
-  auto w = win_option(level, option);
-  if (!w) throw_errno(rt, "setsockopt", lx::kENOPROTOOPT);
-  DWORD v = DWORD(value);
-  if (setsockopt(s.handle(), w->level, w->name, reinterpret_cast<const char*>(&v), sizeof v) == SOCKET_ERROR) {
-    throw_errno(rt, "setsockopt", linux_errno(WSAGetLastError()));
-  }
+  if (int32_t err = set_option(s, level, option, value)) throw_errno(rt, "setsockopt", err);
 }
 
 // --- Natives --------------------------------------------------------------------------------
 
-Handle install_socket(Runtime& rt, std::shared_ptr<NetSocket> sock, const char* function) {
-  int32_t flags = vfs::kO_RDWR | (sock->nonblocking ? vfs::kO_NONBLOCK : 0);
-  std::string path = "socket:[" + std::to_string(sock->ino) + "]";
-  int32_t fd;
+// A descriptor for the socket (or pipe end), as /proc/self/fd names them;
+// the Linux errno (EMFILE) on failure.
+int32_t install_fd(std::shared_ptr<NetSocket> sock, int32_t& fd) {
+  using P = NetSocket::Pipe;
+  int32_t access = sock->pipe == P::kRead ? vfs::kO_RDONLY : sock->pipe == P::kWrite ? vfs::kO_WRONLY : vfs::kO_RDWR;
+  int32_t flags = access | (sock->nonblocking ? vfs::kO_NONBLOCK : 0);
+  std::string path = std::string(sock->pipe == P::kNone ? "socket:[" : "pipe:[") + std::to_string(sock->ino) + "]";
   try {
     fd = libcore_vfs().install(std::move(sock), flags, std::move(path));
+    return 0;
   } catch (const vfs::VfsError& e) {
-    throw_errno(rt, function, e.err);
+    return e.err;
   }
+}
+
+Handle install_socket(Runtime& rt, std::shared_ptr<NetSocket> sock, const char* function) {
+  int32_t fd = -1;
+  if (int32_t err = install_fd(std::move(sock), fd)) throw_errno(rt, function, err);
   return new_file_descriptor(rt, fd);
 }
 
@@ -845,6 +919,23 @@ int16_t from_wsa_events(int16_t wsa, int16_t wanted) {
   if (wsa & POLLHUP) r |= lx::kPollHup;
   if (wsa & POLLNVAL) r |= lx::kPollNval;
   return r;
+}
+
+// What each descriptor number is now: a socket polled by WSAPoll, another
+// open descriptor ready at once, a closed one POLLNVAL, a negative one ignored.
+void resolve_poll(std::vector<PollEntry>& entries) {
+  for (PollEntry& e : entries) {
+    e.sock = nullptr;
+    e.revents = 0;
+    if (e.fd < 0) continue;
+    if (auto s = socket_of(e.fd)) {
+      e.sock = std::move(s);
+    } else if (e.fd <= 2 || libcore_vfs().is_open(e.fd)) {
+      e.revents = int16_t(e.events & (lx::kPollIn | lx::kPollOut | lx::kPollRdnorm | lx::kPollWrnorm));
+    } else {
+      e.revents = lx::kPollNval;
+    }
+  }
 }
 
 // One pass over the entries (timeout_ms for WSAPoll); the number of ready ones.
@@ -969,6 +1060,7 @@ std::pair<SOCKET, SOCKET> loopback_pair(int type) {
 std::optional<size_t> socket_read(Runtime& rt, int32_t fd, std::span<uint8_t> out) {
   auto s = socket_of(fd);
   if (!s) return std::nullopt;
+  if (wrong_pipe_end(*s, false)) throw_errno(rt, "read", lx::kEBADF);
   int len = int(std::min<size_t>(out.size(), INT32_MAX));
   return size_t(retry(rt, *s, fd, "read", POLLRDNORM, s->rcvtimeo_us, false, true, false, [&]() -> int64_t {
     return recv(s->handle(), reinterpret_cast<char*>(out.data()), len, 0);
@@ -978,6 +1070,7 @@ std::optional<size_t> socket_read(Runtime& rt, int32_t fd, std::span<uint8_t> ou
 std::optional<size_t> socket_write(Runtime& rt, int32_t fd, std::span<const uint8_t> data) {
   auto s = socket_of(fd);
   if (!s) return std::nullopt;
+  if (wrong_pipe_end(*s, true)) throw_errno(rt, "write", lx::kEBADF);
   int len = int(std::min<size_t>(data.size(), INT32_MAX));
   return size_t(retry(rt, *s, fd, "write", POLLWRNORM, s->sndtimeo_us, false, true, true, [&]() -> int64_t {
     return send(s->handle(), reinterpret_cast<const char*>(data.data()), len, 0);
@@ -999,8 +1092,847 @@ void socket_status_flags(int32_t fd, int32_t flags) {
 void signal_socket(int32_t fd) {
   std::lock_guard<std::mutex> guard(blocked_lock());
   for (BlockedWait* w : blocked_waits()) {
-    if (std::find(w->fds.begin(), w->fds.end(), fd) != w->fds.end()) w->signaled = true;
+    if (std::find(w->fds.begin(), w->fds.end(), fd) != w->fds.end()) w->signal = Wait::kClosed;
   }
+}
+
+std::vector<std::span<uint8_t>> native_iovecs(Runtime& rt, int64_t address, int32_t count, bool write) {
+  std::vector<std::span<uint8_t>> out;
+  if (count <= 0) return out;
+  // struct iovec of x86_64: base (8 bytes), length (8 bytes).
+  std::vector<uint8_t> iov(size_t(count) * 16);
+  auto raw = native_span(rt, address, iov.size(), false);
+  std::memcpy(iov.data(), raw.data(), iov.size());
+  for (int32_t i = 0; i < count; ++i) {
+    uint64_t base = 0, length = 0;
+    std::memcpy(&base, iov.data() + size_t(i) * 16, 8);
+    std::memcpy(&length, iov.data() + size_t(i) * 16 + 8, 8);
+    if (length == 0) continue;
+    if (length > INT32_MAX) rt.throw_new("Ljava/lang/IndexOutOfBoundsException;", "iovec");
+    out.push_back(native_span(rt, int64_t(base), length, write));
+  }
+  return out;
+}
+
+namespace {
+
+// --- NIO (sun.nio.ch of ojluni: Net.c, IOUtil.c, ServerSocketChannelImpl.c,
+// SocketChannelImpl.c, PollArrayWrapper.c, DatagramChannelImpl.c, ...) -------------------
+
+// sun.nio.ch.IOStatus.
+constexpr int32_t kIosEof = -1, kIosUnavailable = -2, kIosInterrupted = -3, kIosThrown = -5;
+constexpr int32_t kEproto = 71;
+constexpr int32_t kMaxPacketLen = 65536;  // DatagramChannelImpl.c MAX_PACKET_LEN
+
+// Net.c handleSocketError: the exception of a socket call's errno, carrying
+// strerror's text (JNU_ThrowByNameWithLastError).
+[[noreturn]] void throw_socket_error(Runtime& rt, int32_t err) {
+  const char* cls = "Ljava/net/SocketException;";
+  switch (err) {
+    case kEproto: cls = "Ljava/net/ProtocolException;"; break;
+    case lx::kECONNREFUSED:
+    case lx::kETIMEDOUT: cls = "Ljava/net/ConnectException;"; break;
+    case lx::kEHOSTUNREACH: cls = "Ljava/net/NoRouteToHostException;"; break;
+    case lx::kEADDRINUSE:
+    case lx::kEADDRNOTAVAIL: cls = "Ljava/net/BindException;"; break;
+    default: break;
+  }
+  throw_net(rt, cls, strerror_text(err));
+}
+
+// JNU_ThrowIOExceptionWithLastError: IOException carrying strerror's text.
+[[noreturn]] void throw_io_errno(Runtime& rt, int32_t err) { throw_net(rt, "Ljava/io/IOException;", strerror_text(err)); }
+
+[[noreturn]] void throw_port_unreachable(Runtime& rt) {
+  throw rt::JavaThrow{construct(rt, "Ljava/net/PortUnreachableException;", "()V", {})};
+}
+
+// ipv6_available() of net_util_md.c: whether an IPv6 socket can be made.
+bool ipv6_available() {
+  static const bool available = [] {
+    ensure_winsock();
+    SOCKET s = socket(AF_INET6, SOCK_STREAM, 0);
+    if (s == INVALID_SOCKET) return false;
+    closesocket(s);
+    return true;
+  }();
+  return available;
+}
+
+// The socket of a FileDescriptor for NIO's natives (fdval): EBADF or ENOTSOCK
+// as handleSocketError reports them.
+std::shared_ptr<NetSocket> nio_socket(Runtime& rt, Handle java_fd, int32_t& fd) {
+  fd = fd_of(rt, java_fd);
+  auto s = socket_of(fd);
+  if (!s || s->pipe != NetSocket::Pipe::kNone) {
+    throw_socket_error(rt, fd > 2 && libcore_vfs().is_open(fd) ? lx::kENOTSOCK : lx::kEBADF);
+  }
+  return s;
+}
+
+// NET_InetAddressToSockaddr: an IPv4 address mapped for an IPv6 socket
+// (`prefer6`), plain otherwise; an IPv6 address needs IPv6.
+Endpoint nio_endpoint(Runtime& rt, NetSocket& s, Handle inet, int32_t port, bool prefer6) {
+  Endpoint e = to_sockaddr(rt, inet, port, prefer6 && ipv6_available());
+  if (e.ss.ss_family == AF_INET6 && !ipv6_available()) {
+    throw_net(rt, "Ljava/net/SocketException;", "Protocol family unavailable");
+  }
+  Endpoint v4;
+  if (e.ss.ss_family == AF_INET6 && s.win_af == AF_INET && to_ipv4(e, v4)) return v4;
+  return e;
+}
+
+// A socket call of NIO, as its natives see read(2), accept(2) and the like
+// on Linux: its result; IOS_UNAVAILABLE when a non-blocking socket would
+// block (EAGAIN, also when SO_RCVTIMEO or SO_SNDTIMEO expire);
+// IOS_INTERRUPTED when NativeThread.signal interrupts the wait of a
+// blocking one (EINTR); else IOS_THROWN, the Linux errno in `err`. The call
+// returns -1 with the Winsock error set on failure.
+template <typename Call>
+int64_t nio_call(Runtime& rt, NetSocket& s, int32_t fd, short events, bool sending, int32_t& err, Call call) {
+  for (;;) {
+    int64_t r = call();
+    if (r >= 0) return r;
+    int wsa = WSAGetLastError();
+    if (wsa == WSAEINTR) return kIosInterrupted;
+    if (wsa != WSAEWOULDBLOCK) {
+      err = io_errno(s, wsa, sending);
+      return kIosThrown;
+    }
+    if (s.nonblocking) return kIosUnavailable;
+    switch (wait_socket(rt, s, fd, events, sending ? s.sndtimeo_us : s.rcvtimeo_us, true)) {
+      case Wait::kReady: break;
+      case Wait::kTimeout: return kIosUnavailable;
+      case Wait::kClosed:
+      case Wait::kInterrupted: return kIosInterrupted;
+    }
+  }
+}
+
+// read(2)/readv(2) or write(2)/writev(2) of NIO on a socket or pipe, the
+// result as IOUtil.c's convertReturnVal makes it (0 bytes read: IOS_EOF).
+// A datagram longer than the buffers is cut, as Linux does; ECONNREFUSED
+// (an earlier datagram's ICMP error) is PortUnreachableException.
+int64_t nio_io(Runtime& rt, NetSocket& s, int32_t fd, std::span<const std::span<uint8_t>> buffers, bool reading) {
+  if (wrong_pipe_end(s, !reading)) throw_io_errno(rt, lx::kEBADF);
+  std::vector<WSABUF> bufs;
+  size_t total = 0;
+  for (std::span<uint8_t> b : buffers) {
+    if (b.empty()) continue;
+    WSABUF w;
+    w.len = ULONG(std::min<size_t>(b.size(), INT32_MAX - total));
+    w.buf = reinterpret_cast<char*>(b.data());
+    bufs.push_back(w);
+    total += w.len;
+    if (total >= INT32_MAX) break;
+  }
+  int32_t err = 0;
+  int64_t n = 0;
+  if (!bufs.empty()) {
+    n = nio_call(rt, s, fd, reading ? POLLRDNORM : POLLWRNORM, !reading, err, [&]() -> int64_t {
+      DWORD done = 0, flags = 0;
+      int rc = reading ? WSARecv(s.handle(), bufs.data(), DWORD(bufs.size()), &done, &flags, nullptr, nullptr)
+                       : WSASend(s.handle(), bufs.data(), DWORD(bufs.size()), &done, 0, nullptr, nullptr);
+      if (rc == SOCKET_ERROR && reading && WSAGetLastError() == WSAEMSGSIZE) return int64_t(total);
+      return rc == SOCKET_ERROR ? -1 : int64_t(done);
+    });
+  }
+  if (n == kIosThrown) {
+    if (err == lx::kECONNREFUSED && s.type == lx::kSockDgram) throw_port_unreachable(rt);
+    throw_io_errno(rt, err);
+  }
+  if (n == 0 && reading) return kIosEof;
+  return n;
+}
+
+// poll(2) for NIO, the GIL released while it waits (timeout_ms < 0: for
+// ever); the number of ready entries. An `interruptible` poll (Net.poll,
+// checkConnect) stops on NativeThread.signal and returns IOS_INTERRUPTED
+// (EINTR); the selector's (PollArrayWrapper.poll0) restarts, as RESTARTABLE
+// and ipoll do.
+int poll_wait(Runtime& rt, std::vector<PollEntry>& entries, int64_t timeout_ms, bool interruptible) {
+  resolve_poll(entries);
+  int ready = poll_once(entries, 0);
+  if (ready > 0 || timeout_ms == 0) return ready;
+  std::vector<int32_t> fds;
+  for (const PollEntry& e : entries) fds.push_back(e.fd);
+  bool any_socket = std::any_of(entries.begin(), entries.end(), [](const PollEntry& e) { return e.sock != nullptr; });
+  using Clock = std::chrono::steady_clock;
+  const auto deadline = Clock::now() + std::chrono::milliseconds(std::max<int64_t>(timeout_ms, 0));
+  bool interrupted = false;
+  WaitRegistration registration(std::move(fds), interruptible ? current_thread_id(rt) : 0);
+  rt.run_blocking([&] {
+    for (;;) {
+      if (registration.signal() == Wait::kInterrupted) {
+        interrupted = true;
+        return;
+      }
+      int slice = 50;
+      if (timeout_ms > 0) {  // never before the timeout: the last slice rounded up
+        auto left = std::chrono::duration_cast<std::chrono::microseconds>(deadline - Clock::now()).count();
+        if (left <= 0) return;
+        slice = int(std::min<int64_t>(slice, (left + 999) / 1000));
+      }
+      if (!any_socket) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(slice));
+        continue;
+      }
+      ready = poll_once(entries, slice);
+      if (ready > 0) return;
+    }
+  });
+  return interrupted ? kIosInterrupted : ready;
+}
+
+// pipe(2): the descriptors of its read and write ends, else the Linux errno.
+int32_t make_pipe(bool nonblocking, int32_t fds[2]) {
+  ensure_winsock();
+  auto [one, two] = loopback_pair(SOCK_STREAM);
+  if (one == INVALID_SOCKET) return linux_errno(WSAGetLastError());
+  auto read_end = std::make_shared<NetSocket>(one, lx::kAfUnix, lx::kSockStream, 0, AF_INET, NetSocket::Pipe::kRead);
+  auto write_end = std::make_shared<NetSocket>(two, lx::kAfUnix, lx::kSockStream, 0, AF_INET, NetSocket::Pipe::kWrite);
+  read_end->nonblocking = nonblocking;
+  write_end->nonblocking = nonblocking;
+  if (int32_t err = install_fd(std::move(read_end), fds[0])) return err;
+  if (int32_t err = install_fd(std::move(write_end), fds[1])) {
+    libcore_vfs().close(fds[0]);
+    return err;
+  }
+  return 0;
+}
+
+// FileDispatcherImpl's preCloseFD: one end of a socketpair whose other end
+// is closed (reads see the end of the stream, writes fail with EPIPE), made
+// once as libcore does when it registers the natives; null if that failed.
+std::shared_ptr<NetSocket> pre_close_marker() {
+  static auto* marker = new std::shared_ptr<NetSocket>;  // under the GIL; never destroyed
+  static bool tried = false;
+  if (!tried) {
+    tried = true;
+    ensure_winsock();
+    auto [one, two] = loopback_pair(SOCK_STREAM);
+    if (one != INVALID_SOCKET) {
+      closesocket(two);
+      shutdown(one, SD_SEND);
+      *marker = std::make_shared<NetSocket>(one, lx::kAfUnix, lx::kSockStream, 0, AF_INET);
+    }
+  }
+  return *marker;
+}
+
+// One read(2) or write(2) that never waits (IOUtil.drain, the selector's
+// wakeup byte): bytes, or -1 and the Linux errno.
+int64_t once(int32_t fd, std::span<uint8_t> data, bool sending, int32_t& err) {
+  if (auto s = socket_of(fd)) {
+    if (wrong_pipe_end(*s, sending)) {
+      err = lx::kEBADF;
+      return -1;
+    }
+    int n = sending ? send(s->handle(), reinterpret_cast<const char*>(data.data()), int(data.size()), 0)
+                    : recv(s->handle(), reinterpret_cast<char*>(data.data()), int(data.size()), 0);
+    if (n == SOCKET_ERROR) {
+      err = io_errno(*s, WSAGetLastError(), sending);
+      return -1;
+    }
+    return n;
+  }
+  try {
+    return int64_t(sending ? write_fd(fd, data) : read_fd(fd, data));
+  } catch (const vfs::VfsError& e) {
+    err = e.err;
+    return -1;
+  }
+}
+
+void set_descriptor(Runtime& rt, Handle java_fd, int32_t fd) {
+  if (java_fd == kNull) rt.throw_npe({});
+  field_of(rt, java_fd, "Ljava/io/FileDescriptor;", "descriptor", "I") = uint32_t(fd);
+}
+
+// NET_SockaddrEqualsInetAddress: the same address (an IPv4-mapped one equals its IPv4 address).
+bool same_address(Runtime& rt, const sockaddr_storage& ss, Handle inet) {
+  Endpoint e = to_sockaddr(rt, inet, 0, false);
+  auto bytes = [](const sockaddr_storage& a, std::vector<uint8_t>& out, uint32_t& scope) {
+    if (a.ss_family == AF_INET) {
+      const auto* p = reinterpret_cast<const uint8_t*>(&reinterpret_cast<const sockaddr_in&>(a).sin_addr);
+      out.assign(p, p + 4);
+    } else if (a.ss_family == AF_INET6) {
+      const auto& sin6 = reinterpret_cast<const sockaddr_in6&>(a);
+      if (IN6_IS_ADDR_V4MAPPED(&sin6.sin6_addr)) {
+        out.assign(&sin6.sin6_addr.s6_addr[12], &sin6.sin6_addr.s6_addr[16]);
+      } else {
+        out.assign(sin6.sin6_addr.s6_addr, sin6.sin6_addr.s6_addr + 16);
+        scope = sin6.sin6_scope_id;
+      }
+    }
+  };
+  std::vector<uint8_t> a, b;
+  uint32_t scope_a = 0, scope_b = 0;
+  bytes(ss, a, scope_a);
+  bytes(e.ss, b, scope_b);
+  return !a.empty() && a == b && scope_a == scope_b;
+}
+
+int32_t port_of(const sockaddr_storage& ss) {
+  if (ss.ss_family == AF_INET) return ntohs(reinterpret_cast<const sockaddr_in&>(ss).sin_port);
+  if (ss.ss_family == AF_INET6) return ntohs(reinterpret_cast<const sockaddr_in6&>(ss).sin6_port);
+  return 0;
+}
+
+// getsockname or getpeername of a NIO socket (an unbound one: the wildcard
+// address, port 0, as Linux names it).
+sockaddr_storage nio_name(Runtime& rt, Handle java_fd, bool peer) {
+  int32_t fd = -1;
+  auto s = nio_socket(rt, java_fd, fd);
+  sockaddr_storage ss{};
+  int len = sizeof ss;
+  int rc = peer ? getpeername(s->handle(), reinterpret_cast<sockaddr*>(&ss), &len)
+                : getsockname(s->handle(), reinterpret_cast<sockaddr*>(&ss), &len);
+  if (rc == SOCKET_ERROR) {
+    int err = WSAGetLastError();
+    if (peer || err != WSAEINVAL) throw_socket_error(rt, linux_errno(err));
+    std::memset(&ss, 0, sizeof ss);
+    ss.ss_family = ADDRESS_FAMILY(s->win_af);
+  }
+  return ss;
+}
+
+// A setsockopt of Net.c's multicast natives: IOS_UNAVAILABLE when a join or
+// block is not supported (ENOPROTOOPT, EOPNOTSUPP), else 0.
+int32_t multicast_option(Runtime& rt, NetSocket& s, int level, int option, const void* value, int len, bool adding) {
+  if (setsockopt(s.handle(), level, option, static_cast<const char*>(value), len) == SOCKET_ERROR) {
+    int32_t err = linux_errno(WSAGetLastError());
+    if (adding && (err == lx::kENOPROTOOPT || err == lx::kEOPNOTSUPP)) return kIosUnavailable;
+    throw_socket_error(rt, err);
+  }
+  return 0;
+}
+
+std::array<uint8_t, 16> inet6_bytes(Runtime& rt, Handle bytes) {
+  std::array<uint8_t, 16> out{};
+  rt::ArrayObject& b = rt.array(bytes, "byte[]");
+  if (b.length < 16) rt.throw_new("Ljava/lang/IllegalArgumentException;", "adresse IPv6 tronquée");
+  std::memcpy(out.data(), b.data.data(), 16);
+  return out;
+}
+
+void register_nio_net(rt::NativeRegistry& r) {
+  const char* net = "Lsun/nio/ch/Net;";  // static natives
+  r.bind(net, "isIPv6Available0", "()Z", [](Runtime&, NativeArgs&) -> uint64_t { return ipv6_available() ? 1 : 0; });
+  r.bind(net, "isExclusiveBindAvailable", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_int(-1); });
+  r.bind(net, "canIPv6SocketJoinIPv4Group0", "()Z", [](Runtime&, NativeArgs&) -> uint64_t { return 1; });
+  r.bind(net, "canJoin6WithIPv4Group0", "()Z", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
+  for (auto [name, value] : {std::pair{"pollinValue", lx::kPollIn}, std::pair{"polloutValue", lx::kPollOut},
+                             std::pair{"pollerrValue", lx::kPollErr}, std::pair{"pollhupValue", lx::kPollHup},
+                             std::pair{"pollnvalValue", lx::kPollNval}, std::pair{"pollconnValue", lx::kPollOut}}) {
+    int16_t v = value;
+    r.bind(net, name, "()S", [v](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_int(v); });
+  }
+  r.bind(net, "socket0", "(ZZZZ)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    bool prefer6 = a.i32(0) != 0, stream = a.i32(1) != 0, reuse = a.i32(2) != 0;
+    if (!libcore_config().internet) throw_socket_error(rt, lx::kEACCES);
+    int af = prefer6 && ipv6_available() ? AF_INET6 : AF_INET;
+    SOCKET h = new_win_socket(af, stream ? SOCK_STREAM : SOCK_DGRAM, 0);
+    if (h == INVALID_SOCKET) throw_socket_error(rt, linux_errno(WSAGetLastError()));
+    auto sock = std::make_shared<NetSocket>(h, linux_family(af), stream ? lx::kSockStream : lx::kSockDgram, 0, af);
+    if (reuse) set_option(*sock, lx::kSolSocket, lx::kSoReuseaddr, 1);
+    if (!stream) sock->multicast_all = 0;  // IP_MULTICAST_ALL off, as socket0 sets it
+    int32_t fd = -1;
+    if (int32_t err = install_fd(std::move(sock), fd)) throw_socket_error(rt, err);
+    return rt::ret_int(fd);
+  }, S::kPartial, "AF_INET et AF_INET6 (TCP, UDP) sur Winsock");
+  r.bind(net, "bind0", "(Ljava/io/FileDescriptor;ZZLjava/net/InetAddress;I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = -1;
+    auto s = nio_socket(rt, a.h(0), fd);
+    Endpoint e = nio_endpoint(rt, *s, a.h(3), a.i32(4), a.i32(1) != 0);
+    if (bind(s->handle(), reinterpret_cast<const sockaddr*>(&e.ss), e.len) == SOCKET_ERROR) {
+      throw_socket_error(rt, linux_errno(WSAGetLastError()));
+    }
+    return 0;
+  });
+  r.bind(net, "listen", "(Ljava/io/FileDescriptor;I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = -1;
+    auto s = nio_socket(rt, a.h(0), fd);
+    if (listen(s->handle(), std::max(a.i32(1), 0)) == SOCKET_ERROR) throw_socket_error(rt, linux_errno(WSAGetLastError()));
+    return 0;
+  });
+  // connect0: 1 once connected; IOS_UNAVAILABLE for a non-blocking socket
+  // (EINPROGRESS); a blocking one waits, IOS_INTERRUPTED if signalled.
+  r.bind(net, "connect0", "(ZLjava/io/FileDescriptor;Ljava/net/InetAddress;I)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = -1;
+    auto s = nio_socket(rt, a.h(1), fd);
+    Endpoint e = nio_endpoint(rt, *s, a.h(2), a.i32(3), a.i32(0) != 0);
+    if (connect(s->handle(), reinterpret_cast<const sockaddr*>(&e.ss), e.len) == 0) return rt::ret_int(1);
+    int err = WSAGetLastError();
+    if (err == WSAEINVAL && s->connecting) err = WSAEALREADY;
+    if (err == WSAEINTR) return rt::ret_int(kIosInterrupted);
+    if (err != WSAEWOULDBLOCK) throw_socket_error(rt, linux_errno(err));
+    s->connecting = true;
+    if (s->nonblocking) return rt::ret_int(kIosUnavailable);
+    if (wait_socket(rt, *s, fd, POLLWRNORM, 0, true) != Wait::kReady) return rt::ret_int(kIosInterrupted);
+    s->connecting = false;
+    if (int failed = pending_error(s->handle())) throw_socket_error(rt, linux_errno(failed));
+    return rt::ret_int(1);
+  });
+  r.bind(net, "localInetAddress", "(Ljava/io/FileDescriptor;)Ljava/net/InetAddress;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    sockaddr_storage ss = nio_name(rt, a.h(0), false);
+    return to_inet_address(rt, reinterpret_cast<const sockaddr*>(&ss), nullptr);
+  });
+  r.bind(net, "localPort", "(Ljava/io/FileDescriptor;)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_int(port_of(nio_name(rt, a.h(0), false)));
+  });
+  r.bind(net, "remoteInetAddress", "(Ljava/io/FileDescriptor;)Ljava/net/InetAddress;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    sockaddr_storage ss = nio_name(rt, a.h(0), true);
+    return to_inet_address(rt, reinterpret_cast<const sockaddr*>(&ss), nullptr);
+  });
+  r.bind(net, "remotePort", "(Ljava/io/FileDescriptor;)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_int(port_of(nio_name(rt, a.h(0), true)));
+  });
+  // Options: SO_LINGER as its time or -1, IP_MULTICAST_TTL and
+  // IP_MULTICAST_LOOP as a byte; SO_SNDBUF and SO_RCVBUF as set (Linux
+  // doubles them and NET_GetSockOpt halves them back).
+  r.bind(net, "getIntOption0", "(Ljava/io/FileDescriptor;ZII)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = -1;
+    auto s = nio_socket(rt, a.h(0), fd);
+    int32_t level = a.i32(2), option = a.i32(3);
+    if (level == lx::kSolSocket && option == lx::kSoLinger) {
+      LINGER l{};
+      int len = sizeof l;
+      if (getsockopt(s->handle(), SOL_SOCKET, SO_LINGER, reinterpret_cast<char*>(&l), &len) == SOCKET_ERROR) {
+        throw_net(rt, "Ljava/net/SocketException;", strerror_text(linux_errno(WSAGetLastError())));
+      }
+      return rt::ret_int(l.l_onoff ? int32_t(l.l_linger) : -1);
+    }
+    int32_t value = 0;
+    if (int32_t err = int_option(*s, level, option, value)) throw_net(rt, "Ljava/net/SocketException;", strerror_text(err));
+    if (level == lx::kIpprotoIp && (option == lx::kIpMulticastTtl || option == lx::kIpMulticastLoop)) value &= 0xff;
+    return rt::ret_int(value);
+  });
+  r.bind(net, "setIntOption0", "(Ljava/io/FileDescriptor;ZIIIZ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = -1;
+    auto s = nio_socket(rt, a.h(0), fd);
+    int32_t level = a.i32(2), option = a.i32(3), value = a.i32(4);
+    bool is_ipv6 = a.i32(5) != 0;
+    if (level == lx::kSolSocket && option == lx::kSoLinger) {
+      LINGER l{};
+      l.l_onoff = u_short(value >= 0);
+      l.l_linger = u_short(value >= 0 ? std::min(value, 0xffff) : 0);
+      if (setsockopt(s->handle(), SOL_SOCKET, SO_LINGER, reinterpret_cast<const char*>(&l), sizeof l) == SOCKET_ERROR) {
+        throw_net(rt, "Ljava/net/SocketException;", strerror_text(linux_errno(WSAGetLastError())));
+      }
+      return 0;
+    }
+    if (level == lx::kIpprotoIp && (option == lx::kIpMulticastTtl || option == lx::kIpMulticastLoop)) value &= 0xff;
+    if (int32_t err = set_option(*s, level, option, value)) throw_net(rt, "Ljava/net/SocketException;", strerror_text(err));
+    if (level == lx::kIpprotoIpv6 && option == lx::kIpv6Tclass && is_ipv6) {
+      set_option(*s, lx::kIpprotoIp, lx::kIpTos, value);  // the IPv4 option too, its failure ignored
+    }
+    return 0;
+  });
+  r.bind(net, "shutdown", "(Ljava/io/FileDescriptor;I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = -1;
+    auto s = nio_socket(rt, a.h(0), fd);
+    // Net.SHUT_RD, SHUT_WR, SHUT_RDWR are SD_RECEIVE, SD_SEND, SD_BOTH.
+    if (shutdown(s->handle(), a.i32(1)) == SOCKET_ERROR) {
+      int32_t err = linux_errno(WSAGetLastError());
+      if (err != lx::kENOTCONN) throw_socket_error(rt, err);
+    }
+    return 0;
+  });
+  // poll(2) of one descriptor: its revents, IOS_INTERRUPTED if signalled.
+  r.bind(net, "poll", "(Ljava/io/FileDescriptor;IJ)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::vector<PollEntry> entries(1);
+    entries[0].fd = fd_of(rt, a.h(0));
+    entries[0].events = int16_t(a.i32(1));
+    int rv = poll_wait(rt, entries, int32_t(a.i64(2)), true);  // poll(2) takes an int
+    if (rv == kIosInterrupted) return rt::ret_int(kIosInterrupted);
+    return rt::ret_int(entries[0].revents);
+  });
+
+  // Multicast (Net.c): IPv4 groups by ip_mreq or ip_mreq_source; IPv6 groups
+  // by ipv6_mreq, source filtering unavailable as on Linux.
+  r.bind(net, "joinOrDrop4", "(ZLjava/io/FileDescriptor;III)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = -1;
+    auto s = nio_socket(rt, a.h(1), fd);
+    bool join = a.i32(0) != 0;
+    uint32_t group = uint32_t(a.i32(2)), interf = uint32_t(a.i32(3)), source = uint32_t(a.i32(4));
+    if (source == 0) {
+      ip_mreq m{};
+      m.imr_multiaddr.s_addr = htonl(group);
+      m.imr_interface.s_addr = htonl(interf);
+      return rt::ret_int(multicast_option(rt, *s, IPPROTO_IP, join ? IP_ADD_MEMBERSHIP : IP_DROP_MEMBERSHIP, &m, sizeof m, join));
+    }
+    ip_mreq_source m{};
+    m.imr_multiaddr.s_addr = htonl(group);
+    m.imr_sourceaddr.s_addr = htonl(source);
+    m.imr_interface.s_addr = htonl(interf);
+    return rt::ret_int(multicast_option(rt, *s, IPPROTO_IP, join ? IP_ADD_SOURCE_MEMBERSHIP : IP_DROP_SOURCE_MEMBERSHIP, &m,
+                                        sizeof m, join));
+  });
+  r.bind(net, "blockOrUnblock4", "(ZLjava/io/FileDescriptor;III)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = -1;
+    auto s = nio_socket(rt, a.h(1), fd);
+    bool block = a.i32(0) != 0;
+    ip_mreq_source m{};
+    m.imr_multiaddr.s_addr = htonl(uint32_t(a.i32(2)));
+    m.imr_interface.s_addr = htonl(uint32_t(a.i32(3)));
+    m.imr_sourceaddr.s_addr = htonl(uint32_t(a.i32(4)));
+    return rt::ret_int(multicast_option(rt, *s, IPPROTO_IP, block ? IP_BLOCK_SOURCE : IP_UNBLOCK_SOURCE, &m, sizeof m, block));
+  });
+  r.bind(net, "joinOrDrop6", "(ZLjava/io/FileDescriptor;[BI[B)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = -1;
+    auto s = nio_socket(rt, a.h(1), fd);
+    if (a.h(4) != kNull) return rt::ret_int(kIosUnavailable);  // include-mode filtering, as on Linux
+    bool join = a.i32(0) != 0;
+    ipv6_mreq m{};
+    auto group = inet6_bytes(rt, a.h(2));
+    std::memcpy(&m.ipv6mr_multiaddr, group.data(), 16);
+    m.ipv6mr_interface = ULONG(a.i32(3));
+    return rt::ret_int(multicast_option(rt, *s, IPPROTO_IPV6, join ? IPV6_ADD_MEMBERSHIP : IPV6_DROP_MEMBERSHIP, &m, sizeof m,
+                                        join));
+  });
+  r.bind(net, "blockOrUnblock6", "(ZLjava/io/FileDescriptor;[BI[B)I",
+         [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_int(kIosUnavailable); });  // as on Linux
+  r.bind(net, "setInterface4", "(Ljava/io/FileDescriptor;I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = -1;
+    auto s = nio_socket(rt, a.h(0), fd);
+    in_addr in{};
+    in.s_addr = htonl(uint32_t(a.i32(1)));
+    if (setsockopt(s->handle(), IPPROTO_IP, IP_MULTICAST_IF, reinterpret_cast<const char*>(&in), sizeof in) == SOCKET_ERROR) {
+      throw_socket_error(rt, linux_errno(WSAGetLastError()));
+    }
+    return 0;
+  });
+  r.bind(net, "getInterface4", "(Ljava/io/FileDescriptor;)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = -1;
+    auto s = nio_socket(rt, a.h(0), fd);
+    in_addr in{};
+    int len = sizeof in;
+    if (getsockopt(s->handle(), IPPROTO_IP, IP_MULTICAST_IF, reinterpret_cast<char*>(&in), &len) == SOCKET_ERROR) {
+      throw_socket_error(rt, linux_errno(WSAGetLastError()));
+    }
+    return rt::ret_int(int32_t(ntohl(in.s_addr)));
+  });
+  r.bind(net, "setInterface6", "(Ljava/io/FileDescriptor;I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = -1;
+    auto s = nio_socket(rt, a.h(0), fd);
+    DWORD index = DWORD(a.i32(1));
+    if (setsockopt(s->handle(), IPPROTO_IPV6, IPV6_MULTICAST_IF, reinterpret_cast<const char*>(&index), sizeof index) ==
+        SOCKET_ERROR) {
+      throw_socket_error(rt, linux_errno(WSAGetLastError()));
+    }
+    return 0;
+  });
+  r.bind(net, "getInterface6", "(Ljava/io/FileDescriptor;)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = -1;
+    auto s = nio_socket(rt, a.h(0), fd);
+    DWORD index = 0;
+    int len = sizeof index;
+    if (getsockopt(s->handle(), IPPROTO_IPV6, IPV6_MULTICAST_IF, reinterpret_cast<char*>(&index), &len) == SOCKET_ERROR) {
+      throw_socket_error(rt, linux_errno(WSAGetLastError()));
+    }
+    return rt::ret_int(int32_t(index));
+  });
+
+  // Channels.
+  auto accept0 = [](Runtime& rt, NativeArgs& a) -> uint64_t {  // instance: ssfd, newfd, isaa
+    int32_t fd = -1;
+    auto s = nio_socket(rt, a.h(1), fd);
+    sockaddr_storage ss{};
+    int len = sizeof ss;
+    SOCKET client = INVALID_SOCKET;
+    int32_t err = 0;
+    int64_t n = nio_call(rt, *s, fd, POLLRDNORM, false, err, [&]() -> int64_t {
+      for (;;) {  // a connection reset before it was accepted (ECONNABORTED): the next one
+        len = sizeof ss;
+        client = accept(s->handle(), reinterpret_cast<sockaddr*>(&ss), &len);
+        if (client != INVALID_SOCKET) return 0;
+        if (WSAGetLastError() != WSAECONNABORTED) return -1;
+      }
+    });
+    if (n == kIosThrown) throw_io_errno(rt, err);
+    if (n < 0) return rt::ret_int(int32_t(n));
+    u_long on = 1;
+    ioctlsocket(client, FIONBIO, &on);
+    // Blocking, as accept(2) makes it.
+    auto sock = std::make_shared<NetSocket>(client, s->family, s->type, s->protocol, s->win_af);
+    int32_t newfd = -1;
+    if (int32_t e = install_fd(std::move(sock), newfd)) throw_io_errno(rt, e);
+    set_descriptor(rt, a.h(2), newfd);
+    Handle isa = make_socket_address(rt, reinterpret_cast<const sockaddr*>(&ss));
+    Handle isaa = a.h(3);
+    if (isaa == kNull) rt.throw_npe({});
+    std::memcpy(rt.array(isaa, "InetSocketAddress[]").data.data(), &isa, 4);
+    return rt::ret_int(1);
+  };
+  for (const char* cls : {"Lsun/nio/ch/ServerSocketChannelImpl;", "Lsun/nio/ch/UnixAsynchronousServerSocketChannelImpl;"}) {
+    r.bind(cls, "initIDs", "()V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
+    r.bind(cls, "accept0", "(Ljava/io/FileDescriptor;Ljava/io/FileDescriptor;[Ljava/net/InetSocketAddress;)I", accept0);
+  }
+  // checkConnect(fd, block, ready): 1 once connected, the connection's error
+  // thrown, IOS_UNAVAILABLE while a non-blocking one is pending.
+  r.bind("Lsun/nio/ch/SocketChannelImpl;", "checkConnect", "(Ljava/io/FileDescriptor;ZZ)I",
+         [](Runtime& rt, NativeArgs& a) -> uint64_t {
+           int32_t fd = fd_of(rt, a.h(0));
+           bool block = a.i32(1) != 0, ready = a.i32(2) != 0;
+           int16_t revents = 1;
+           if (!ready) {
+             std::vector<PollEntry> entries(1);
+             entries[0].fd = fd;
+             entries[0].events = lx::kPollOut;
+             int result = poll_wait(rt, entries, block ? -1 : 0, true);
+             if (result == kIosInterrupted) throw_io_errno(rt, lx::kEINTR);  // "Poll failed"
+             if (!block && result == 0) return rt::ret_int(kIosUnavailable);
+             revents = entries[0].revents;
+           }
+           if (!revents) return 0;
+           auto s = socket_of(fd);
+           if (!s) throw_socket_error(rt, lx::kEBADF);
+           int failed = pending_error(s->handle());
+           s->connecting = false;
+           if (failed) throw_socket_error(rt, linux_errno(failed));
+           return rt::ret_int(1);
+         });
+  r.bind("Lsun/nio/ch/SocketChannelImpl;", "sendOutOfBandData", "(Ljava/io/FileDescriptor;B)I",
+         [](Runtime& rt, NativeArgs& a) -> uint64_t {
+           int32_t fd = -1;
+           auto s = nio_socket(rt, a.h(0), fd);
+           char byte = char(a.i32(1));
+           int32_t err = 0;
+           int64_t n = nio_call(rt, *s, fd, POLLWRNORM, true, err, [&]() -> int64_t {
+             return send(s->handle(), &byte, 1, MSG_OOB);
+           });
+           if (n == kIosThrown) throw_io_errno(rt, err);
+           return rt::ret_int(int32_t(n));
+         });
+  r.bind("Lsun/nio/ch/UnixAsynchronousSocketChannelImpl;", "checkConnect", "(I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto s = socket_of(a.i32(0));
+    if (!s) throw_io_errno(rt, lx::kEBADF);  // "getsockopt"
+    int failed = pending_error(s->handle());
+    s->connecting = false;
+    if (failed) throw_socket_error(rt, linux_errno(failed));
+    return 0;
+  });
+
+  // The selector (PollSelectorImpl): poll(2) over an array of struct pollfd
+  // (fd, events, revents: 8 bytes) in native memory; its wakeup writes a byte
+  // to its pipe.
+  const char* paw = "Lsun/nio/ch/PollArrayWrapper;";
+  r.bind(paw, "poll0", "(JIJ)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int64_t address = a.i64(1), timeout = a.i64(4);
+    int32_t numfds = a.i32(3);
+    if (numfds < 0) throw_io_errno(rt, lx::kEINVAL);
+    std::vector<PollEntry> entries(static_cast<size_t>(numfds));
+    if (numfds > 0) {
+      auto raw = native_span(rt, address, uint64_t(numfds) * 8, false);
+      for (size_t i = 0; i < entries.size(); ++i) {
+        std::memcpy(&entries[i].fd, raw.data() + i * 8, 4);
+        std::memcpy(&entries[i].events, raw.data() + i * 8 + 4, 2);
+      }
+    }
+    int ready = poll_wait(rt, entries, timeout, false);
+    if (numfds > 0) {
+      auto raw = native_span(rt, address, uint64_t(numfds) * 8, true);  // again: the GIL was released
+      for (size_t i = 0; i < entries.size(); ++i) std::memcpy(raw.data() + i * 8 + 6, &entries[i].revents, 2);
+    }
+    return rt::ret_int(ready);
+  });
+  r.bind(paw, "interrupt", "(I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    uint8_t byte = 1;
+    int32_t err = 0;
+    if (once(a.i32(0), std::span<uint8_t>(&byte, 1), true, err) < 0) throw_io_errno(rt, err);
+    return 0;
+  });
+
+  // IOUtil.
+  const char* iou = "Lsun/nio/ch/IOUtil;";
+  r.bind(iou, "fdVal", "(Ljava/io/FileDescriptor;)I", [](Runtime& rt, NativeArgs& a) -> uint64_t { return rt::ret_int(fd_of(rt, a.h(0))); });
+  r.bind(iou, "setfdVal", "(Ljava/io/FileDescriptor;I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    set_descriptor(rt, a.h(0), a.i32(1));
+    return 0;
+  });
+  r.bind(iou, "configureBlocking", "(Ljava/io/FileDescriptor;Z)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = fd_of(rt, a.h(0));
+    bool blocking = a.i32(1) != 0;
+    if (fd >= 0 && fd <= 2) return 0;  // the standard streams stay blocking
+    try {
+      int32_t flags = libcore_vfs().open_flags(fd);
+      flags = blocking ? flags & ~vfs::kO_NONBLOCK : flags | vfs::kO_NONBLOCK;
+      libcore_vfs().set_status_flags(fd, flags);
+      socket_status_flags(fd, flags);
+    } catch (const vfs::VfsError& e) {
+      throw_io_errno(rt, e.err);
+    }
+    return 0;
+  });
+  r.bind(iou, "makePipe", "(Z)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fds[2] = {-1, -1};
+    if (int32_t err = make_pipe(a.i32(0) == 0, fds)) throw_io_errno(rt, err);
+    return rt::ret_long((int64_t(fds[0]) << 32) | int64_t(uint32_t(fds[1])));
+  }, S::kPartial, "deux sockets de la boucle locale");
+  // drain: reads what the (non-blocking) descriptor holds, 128 bytes at a time.
+  r.bind(iou, "drain", "(I)Z", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    uint8_t buf[128];
+    int64_t total = 0;
+    for (;;) {
+      int32_t err = 0;
+      int64_t n = once(a.i32(0), std::span<uint8_t>(buf, sizeof buf), false, err);
+      total += n;
+      if (n < 0 && err != lx::kEAGAIN) throw_io_errno(rt, err);
+      if (n == int64_t(sizeof buf)) continue;
+      return total > 0 ? 1 : 0;
+    }
+  });
+  r.bind(iou, "fdLimit", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_int(int32_t(vfs::kMaxOpenFiles)); });
+  r.bind(iou, "randomBytes", "([B)Z", [](Runtime& rt, NativeArgs&) -> uint64_t {
+    throw rt::JavaThrow{construct(rt, "Ljava/lang/UnsupportedOperationException;", "()V", {})};
+  });
+
+  // FileDispatcherImpl: preClose0 puts the marker descriptor under the
+  // channel's number (dup2), so that the number stays taken until close0
+  // while NativeThread.signal stops the threads blocked on it.
+  const char* fdi = "Lsun/nio/ch/FileDispatcherImpl;";
+  r.bind(fdi, "preClose0", "(Ljava/io/FileDescriptor;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = fd_of(rt, a.h(0));
+    auto marker = pre_close_marker();
+    if (!marker || (fd >= 0 && fd <= 2)) return 0;
+    try {
+      libcore_vfs().replace(fd, marker, vfs::kO_RDWR, "socket:[" + std::to_string(marker->ino) + "]");
+    } catch (const vfs::VfsError& e) {
+      throw_io_errno(rt, e.err);
+    }
+    return 0;
+  });
+  r.bind(fdi, "closeIntFD", "(I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = a.i32(0);
+    if (fd == -1 || (fd >= 0 && fd <= 2)) return 0;
+    try {
+      libcore_vfs().close(fd);
+    } catch (const vfs::VfsError& e) {
+      throw_io_errno(rt, e.err);
+    }
+    return 0;
+  });
+
+  // NativeThread: the running thread's id, and the signal that interrupts its
+  // blocking socket call (EINTR, which NIO's natives return as IOS_INTERRUPTED).
+  r.bind("Lsun/nio/ch/NativeThread;", "current", "()J",
+         [](Runtime& rt, NativeArgs&) -> uint64_t { return rt::ret_long(int64_t(current_thread_id(rt))); });
+  r.bind("Lsun/nio/ch/NativeThread;", "signal", "(J)V", [](Runtime&, NativeArgs& a) -> uint64_t {
+    int64_t id = a.i64(0);
+    std::lock_guard<std::mutex> guard(blocked_lock());
+    for (BlockedWait* w : blocked_waits()) {
+      if (w->thread != 0 && int64_t(w->thread) == id) w->signal = Wait::kInterrupted;
+    }
+    return 0;
+  });
+
+  // Datagrams.
+  const char* dci = "Lsun/nio/ch/DatagramChannelImpl;";
+  r.bind(dci, "initIDs", "()V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
+  // receive0(fd, address, len, connected), instance: the sender kept in
+  // `sender`, reused while it sends (cachedSenderInetAddress, cachedSenderPort).
+  r.bind(dci, "receive0", "(Ljava/io/FileDescriptor;JIZ)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = -1;
+    auto s = nio_socket(rt, a.h(1), fd);
+    int32_t len = std::min(a.i32(4), kMaxPacketLen);
+    std::span<uint8_t> buf;
+    if (len > 0) buf = native_span(rt, a.i64(2), uint64_t(len), true);
+    bool connected = a.i32(5) != 0;
+    sockaddr_storage ss{};
+    int ss_len = sizeof ss;
+    int32_t err = 0;
+    int64_t n = 0;
+    for (;;) {
+      n = nio_call(rt, *s, fd, POLLRDNORM, false, err, [&]() -> int64_t {
+        ss_len = sizeof ss;
+        int got = recvfrom(s->handle(), reinterpret_cast<char*>(buf.data()), int(buf.size()), 0,
+                           reinterpret_cast<sockaddr*>(&ss), &ss_len);
+        if (got == SOCKET_ERROR && WSAGetLastError() == WSAEMSGSIZE) return int64_t(buf.size());  // cut, as Linux
+        return got;
+      });
+      if (n == kIosThrown && err == lx::kECONNREFUSED && !connected) continue;
+      break;
+    }
+    if (n == kIosThrown) {
+      if (err == lx::kECONNREFUSED) throw_port_unreachable(rt);
+      throw_socket_error(rt, err);
+    }
+    if (n < 0) return rt::ret_int(int32_t(n));
+    Handle self = a.h(0);
+    rt::Class* cls = rt.class_of(self);
+    rt::Field* cached_f = find_field(cls, "cachedSenderInetAddress", "Ljava/net/InetAddress;");
+    rt::Field* port_f = find_field(cls, "cachedSenderPort", "I");
+    rt::Field* sender_f = find_field(cls, "sender", "Ljava/net/SocketAddress;");
+    if (!cached_f || !port_f || !sender_f) rt.throw_new("Ljava/lang/NoSuchFieldError;", "DatagramChannelImpl.sender");
+    Handle cached = rt.object(self)->fields.at(cached_f->slot);
+    int32_t port = port_of(ss);
+    bool same = cached != kNull && int32_t(rt.object(self)->fields.at(port_f->slot)) == port && same_address(rt, ss, cached);
+    if (!same) {
+      rt::GlobalRef address(rt, to_inet_address(rt, reinterpret_cast<const sockaddr*>(&ss), nullptr));
+      Handle isa = construct(rt, kInetSocketAddress, "(Ljava/net/InetAddress;I)V", {address.get(), uint32_t(port)});
+      rt.object(self)->fields.at(cached_f->slot) = address.get();
+      rt.object(self)->fields.at(port_f->slot) = uint32_t(port);
+      rt.object(self)->fields.at(sender_f->slot) = isa;
+    }
+    return rt::ret_int(int32_t(n));
+  });
+  r.bind(dci, "send0", "(ZLjava/io/FileDescriptor;JILjava/net/InetAddress;I)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = -1;
+    auto s = nio_socket(rt, a.h(2), fd);
+    int32_t len = std::min(a.i32(5), kMaxPacketLen);
+    std::span<uint8_t> buf;
+    if (len > 0) buf = native_span(rt, a.i64(3), uint64_t(len), false);
+    Endpoint to = nio_endpoint(rt, *s, a.h(6), a.i32(7), a.i32(1) != 0);
+    int32_t err = 0;
+    int64_t n = nio_call(rt, *s, fd, POLLWRNORM, true, err, [&]() -> int64_t {
+      return sendto(s->handle(), reinterpret_cast<const char*>(buf.data()), int(buf.size()), 0,
+                    reinterpret_cast<const sockaddr*>(&to.ss), to.len);
+    });
+    if (n == kIosThrown) {
+      if (err == lx::kECONNREFUSED) throw_port_unreachable(rt);
+      throw_socket_error(rt, err);
+    }
+    return rt::ret_int(int32_t(n));
+  });
+  // disconnect0: Linux connects to AF_UNSPEC; Windows dissolves the
+  // association with the zero address of the socket's family.
+  r.bind(dci, "disconnect0", "(Ljava/io/FileDescriptor;Z)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = -1;
+    auto s = nio_socket(rt, a.h(0), fd);
+    sockaddr_storage ss{};
+    ss.ss_family = ADDRESS_FAMILY(s->win_af);
+    int len = s->win_af == AF_INET6 ? int(sizeof(sockaddr_in6)) : int(sizeof(sockaddr_in));
+    if (connect(s->handle(), reinterpret_cast<const sockaddr*>(&ss), len) == SOCKET_ERROR) {
+      throw_socket_error(rt, linux_errno(WSAGetLastError()));
+    }
+    return 0;
+  });
+  const char* dd = "Lsun/nio/ch/DatagramDispatcher;";  // connected datagram sockets
+  for (bool reading : {true, false}) {
+    r.bind(dd, reading ? "read0" : "write0", "(Ljava/io/FileDescriptor;JI)I", [reading](Runtime& rt, NativeArgs& a) -> uint64_t {
+      int32_t fd = -1;
+      auto s = nio_socket(rt, a.h(0), fd);
+      std::span<uint8_t> buf;
+      if (a.i32(3) > 0) buf = native_span(rt, a.i64(1), uint64_t(a.i32(3)), reading);
+      std::span<uint8_t> one[] = {buf};
+      return rt::ret_int(int32_t(nio_io(rt, *s, fd, one, reading)));
+    });
+    r.bind(dd, reading ? "readv0" : "writev0", "(Ljava/io/FileDescriptor;JI)J", [reading](Runtime& rt, NativeArgs& a) -> uint64_t {
+      int32_t fd = -1;
+      auto s = nio_socket(rt, a.h(0), fd);
+      auto bufs = native_iovecs(rt, a.i64(1), a.i32(3), reading);
+      return rt::ret_long(nio_io(rt, *s, fd, bufs, reading));
+    });
+  }
+}
+
+}  // namespace
+
+std::optional<int64_t> nio_socket_io(Runtime& rt, int32_t fd, std::span<const std::span<uint8_t>> buffers, bool reading) {
+  auto s = socket_of(fd);
+  if (!s) return std::nullopt;
+  return nio_io(rt, *s, fd, buffers, reading);
 }
 
 void register_libcore_net(rt::NativeRegistry& r) {
@@ -1235,30 +2167,15 @@ void register_libcore_net(rt::NativeRegistry& r) {
       entries.push_back(std::move(e));
       items.push_back(item);
     }
-    // What each descriptor number is now; again after a signalled close (the
-    // EINTR that makes Linux_poll start over), which may have closed it or put
-    // a marker descriptor under its number.
-    auto resolve = [&] {
-      for (PollEntry& e : entries) {
-        e.sock = nullptr;
-        e.revents = 0;
-        if (e.fd < 0) continue;
-        if (auto s = socket_of(e.fd)) {
-          e.sock = std::move(s);
-        } else if (e.fd <= 2 || libcore_vfs().is_open(e.fd)) {
-          e.revents = int16_t(e.events & (lx::kPollIn | lx::kPollOut | lx::kPollRdnorm | lx::kPollWrnorm));
-        } else {
-          e.revents = lx::kPollNval;
-        }
-      }
-    };
     std::vector<int32_t> fds;
     for (const PollEntry& e : entries) fds.push_back(e.fd);
     using Clock = std::chrono::steady_clock;
     const auto deadline = Clock::now() + std::chrono::milliseconds(std::max(timeout, 0));
     int ready = 0;
     for (;;) {
-      resolve();
+      // Again after a signalled close (the EINTR that makes Linux_poll start
+      // over), which may have closed a descriptor or put a marker under its number.
+      resolve_poll(entries);
       ready = poll_once(entries, 0);
       if (ready > 0 || timeout == 0) break;
       bool signaled = false;
@@ -1271,10 +2188,10 @@ void register_libcore_net(rt::NativeRegistry& r) {
               return;
             }
             int slice = 50;
-            if (timeout > 0) {
-              auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+            if (timeout > 0) {  // never before the timeout: the last slice rounded up
+              auto left = std::chrono::duration_cast<std::chrono::microseconds>(deadline - Clock::now()).count();
               if (left <= 0) return;
-              slice = int(std::min<int64_t>(slice, left));
+              slice = int(std::min<int64_t>(slice, (left + 999) / 1000));
             }
             bool any_socket = std::any_of(entries.begin(), entries.end(), [](const PollEntry& e) { return e.sock != nullptr; });
             if (!any_socket) {
@@ -1388,6 +2305,23 @@ void register_libcore_net(rt::NativeRegistry& r) {
     return 0;
   }, S::kPartial, "AF_UNIX émulé par deux sockets TCP (ou UDP) de la boucle locale");
 
+  // pipe2(flags): O_NONBLOCK and O_CLOEXEC (no exec here), O_DIRECT ignored.
+  r.bind(lxc, "pipe2", "(I)[Ljava/io/FileDescriptor;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t flags = a.i32(1);
+    constexpr int32_t kOCloexec = 02000000, kODirect = 040000;
+    if (flags & ~(vfs::kO_NONBLOCK | kOCloexec | kODirect)) throw_errno(rt, "pipe2", lx::kEINVAL);
+    int32_t fds[2] = {-1, -1};
+    if (int32_t err = make_pipe((flags & vfs::kO_NONBLOCK) != 0, fds)) throw_errno(rt, "pipe2", err);
+    rt::GlobalRef result(rt, rt.new_array("[Ljava/io/FileDescriptor;", 2));
+    for (size_t i = 0; i < 2; ++i) {
+      Handle h = new_file_descriptor(rt, fds[i]);
+      std::memcpy(&rt.array(result.get(), "FileDescriptor[]").data[i * 4], &h, 4);
+    }
+    return result.get();
+  }, S::kPartial, "deux sockets de la boucle locale");
+
+  register_nio_net(r);
+
   // SocketInputStream.socketRead0 and SocketOutputStream.socketWrite0
   // (ojluni's SocketInputStream.c, SocketOutputStream.c): at most 64 KiB per
   // read, the timeout as poll's, the errors as their messages.
@@ -1401,7 +2335,8 @@ void register_libcore_net(rt::NativeRegistry& r) {
              switch (wait_socket(rt, *s, fd_of(rt, a.h(1)), POLLRDNORM, int64_t(timeout) * 1000)) {
                case Wait::kTimeout: throw_net(rt, "Ljava/net/SocketTimeoutException;", "Read timed out");
                case Wait::kClosed: throw_net(rt, "Ljava/net/SocketException;", "Socket closed");
-               case Wait::kReady: break;
+               case Wait::kReady:
+               case Wait::kInterrupted: break;
              }
            }
            auto [n, err] = stream_io(rt, *s, fd_of(rt, a.h(1)), POLLRDNORM, false, [&]() -> int64_t {

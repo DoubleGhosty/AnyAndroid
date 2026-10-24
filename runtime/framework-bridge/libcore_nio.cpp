@@ -290,10 +290,14 @@ void register_unix_native_dispatcher(rt::NativeRegistry& r) {
 
 void register_file_dispatcher(rt::NativeRegistry& r) {
   const char* fdi = "Lsun/nio/ch/FileDispatcherImpl;";  // static natives
-  // read0/pread0 return IOStatus.EOF (-1) at the end of the file, as the real natives.
+  // read0/pread0 return IOStatus.EOF (-1) at the end of the file, as the real
+  // natives. Sockets and pipes (SocketDispatcher, Pipe channels) go to
+  // libcore_net.cpp, which blocks or not as their O_NONBLOCK says.
   r.bind(fdi, "read0", "(Ljava/io/FileDescriptor;JI)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(0));
     auto buf = buffer_from_address(rt, a.i64(1), a.i32(3), true);
+    std::span<uint8_t> one[] = {buf};
+    if (auto n = nio_socket_io(rt, fd, one, true)) return rt::ret_int(int32_t(*n));
     if (buf.empty()) return 0;
     size_t n = io_call(rt, [&] { return read_fd(fd, buf); });
     return rt::ret_int(n == 0 ? kIosEof : int32_t(n));
@@ -314,6 +318,7 @@ void register_file_dispatcher(rt::NativeRegistry& r) {
     int32_t len = a.i32(3);
     if (len < 0) throw_io(rt, vfs::kEINVAL);
     if (len == 0) return rt::ret_long(0);
+    if (auto n = nio_socket_io(rt, fd, native_iovecs(rt, address, len, true), true)) return rt::ret_long(*n);
     auto iov_span = native_span(rt, address, uint64_t(len) * 16, false);
     int64_t total = 0;
     bool any_attempted = false;
@@ -335,14 +340,17 @@ void register_file_dispatcher(rt::NativeRegistry& r) {
   r.bind(fdi, "write0", "(Ljava/io/FileDescriptor;JI)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(0));
     auto buf = buffer_from_address(rt, a.i64(1), a.i32(3), false);
+    std::span<uint8_t> one[] = {buf};
+    if (auto n = nio_socket_io(rt, fd, one, false)) return rt::ret_int(int32_t(*n));
     return rt::ret_int(int32_t(io_call(rt, [&] { return write_fd(fd, buf); })));
-  }, S::kPartial, "sorties standard et système de fichiers virtuel");
+  }, S::kPartial, "sorties standard, système de fichiers virtuel et sockets");
   r.bind(fdi, "writev0", "(Ljava/io/FileDescriptor;JI)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(0));
     int64_t address = a.i64(1);
     int32_t len = a.i32(3);
     if (len < 0) throw_io(rt, vfs::kEINVAL);
     if (len == 0) return rt::ret_long(0);
+    if (auto n = nio_socket_io(rt, fd, native_iovecs(rt, address, len, false), false)) return rt::ret_long(*n);
     auto iov_span = native_span(rt, address, uint64_t(len) * 16, false);
     int64_t total = 0;
     for (int32_t i = 0; i < len; ++i) {
@@ -445,8 +453,7 @@ void register_file_dispatcher(rt::NativeRegistry& r) {
 
 void register_ch_misc(rt::NativeRegistry& r) {
   r.bind("Lsun/nio/ch/IOUtil;", "iovMax", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return 1024; });
-  r.bind("Lsun/nio/ch/NativeThread;", "current", "()J", [](Runtime&, NativeArgs&) -> uint64_t { return 1; }, S::kStub);
-  r.bind("Lsun/nio/ch/NativeThread;", "signal", "(J)V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; }, S::kStub);
+  // NativeThread, IOUtil's descriptors and pipes: libcore_net.cpp.
 }
 
 }  // namespace

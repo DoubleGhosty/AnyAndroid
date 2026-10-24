@@ -17,6 +17,8 @@ public final class OsConstants {
   public static final int _SC_PAGESIZE = Stubs.integer();
   public static final int AF_INET = Stubs.integer();
   public static final int SOCK_STREAM = Stubs.integer();
+  public static final int O_NONBLOCK = Stubs.integer();
+  public static final int EAGAIN = Stubs.integer();
 }
 
 final class Stubs {

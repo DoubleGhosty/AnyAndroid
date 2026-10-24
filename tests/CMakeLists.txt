@@ -144,6 +144,10 @@ if(AA_LIBCORE_DIR)
       aa_e2e(host-net CODE 0 GOLDEN host-net.txt
         ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
              ${S}/net-demo.apk aa.host.NetProbe)
+      # G2: libcore's NIO channels (pipes, socket and datagram channels, the poll selector).
+      aa_e2e(host-nio CODE 0 GOLDEN host-nio.txt
+        ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
+             ${S}/net-demo.apk aa.host.NioProbe)
       # J3: local system services ("package" through the framework's PackageParser), and the
       # trace of the framework's calls to them.
       aa_e2e(host-services CODE 0 GOLDEN host-services.txt

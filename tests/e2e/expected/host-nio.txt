@@ -1,0 +1,9 @@
+tube NIO : tube, vide 0, fin -1
+pipe2 : EAGAIN, 3 écrits, abc, write failed: EBADF (Bad file descriptor), fin 0
+canaux bloquants : BONJOUR, 200000 octets en écho, fin -1, 200007 octets puis fin, local /127.0.0.1, pair true
+sélecteur : [accept, connect true, read, write], reçu selecteur
+réveil du sélecteur : délai 0 après 100 ms : true, réveillé 0, selectNow 0, puis 0
+fermeture pendant read : AsynchronousCloseException, fil terminé true, canal ouvert false
+interruption pendant read : ClosedByInterruptException, fil terminé true, canal ouvert false
+datagrammes : datagramme de /127.0.0.1, port true, rien null, connecté true, tronqué conn
+adaptateur de socket : SocketTimeoutException, puis Z, TCP_NODELAY false

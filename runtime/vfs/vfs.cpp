@@ -26,7 +26,6 @@ namespace {
 constexpr int kMaxSymlinks = 40;
 constexpr size_t kMaxPath = 4096;
 constexpr size_t kMaxName = 255;
-constexpr size_t kMaxOpenFiles = 1024;
 // Timestamp of the files of an Android system image (2009-01-01, as built).
 constexpr int64_t kImageTime = 1230768000;
 
@@ -1074,6 +1073,16 @@ int32_t Vfs::install(std::shared_ptr<OpenFile> file, int32_t flags, std::string 
   return fd;
 }
 
+void Vfs::replace(int32_t fd, std::shared_ptr<OpenFile> file, int32_t flags, std::string path) {
+  if (fd < 3) throw VfsError{kEBADF, "fd " + std::to_string(fd)};
+  if (!fds_.count(fd) && fds_.size() >= kMaxOpenFiles) throw VfsError{kEMFILE, path};
+  auto entry = std::make_shared<Fd>();
+  entry->file = std::move(file);
+  entry->flags = flags;
+  entry->path = std::move(path);
+  fds_[fd] = std::move(entry);
+}
+
 int32_t Vfs::lowest_free_fd() const {
   int32_t fd = 3;
   while (fds_.count(fd)) ++fd;
@@ -1141,7 +1150,8 @@ size_t Vfs::pwrite(int32_t fd, std::span<const uint8_t> data, uint64_t offset) {
 int64_t Vfs::lseek(int32_t fd, int64_t offset, int32_t whence) {
   Fd& e = fd_entry(fd);
   if (!e.file->seekable()) {
-    if (e.file->stat().type == NodeType::kSocket) throw VfsError{kESPIPE, e.path};
+    NodeType type = e.file->stat().type;
+    if (type == NodeType::kSocket || type == NodeType::kFifo) throw VfsError{kESPIPE, e.path};
     return 0;
   }
   int64_t base = whence == 0 ? 0 : whence == 1 ? int64_t(e.pos) : whence == 2 ? int64_t(e.file->stat().size) : -1;
