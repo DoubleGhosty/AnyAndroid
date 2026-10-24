@@ -12,6 +12,7 @@
 #include <cstring>
 #include <cstdio>
 #include <filesystem>
+#include <functional>
 #include <io.h>
 #include <iostream>
 #include <map>
@@ -19,6 +20,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
@@ -966,17 +968,36 @@ int cmd_libcore(const Args& a) {
   size_t total = 0, bound = 0, core = 0;
   std::map<std::string, std::vector<std::string>> missing;  // class -> methods
   std::vector<std::string> absent, unreachable;
-  // Callers, in the boot class path, of the methods of the VM core classes.
+  // Users, in the boot class path, of the members of the VM core classes:
+  // the callers of their methods and the readers and writers of their fields.
   // Those classes are AnyAndroid's, completed by their libcore bytecode: a
   // private native whose every caller is a method the core replaces never runs.
   std::map<std::string, std::set<std::string>> callers;
+  // Members the libcore bytecode of the VM core classes declares, merged at
+  // run time (Runtime::merge_boot_bytecode): methods and static fields.
+  std::set<std::string> merged;
+  std::map<std::string, uint32_t> core_access;  // methods of the VM core classes -> access flags
   auto method_ref = [](const dex::DexFile& d, uint32_t idx) {
     const dex::MethodId& mid = d.method(idx);
     return d.type_descriptor(mid.class_idx) + "->" + d.string(mid.name_idx) + d.proto_signature(mid.proto_idx);
   };
+  auto field_ref = [](const dex::DexFile& d, uint32_t idx) {
+    const dex::FieldId& fid = d.field(idx);
+    return d.type_descriptor(fid.class_idx) + "->" + d.string(fid.name_idx) + ":" + d.type_descriptor(fid.type_idx);
+  };
   for (const auto& d : boot.dex) {
     for (uint32_t c = 0; c < d->num_class_defs(); ++c) {
-      dex::ClassData cd = d->class_data(d->class_def(c));
+      const dex::ClassDef& def = d->class_def(c);
+      dex::ClassData cd = d->class_data(def);
+      if (rt::is_vm_core_class(d->type_descriptor(def.class_idx))) {
+        for (const auto& f : cd.static_fields) merged.insert(field_ref(*d, f.field_idx));
+        for (const auto* list : {&cd.direct_methods, &cd.virtual_methods}) {
+          for (const auto& m : *list) {
+            merged.insert(method_ref(*d, m.method_idx));
+            core_access[method_ref(*d, m.method_idx)] = m.access_flags;
+          }
+        }
+      }
       for (const auto* list : {&cd.direct_methods, &cd.virtual_methods}) {
         for (const auto& m : *list) {
           if (!m.code_off) continue;
@@ -993,6 +1014,10 @@ int cmd_libcore(const Args& a) {
               if (invoke && rt::is_vm_core_class(d->type_descriptor(d->method(dec.index).class_idx))) {
                 callers[method_ref(*d, dec.index)].insert(method_ref(*d, m.method_idx));
               }
+              bool field_op = dec.op >= 0x52 && dec.op <= 0x6d;  // iget... sput-short
+              if (field_op && rt::is_vm_core_class(d->type_descriptor(d->field(dec.index).class_idx))) {
+                callers[field_ref(*d, dec.index)].insert(method_ref(*d, m.method_idx));
+              }
               pc += dec.units;
             }
           } catch (const FormatError&) {
@@ -1001,19 +1026,44 @@ int cmd_libcore(const Args& a) {
       }
     }
   }
-  auto only_replaced_callers = [&](const std::string& target) {
-    auto it = callers.find(target);
-    if (it == callers.end()) return true;
-    for (const std::string& caller : it->second) {
-      size_t arrow = caller.find("->"), paren = caller.find('(', arrow);
-      std::string cls = caller.substr(0, arrow);
-      if (!rt::is_vm_core_class(cls) ||
-          !reg.registry.lookup_method(cls, caller.substr(arrow + 2, paren - arrow - 2), caller.substr(paren)).method) {
-        return false;
+  // A method of a VM core class that the core itself declares: the libcore
+  // bytecode of that method never runs (a method inherited from a superclass
+  // of the core does not count: the class's own bytecode is merged).
+  auto replaced_by_core = [&](const std::string& method) {
+    size_t arrow = method.find("->"), paren = method.find('(', arrow);
+    std::string cls = method.substr(0, arrow);
+    if (!rt::is_vm_core_class(cls)) return false;
+    auto l = reg.registry.lookup_method(cls, method.substr(arrow + 2, paren - arrow - 2), method.substr(paren));
+    return l.method && l.declaring && l.declaring->descriptor == cls;
+  };
+  // A method that never runs: replaced by the core, or private or
+  // package-private in a VM core class (applications cannot call it) with
+  // only such methods as callers in the boot class path.
+  std::map<std::string, bool> dead_memo;
+  std::function<bool(const std::string&)> dead = [&](const std::string& method) -> bool {
+    if (auto it = dead_memo.find(method); it != dead_memo.end()) return it->second;
+    if (replaced_by_core(method)) return dead_memo[method] = true;
+    auto access = core_access.find(method);
+    if (access == core_access.end() || (access->second & (dex::kAccPublic | dex::kAccProtected))) {
+      return dead_memo[method] = false;
+    }
+    dead_memo[method] = true;  // a cycle of internal methods alone never runs
+    bool result = true;
+    if (auto it = callers.find(method); it != callers.end()) {
+      for (const std::string& caller : it->second) result = result && dead(caller);
+    }
+    return dead_memo[method] = result;
+  };
+  auto live_users = [&](const std::string& member) {
+    std::vector<std::string> live;
+    if (auto it = callers.find(member); it != callers.end()) {
+      for (const std::string& user : it->second) {
+        if (!dead(user)) live.push_back(user);
       }
     }
-    return true;
+    return live;
   };
+  auto only_replaced_callers = [&](const std::string& target) { return live_users(target).empty(); };
   for (const auto& d : boot.dex) {
     size_t file_total = 0, file_bound = 0;
     for (uint32_t c = 0; c < d->num_class_defs(); ++c) {
@@ -1050,17 +1100,39 @@ int cmd_libcore(const Args& a) {
       std::to_string(unreachable.size()) + " inatteignables (privées, appelées seulement par des méthodes que le cœur remplace), " +
       std::to_string(absent.size()) + " sans implémentation dans Android 17 lui-même, " +
       std::to_string(total - bound - core - unreachable.size() - absent.size()) + " manquantes.\n");
-  // Members of the VM core classes (kept native in libcore mode) that the
-  // boot class path references but AnyAndroid does not provide.
-  std::set<std::string> core_missing;
+  // Members of the VM core classes that the boot class path references but
+  // that exist at run time neither in the core (native layout and methods)
+  // nor in the libcore bytecode merged into it (methods, static fields):
+  // reaching one throws NoSuchMethodError or NoSuchFieldError. Instance
+  // fields are those of the native layout only.
+  auto merged_up = [&](const std::string& cls, const std::string& member) {
+    for (const rt::NativeClassSpec* s = reg.registry.find(cls); s; s = s->super.empty() ? nullptr : reg.registry.find(s->super)) {
+      if (merged.count(s->descriptor + "->" + member)) return true;
+    }
+    return merged.count(cls + "->" + member) > 0;
+  };
+  std::map<std::string, std::vector<std::string>> core_missing;  // member -> users not replaced by the core
+  size_t core_unused = 0;
+  auto note_missing = [&](const std::string& ref) {
+    std::vector<std::string> live = live_users(ref);
+    if (live.empty()) {
+      ++core_unused;
+    } else {
+      core_missing[ref] = std::move(live);
+    }
+  };
   for (const auto& d : boot.dex) {
     for (uint32_t i = 0; i < d->num_methods(); ++i) {
       const dex::MethodId& mid = d->method(i);
       const std::string& cls = d->type_descriptor(mid.class_idx);
       if (!rt::is_vm_core_class(cls)) continue;
-      const std::string& name = d->string(mid.name_idx);
-      const std::string& sig = d->proto_signature(mid.proto_idx);
-      if (!reg.registry.lookup_method(cls, name, sig).method) core_missing.insert(cls + "->" + name + sig);
+      std::string member = d->string(mid.name_idx) + d->proto_signature(mid.proto_idx);
+      std::string ref = cls + "->" + member;
+      if (core_missing.count(ref) || reg.registry.lookup_method(cls, d->string(mid.name_idx), d->proto_signature(mid.proto_idx)).method ||
+          merged_up(cls, member)) {
+        continue;
+      }
+      note_missing(ref);
     }
     for (uint32_t i = 0; i < d->num_fields(); ++i) {
       const dex::FieldId& fid = d->field(i);
@@ -1068,17 +1140,24 @@ int cmd_libcore(const Args& a) {
       if (!rt::is_vm_core_class(cls)) continue;
       const std::string& name = d->string(fid.name_idx);
       const std::string& type = d->type_descriptor(fid.type_idx);
-      bool found = reg.registry.lookup_field(cls, name, type).field != nullptr;
+      std::string ref = cls + "->" + name + ":" + type;
+      bool found = core_missing.count(ref) || reg.registry.lookup_field(cls, name, type).field != nullptr ||
+                   merged_up(cls, name + ":" + type);
       for (const rt::NativeClassSpec* s = reg.registry.find(cls); s && !found; s = s->super.empty() ? nullptr : reg.registry.find(s->super)) {
         for (const auto& f : s->instance_fields) found |= f.name == name && f.type == type;
       }
-      if (!found) core_missing.insert(cls + "->" + name + ":" + type);
+      if (!found) note_missing(ref);
     }
   }
-  out("Membres du cœur de la VM référencés par le chemin d'amorçage mais absents : " + std::to_string(core_missing.size()) +
-      "\n");
+  out("Membres du cœur de la VM absents à l'exécution (ni le cœur ni le bytecode fusionné) : " +
+      std::to_string(core_missing.size() + core_unused) + ", dont " + std::to_string(core_missing.size()) +
+      " utilisés par une méthode qui peut s'exécuter" + (a.has("--core") ? "" : " (--core pour la liste)") + "\n");
   if (a.has("--core")) {
-    for (const auto& m : core_missing) out("  " + m + "\n");
+    for (const auto& [m, users] : core_missing) {
+      out("  " + m + "\n");
+      for (size_t i = 0; i < users.size() && i < 3; ++i) out("      par " + users[i] + "\n");
+      if (users.size() > 3) out("      (+" + std::to_string(users.size() - 3) + ")\n");
+    }
   }
   if (a.has("--orphans")) {
     // The other way round: bindings of a boot class path class that match none
