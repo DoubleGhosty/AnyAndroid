@@ -493,73 +493,11 @@ void register_strings(rt::NativeRegistry& r) {
     return rt.new_string(std::move(v));
   });
 
-  // Character properties: the BMP is classified with the C library (Unicode
-  // tables of the UCRT); supplementary code points get conservative answers.
-  const char* ch = "Ljava/lang/Character;";
-  auto wc = [](NativeArgs& a) { return wint_t(a.i32(0)); };
-  auto bmp = [](NativeArgs& a) { return a.i32(0) >= 0 && a.i32(0) <= 0xFFFF; };
-  using Pred = int (*)(wint_t);
-  const std::pair<const char*, Pred> preds[] = {
-      {"isLetterImpl", [](wint_t c) { return std::iswalpha(c); }},
-      {"isDigitImpl", [](wint_t c) { return std::iswdigit(c) || (c >= 0x660 && c <= 0x669) || (c >= 0xFF10 && c <= 0xFF19) ? 1 : 0; }},
-      {"isLetterOrDigitImpl", [](wint_t c) { return std::iswalnum(c); }},
-      {"isUpperCaseImpl", [](wint_t c) { return std::iswupper(c); }},
-      {"isLowerCaseImpl", [](wint_t c) { return std::iswlower(c); }},
-      {"isWhitespaceImpl", [](wint_t c) {
-         return (c >= 0x9 && c <= 0xD) || (c >= 0x1C && c <= 0x20) || c == 0x1680 || (c >= 0x2000 && c <= 0x2006) ||
-                        (c >= 0x2008 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x205F || c == 0x3000
-                    ? 1
-                    : 0;
-       }},
-      {"isSpaceCharImpl", [](wint_t c) { return c == 0x20 || c == 0xA0 || c == 0x1680 || (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000 ? 1 : 0; }},
-      {"isAlphabeticImpl", [](wint_t c) { return std::iswalpha(c); }},
-      {"isDefinedImpl", [](wint_t c) { return c < 0xD800 || c > 0xDFFF ? 1 : 0; }},
-  };
-  for (const auto& [name, pred] : preds) {
-    r.bind(ch, name, "(I)Z", [pred, wc, bmp](Runtime&, NativeArgs& a) -> uint64_t {
-      return rt::ret_bool(bmp(a) && pred(wc(a)) != 0);
-    }, S::kPartial, "plan multilingue de base, tables Unicode de la bibliothèque C");
-  }
-  // Simple case mapping of the system's Unicode tables (not the C locale's).
-  auto mapped = [](char32_t (*map)(char32_t)) {
-    return [map](Runtime&, NativeArgs& a) -> uint64_t {
-      int32_t c = a.i32(0);
-      return rt::ret_int(c >= 0 && c <= 0x10FFFF ? int32_t(map(char32_t(c))) : c);
-    };
-  };
-  r.bind(ch, "toLowerCaseImpl", "(I)I", mapped(unicode::to_lower), S::kPartial, "correspondance simple (sans règles de locale)");
-  r.bind(ch, "toUpperCaseImpl", "(I)I", mapped(unicode::to_upper), S::kPartial, "correspondance simple (sans règles de locale)");
-  r.bind(ch, "toTitleCaseImpl", "(I)I", mapped(unicode::to_upper), S::kPartial, "majuscule (casse de titre approchée)");
-  // libcore.icu.ICU: versions of the ICU data shipped by the i18n module of
-  // Android 17 (icudt78l.dat); fixed default locale, never the host's.
-  const char* icu = "Llibcore/icu/ICU;";
-  auto text_result = [](const char* v) {
-    std::string s = v;
-    return [s](Runtime& rt, NativeArgs&) -> uint64_t { return rt.new_string_utf8(s); };
-  };
-  r.bind(icu, "getIcuVersion", "()Ljava/lang/String;", text_result("78.1"), S::kPartial, "version des données ICU d'Android 17");
-  r.bind(icu, "getUnicodeVersion", "()Ljava/lang/String;", text_result("17.0"));
-  r.bind(icu, "getCldrVersion", "()Ljava/lang/String;", text_result("48"));
-  r.bind(icu, "getDefaultLocale", "()Ljava/lang/String;", text_result("en-US"), S::kPartial, "locale fixe en-US");
-  r.bind(icu, "getScript", "(Ljava/lang/String;)Ljava/lang/String;", text_result(""), S::kPartial, "script non déduit");
-
-  // General category and bidirectional class: ART answers from ICU4C; ICU4J
-  // (android.icu.lang.UCharacter) reads the same data of the i18n module.
-  // Both are ICU values: libcore's Character maps them to Java's.
-  r.bind(ch, "getTypeImpl", "(I)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    return rt.call_static("Landroid/icu/lang/UCharacter;", "getType", "(I)I", {a.raw(0)});
-  });
-  r.bind(ch, "getDirectionalityImpl", "(I)B", [](Runtime& rt, NativeArgs& a) -> uint64_t {
-    return rt::ret_int(int8_t(rt.call_static("Landroid/icu/lang/UCharacter;", "getDirection", "(I)I", {a.raw(0)})));
-  });
-  r.bind(ch, "digitImpl", "(II)I", [](Runtime&, NativeArgs& a) -> uint64_t {
-    int32_t c = a.i32(0), radix = a.i32(1), v = -1;
-    if (c >= '0' && c <= '9') v = c - '0';
-    else if (c >= 'a' && c <= 'z') v = c - 'a' + 10;
-    else if (c >= 'A' && c <= 'Z') v = c - 'A' + 10;
-    else if (c >= 0xFF10 && c <= 0xFF19) v = c - 0xFF10;
-    return rt::ret_int(v >= 0 && v < radix ? v : -1);
-  }, S::kPartial);
+  // libcore.icu.ICU's default locale: fixed, never the host's. The other ICU
+  // and Character natives are in libcore_icu.cpp.
+  r.bind("Llibcore/icu/ICU;", "getDefaultLocale", "()Ljava/lang/String;",
+         [](Runtime& rt, NativeArgs&) -> uint64_t { return rt.new_string_utf8("en-US"); }, S::kPartial,
+         "locale fixe en-US");
 }
 
 // --- dalvik.system.VMRuntime, VMStack ------------------------------------------------------------
@@ -2633,6 +2571,7 @@ void register_libcore_natives(rt::NativeRegistry& r) {
   register_libcore_regex(r);
   register_libcore_lang(r);
   register_libcore_math(r);
+  register_libcore_icu(r);
   register_framework_natives(r);
   register_appmem_natives(r);
 }

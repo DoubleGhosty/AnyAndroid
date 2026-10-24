@@ -37,6 +37,7 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.TimeZone;
 
@@ -73,6 +74,7 @@ public final class LibcoreProbe {
     invokeDynamic();
     smallNatives();
     bigIntegers();
+    unicode();
     timeZones();
     posix();
   }
@@ -465,6 +467,39 @@ public final class LibcoreProbe {
       return "Fermat " + BigInteger.valueOf(3).modPow(m.subtract(BigInteger.ONE), m) + ", 5^(10^30) modulo 10^18 : "
           + BigInteger.valueOf(5).modPow(BigInteger.TEN.pow(30), m).mod(e18) + ", -2^-1 : "
           + BigInteger.valueOf(-2).modPow(BigInteger.ONE.negate(), BigInteger.TEN.pow(21).add(BigInteger.ONE));
+    });
+  }
+
+  // --- Character and locales outside ASCII (ICU data of the i18n module) -------------------
+
+  static void unicode() {
+    check("Character hors ASCII", () -> Character.isLetter('é') + " " + Character.isDigit('\u0663') + " "
+        + Character.getNumericValue('\u216B') + " " + Character.getNumericValue('\u00BD') + " " + Character.isMirrored('\u00AB')
+        + " " + Character.isIdeographic('\u4E2D') + " " + Character.isTitleCase('\u01C5') + " "
+        + (int) Character.toTitleCase('\u01C6') + " " + Character.isUnicodeIdentifierStart('\u2115') + " "
+        + Character.isSpaceChar('\u3000') + " " + Character.getType('\u20AC'));
+    check("noms de caractères", () -> Character.getName(0) + " ; " + Character.getName('é') + " ; "
+        + Character.codePointOf("GREEK SMALL LETTER ALPHA"));
+    check("casse selon la langue", () -> "i".toUpperCase(new Locale("tr")) + " " + "\u0130".toLowerCase(new Locale("tr")).length()
+        + " " + "ΟΔΟΣ".toLowerCase(Locale.ROOT) + " " + "straße".toUpperCase(Locale.ROOT));
+    check("noms de locales", () -> Locale.FRANCE.getDisplayCountry(Locale.GERMAN) + " ; "
+        + Locale.FRANCE.getDisplayLanguage(Locale.JAPANESE) + " ; " + Locale.forLanguageTag("zh-Hant-TW").getDisplayScript(Locale.ENGLISH)
+        + " ; " + Locale.FRANCE.getISO3Country() + " " + Locale.FRANCE.getISO3Language());
+    check("listes de locales", () -> "pays " + Locale.getISOCountries().length + ", langues " + Locale.getISOLanguages().length
+        + ", locales " + (Locale.getAvailableLocales().length > 100));
+    check("versions ICU (propriétés / ICU4J)", () -> {
+      Object icu = Class.forName("android.icu.util.VersionInfo").getField("ICU_VERSION").get(null);
+      Object unicode = Class.forName("android.icu.lang.UCharacter").getMethod("getUnicodeVersion").invoke(null);
+      Object cldr = Class.forName("android.icu.util.LocaleData").getMethod("getCLDRVersion").invoke(null);
+      return System.getProperty("android.icu.library.version") + " / " + icu + ", Unicode "
+          + System.getProperty("android.icu.unicode.version") + " / " + unicode + ", CLDR "
+          + System.getProperty("android.icu.cldr.version") + " / " + cldr;
+    });
+    check("noms de fuseaux", () -> {
+      for (String[] row : java.text.DateFormatSymbols.getInstance(Locale.FRANCE).getZoneStrings()) {
+        if (row[0].equals("Europe/Paris")) return Arrays.toString(row);
+      }
+      return "Europe/Paris absent";
     });
   }
 
