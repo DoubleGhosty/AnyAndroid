@@ -22,6 +22,7 @@
 #include <set>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -1034,18 +1035,28 @@ int cmd_libcore(const Args& a) {
     size_t arrow = method.find("->"), paren = method.find('(', arrow);
     std::string cls = method.substr(0, arrow);
     if (!rt::is_vm_core_class(cls)) return false;
-    auto l = reg.registry.lookup_method(cls, method.substr(arrow + 2, paren - arrow - 2), method.substr(paren));
+    std::string name = method.substr(arrow + 2, paren - arrow - 2), sig = method.substr(paren);
+    if (const rt::NativeBinding* b = reg.registry.binding(cls, name, sig); b && b->replaces_bytecode) return true;
+    auto l = reg.registry.lookup_method(cls, name, sig);
     return l.method && !l.method->bytecode_with_libcore && l.declaring && l.declaring->descriptor == cls;
   };
   // A method that never runs: replaced by the core, or private or
   // package-private in a VM core class (applications cannot call it) with
-  // only such methods as callers in the boot class path.
+  // only such methods as callers in the boot class path. The serialization
+  // hooks, which ObjectStreamClass calls by reflection, always run.
+  auto serialization_hook = [](const std::string& method) {
+    size_t arrow = method.find("->");
+    std::string_view m = std::string_view(method).substr(arrow + 2);
+    return m == "writeObject(Ljava/io/ObjectOutputStream;)V" || m == "readObject(Ljava/io/ObjectInputStream;)V" ||
+           m == "readObjectNoData()V" || m == "writeReplace()Ljava/lang/Object;" || m == "readResolve()Ljava/lang/Object;";
+  };
   std::map<std::string, bool> dead_memo;
   std::function<bool(const std::string&)> dead = [&](const std::string& method) -> bool {
     if (auto it = dead_memo.find(method); it != dead_memo.end()) return it->second;
     if (replaced_by_core(method)) return dead_memo[method] = true;
     auto access = core_access.find(method);
-    if (access == core_access.end() || (access->second & (dex::kAccPublic | dex::kAccProtected))) {
+    if (access == core_access.end() || (access->second & (dex::kAccPublic | dex::kAccProtected)) ||
+        serialization_hook(method)) {
       return dead_memo[method] = false;
     }
     dead_memo[method] = true;  // a cycle of internal methods alone never runs

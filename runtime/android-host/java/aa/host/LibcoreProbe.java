@@ -311,6 +311,37 @@ public final class LibcoreProbe {
         String.valueOf(Class.forName("aa.host.probe.PackagePrivate").getDeclaredConstructor().newInstance())));
     check("constructeur protégé d'une classe publique", () -> denied(() ->
         Hidden.class.getDeclaredConstructor().newInstance().getClass().getName()));
+    // Class methods whose libcore bytecode reads ART fields (accessFlags, ifTable...).
+    check("AtomicIntegerFieldUpdater", () -> {
+      java.util.concurrent.atomic.AtomicIntegerFieldUpdater<Counter> updater =
+          java.util.concurrent.atomic.AtomicIntegerFieldUpdater.newUpdater(Counter.class, "value");
+      Counter c = new Counter();
+      updater.incrementAndGet(c);
+      String other;
+      try {
+        java.util.concurrent.atomic.AtomicIntegerFieldUpdater.newUpdater(Hidden.class, "packageCount");
+        other = "permis";
+      } catch (RuntimeException e) {  // the IllegalAccessException, wrapped
+        other = String.valueOf(e.getCause() == null ? e : e.getCause().getClass().getName());
+      }
+      return updater.addAndGet(c, 41) + ", champ de paquet d'un autre paquet : " + other;
+    });
+    check("findVirtual d'une méthode par défaut", () -> {
+      MethodHandle stream = MethodHandles.lookup().findVirtual(java.util.AbstractCollection.class, "stream",
+          MethodType.methodType(java.util.stream.Stream.class));
+      return String.valueOf(((java.util.stream.Stream<?>) stream.invoke(new java.util.ArrayList<>(List.of(1, 2, 3)))).count());
+    });
+    check("getClasses, componentType, descriptorString", () -> {
+      List<String> names = new java.util.ArrayList<>();
+      for (Class<?> c : java.util.AbstractMap.class.getClasses()) names.add(c.getSimpleName());
+      java.util.Collections.sort(names);
+      return names + ", " + int[][].class.componentType().getName() + ", " + String[].class.descriptorString() + " "
+          + int.class.descriptorString() + ", drapeaux " + Integer.toHexString(Runnable.class.getModifiers());
+    });
+  }
+
+  static final class Counter {
+    volatile int value;
   }
 
   // --- invoke-custom, const-method-handle and const-method-type (IndySites, written by

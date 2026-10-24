@@ -18,6 +18,9 @@ champ de paquet d'une autre classe : Class java.lang.Class<aa.host.LibcoreProbe>
 champs protégés depuis une sous-classe : depth permis : 5 ; level Class java.lang.Class<aa.host.LibcoreProbe$Sub> cannot access protected static  field int aa.host.probe.Hidden.level of class java.lang.Class<aa.host.probe.Hidden>
 classe de paquet d'un autre paquet : java.lang.Class<aa.host.probe.PackagePrivate> is not accessible from java.lang.Class<aa.host.LibcoreProbe>
 constructeur protégé d'une classe publique : permis : aa.host.probe.Hidden
+AtomicIntegerFieldUpdater : 42, champ de paquet d'un autre paquet : java.lang.IllegalAccessException
+findVirtual d'une méthode par défaut : 3
+getClasses, componentType, descriptorString : [SimpleEntry, SimpleImmutableEntry], [I, [Ljava/lang/String; I, drapeaux 601
 invoke-custom, arguments statiques : describe ()String ; 42 7 1.5 2.25 ancre java.lang.Integer 42 (int)int ; Lookup de aa.host.IndySites
 invoke-custom, cible appelée : 8 puis 10, amorce appelée 1 fois
 invoke-custom, amorce à arité variable : a+b+c

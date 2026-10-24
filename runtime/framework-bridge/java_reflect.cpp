@@ -1190,8 +1190,85 @@ void register_members(rt::NativeRegistry& r) {
 // ART natives of the VM core classes, reached by the bytecode merged into
 // them in libcore mode (ADR-004): libcore's Java code of Class, Reference,
 // Array... calls these instead of the public API.
+namespace {
+
+// mirror::Class::GetAccessFlags as ClassLinker sets them: the class
+// definition's flags; an array, its component's Java flags, abstract and
+// final, never interface (CreateArrayClass); a primitive, public, final and
+// abstract. ART's internal flags (verification, finalizable...) are not kept.
+int32_t art_access_flags(rt::Class* k) {
+  if (k->component) {
+    return (art_access_flags(k->component) & 0xFFFF & ~int32_t(dex::kAccInterface)) | dex::kAccAbstract | dex::kAccFinal;
+  }
+  if (k->primitive) return dex::kAccPublic | dex::kAccFinal | dex::kAccAbstract;
+  return int32_t(k->access & 0xFFFF);
+}
+
+// Class.ifTable's interfaces in ART's order (SetupInterfaceLookupTable,
+// FindNewIfTableInterfaces): the superclass's, then each direct interface
+// after its own superinterfaces, each once.
+void iftable_of(rt::Class* k, std::vector<rt::Class*>& out) {
+  auto add = [&out](rt::Class* i) {
+    if (std::find(out.begin(), out.end(), i) == out.end()) out.push_back(i);
+  };
+  if (k->super) iftable_of(k->super, out);
+  for (rt::Class* i : k->interfaces) {
+    std::vector<rt::Class*> inherited;
+    iftable_of(i, inherited);
+    for (rt::Class* s : inherited) add(s);
+    add(i);
+  }
+}
+
+}  // namespace
+
 void register_art_reflection_natives(rt::NativeRegistry& r) {
   const char* cls = "Ljava/lang/Class;";
+  // The bytecode of these Class methods reads ART fields that the core's
+  // Class does not have (accessFlags, componentType, ifTable, superClass):
+  // they answer from the class itself, as that bytecode would.
+  r.intrinsic(cls, "getAccessFlags", "()I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_int(art_access_flags(class_arg(rt, a.h(0), "Class")));
+  }, "sans les drapeaux internes d'ART (vérification, finalisable…)");
+  r.intrinsic(cls, "componentType", "()Ljava/lang/Class;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::Class* c = class_arg(rt, a.h(0), "Class");
+    return c->component ? rt.class_mirror(c->component) : kNull;
+  });
+  // "[" + componentType.descriptorString(), "L" + name with '/' + ";", or the
+  // primitive's letter: the class's descriptor.
+  r.intrinsic(cls, "descriptorString", "()Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt.new_string_utf8(class_arg(rt, a.h(0), "Class")->descriptor);
+  });
+  // The public member classes of the class and of its superclasses.
+  r.intrinsic(cls, "getClasses", "()[Ljava/lang/Class;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::vector<Handle> found;
+    for (rt::Class* k = class_arg(rt, a.h(0), "Class"); k; k = k->super) {
+      rt::GlobalRef declared(rt, Handle(rt.call_virtual(rt.class_mirror(k), "getDeclaredClasses", "()[Ljava/lang/Class;")));
+      uint32_t n = rt.array(declared.get(), "Class[]").length;
+      for (uint32_t i = 0; i < n; ++i) {
+        Handle member;
+        std::memcpy(&member, &rt.array(declared.get(), "Class[]").data[size_t(i) * 4], 4);
+        if (int32_t(rt.call_virtual(member, "getModifiers", "()I")) & dex::kAccPublic) found.push_back(member);
+      }
+    }
+    return object_array(rt, "[Ljava/lang/Class;", found);
+  });
+  // The most specific interface first (the table searched backwards), the
+  // first public method that getPublicMethodRecursive finds.
+  r.intrinsic(cls, "findInterfaceMethod", "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;",
+              [](Runtime& rt, NativeArgs& a) -> uint64_t {
+                std::vector<rt::Class*> iftable;
+                iftable_of(class_arg(rt, a.h(0), "Class"), iftable);
+                rt::Method* recursive = rt.find_class("Ljava/lang/Class;")->declared_method(
+                    "getPublicMethodRecursive", "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;");
+                if (!recursive) rt.throw_unsupported("Ljava/lang/Class;->getPublicMethodRecursive", "absente de la libcore");
+                for (auto it = iftable.rbegin(); it != iftable.rend(); ++it) {
+                  uint32_t args[3] = {rt.class_mirror(*it), a.h(1), a.h(2)};
+                  Handle m = Handle(rt.invoke(recursive, args, 3));
+                  if (m != kNull && (int32_t(rt.call_virtual(m, "getAccessFlags", "()I")) & dex::kAccPublic)) return m;
+                }
+                return kNull;
+              });
   r.bind(cls, "getPrimitiveClass", "(Ljava/lang/String;)Ljava/lang/Class;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     static const std::pair<const char*, const char*> prims[] = {
         {"boolean", "Z"}, {"byte", "B"}, {"char", "C"}, {"short", "S"}, {"int", "I"},
