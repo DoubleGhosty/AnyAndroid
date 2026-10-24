@@ -163,12 +163,18 @@ ninja -C build
 WINEDEBUG=-all ctest --test-dir build -j8 --output-on-failure
 WINEDEBUG=-all wine build/tests/aa_unit_tests.exe [filtre]   # tests unitaires seuls, filtre par nom
 ```
-État au 2026-10-23 : **48 suites, toutes vertes sous wine** (47 suites et la fixture
-`wineserver` ; dont `e2e-host-libcore`, `e2e-launch`, `e2e-process-launch`, `e2e-process-input`, `e2e-process-back`,
-`e2e-process-toast(-end)`, `e2e-process-nav(-back)`, `e2e-process-dialog(-answer, -back)`),
-**197 tests unitaires**. Sous wine, la fixture `wineserver` lance le serveur avant les tests,
-détaché de leurs tubes : sinon le premier test lancé reste bloqué jusqu'à son délai (le
-`wineserver` qu'il a démarré garde sa sortie ouverte). La CI
+État au 2026-10-24 (campagne complète, [rapport](reports/tests-2026-10-24.md)) : **50 suites,
+toutes vertes sous wine** (49 suites et la fixture `wineserver` ; dont `e2e-host-libcore`,
+`e2e-host-net`, `e2e-host-nio`, `e2e-launch`, `e2e-process-launch`, `e2e-process-input`,
+`e2e-process-back`, `e2e-process-toast(-end)`, `e2e-process-nav(-back)`,
+`e2e-process-dialog(-answer, -back)`), **199 tests unitaires**, build depuis zéro sans
+avertissement. Sous wine, la fixture `wineserver` lance le serveur **et les processus d'appui de wine**
+(`services.exe`, `winedevice.exe`… démarrés par un `cmd /c exit`) avant les tests, détachés
+de leurs tubes : sinon le premier test lancé reste bloqué jusqu'à la fin du serveur ou jusqu'à
+son délai, car ces processus héritent de sa sortie (corrigé le 24 octobre : seul le serveur
+était démarré, d'où un `e2e-hello-exec` en échec par délai sur une première passe ; reproduit
+par 10 essais à froid à 33 s, 1,9 s après correction). Un serveur persistant (`-p30`) d'une
+passe précédente est repris ; un autre est attendu jusqu'à 30 s. La CI
 Windows (27 suites) ne démarrait plus le 23 octobre : toutes les exécutions échouaient en quelques
 secondes sans journal, un problème du compte GitHub Actions et non du code.
 Avec `-DAA_R8_JAR` le code d'hôte Java est construit et les suites `host-probe`,
@@ -277,10 +283,13 @@ UnixNativeDispatcher). Hors de cette plage : 0x0b01 DirStream (opendir de sun.ni
 2. **Fin de G2** (faits et vérifiés par `e2e-host-libcore` : `invoke-custom`, `NativeBN`, ICU par
    ICU4J, `InMemoryDexClassLoader`, piles des fils, `Thread` et `Throwable` sur les champs de
    libcore ; `libcore natives --core` à 0 membre absent atteignable ; liaisons orphelines à 0) :
-   les natives de libcore encore absentes (`libcore natives --all`, 253 : sockets et NIO réseau,
-   `Expat`, `UnixNativeDispatcher`, `VMDebug`, `ZygoteHooks`…), les finaliseurs, les fils
-   virtuels (`Continuation`), la lecture seule du chargement dynamique de code ; relancer la CI
-   Windows dès que le compte GitHub Actions fonctionne.
+   réseau, NIO réseau, epoll, AF_UNIX et `SCM_RIGHTS`, liens symboliques, `UnixNativeDispatcher`,
+   `VMDebug` et `ZygoteHooks` sont faits (e2e `host-net`, `host-nio`, `host-libcore`). Restent
+   les 35 natives de `libcore natives --libcore-only` (`Expat` 20, `LinuxWatchService` 8,
+   `StackStreamFactory` 2, fils virtuels 4, `mkfifo` 1), les finaliseurs, la lecture seule du
+   chargement dynamique de code ; relancer la CI Windows dès que le compte GitHub Actions
+   fonctionne. Après chaque changement de couverture, régénérer
+   `docs/compatibility/libcore-natives.txt` (lu par `tools/progress.py`) avec la commande exacte.
 3. **G4 : code natif** : chargeur ELF et bionic. L'[évaluation d'ANDROWIN](evaluations/ANDROWIN.md)
    décrit ntdroid (ART réel dans un processus Windows par interception d'appels système) : c'est
    la référence pour un **processus hôte isolé** dédié au code natif ; l'option « ART réel à la

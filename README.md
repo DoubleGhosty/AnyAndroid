@@ -7,7 +7,8 @@
 Couche de compatibilité qui exécute des applications Android (bytecode DEX) **comme des processus
 Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 
-> **Avancement : ≈ 50 % vers « Android natif sur Windows »**
+> **Avancement : ≈ 50 % vers « Android natif sur Windows »** · dernière campagne de tests
+> complète : [rapport du 24 octobre 2026](docs/reports/tests-2026-10-24.md)
 > 📊 Détail des jalons et carte complète dans [docs/STATUS.md](docs/STATUS.md) · [Données brutes](docs/progress.json).
 >
 > **Statut : prototype de recherche.** La preuve de concept de l'annexe A du cadrage fonctionne :
@@ -32,7 +33,7 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
   - réflexion `java.lang.reflect` (`InvocationTargetException` complète : cause, message, pile) ;
   - **JNI 1.6** en convention System V, prêt pour les bibliothèques Android x86_64 ;
   - profil d'exécution par méthode (`exec --profile`), sans coût quand il est désactivé.
-- **Pont framework** (≈ 110 classes, ≈ 700 membres) : `java.lang`, `ArrayList`, `HashMap`,
+- **Pont framework** (140 classes, 977 membres, dont 879 pris en charge : `anyandroid compat`) : `java.lang`, `ArrayList`, `HashMap`,
   `Activity`, `Intent`, `Bundle`, `Log`, `Handler`, `View`, `LinearLayout`, `TextView`, `Button`,
   `EditText`, `Toast`… Toute API absente échoue explicitement et est consignée.
 - **Ressources des applications** : `resources.arsc` de l'APK lu comme AssetManager2 (langue de
@@ -58,8 +59,11 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
   fonctionnent : un système de fichiers virtuel
   ([ADR-005](docs/adr/ADR-005-systeme-de-fichiers-virtuel.md)) sert `/system` et `/apex` depuis
   l'image système en lecture seule, et `/data` depuis un bac à sable.
-  `java.util.zip` repose sur miniz intégré ; `MessageDigest` (MD5, SHA-1, SHA-2) sur les natives de
-  condensé de conscrypt, réécrites ; `Unsafe`, `libcore.io.Memory`, les `ByteBuffer` directs et
+  `java.util.zip` repose sur miniz intégré ; `MessageDigest` (MD5, SHA-1, SHA-2) et `SecureRandom`
+  sur les natives de conscrypt, réécrites ; le **réseau** (sockets TCP/UDP, résolution de noms, NIO
+  réseau avec sélecteur et canaux asynchrones) sur Winsock, **AF_UNIX** (flux, datagrammes,
+  `SOCK_SEQPACKET`, `SCM_RIGHTS`) et les **liens symboliques** du bac à sable (e2e `host-net`,
+  `host-nio`, `host-libcore`) ; 968 des 1035 natives de la libcore sont liées, 35 manquent ; `Unsafe`, `libcore.io.Memory`, les `ByteBuffer` directs et
   `mmap` sur une mémoire native émulée (adresses étiquetées vérifiées à chaque accès, budget global).
   Côté `framework.jar`, `Resources.getSystem()` lit le vrai `framework-res.apk` de l'image.
 - **Démarrage d'applications par le vrai framework** ([ADR-006](docs/adr/ADR-006-demarrage-applications.md),
@@ -91,7 +95,8 @@ Windows**, sans machine virtuelle, sans hyperviseur et sans noyau Linux invité.
 Ressources limitées en mode pont (chaînes, couleurs, dimensions, entiers, booléens et mises en page :
 pas d'images, de styles, de thèmes ni de tableaux), pas de chargeur de bibliothèques
 natives ELF (JNI est prêt, le chargement des `.so` arrive en G4), conscrypt limité aux condensés
-(ni chiffrement ni TLS), Binder local seulement (pas de transactions entre processus) et
+et à `SecureRandom` (ni chiffrement ni TLS, donc pas encore de HTTPS), pas d'analyseur SAX
+(`Expat`) ni de `WatchService`, Binder local seulement (pas de transactions entre processus) et
 services système encore partiels, annotations limitées aux annotations système (classes
 internes), pas de parallélisme du code Java (verrou global), rendu limité aux contrôles standard
 en mode pont, un seul processus. L'ADR-002 détaille le chemin vers les GApps.

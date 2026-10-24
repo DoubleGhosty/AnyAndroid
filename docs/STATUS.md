@@ -1,6 +1,6 @@
 # État du projet AnyAndroid for Windows
 
-*Mis à jour le 23 octobre 2026.*
+*Mis à jour le 24 octobre 2026* (campagne de tests complète : [rapport](reports/tests-2026-10-24.md)).
 
 ## Le but final
 
@@ -47,7 +47,7 @@ le nombre de fichiers, et ne montent qu'avec une preuve sur le vrai framework ou
 |-------|------------------------------------------------------------|-----------:|------|
 | G0    | Mesure des écarts (`gaps`) sur de vrais APK                 | 100 %      | Terminé : [GApps d'Android 17](compatibility/gaps-gapps-android17.md) et [microG](compatibility/gaps-microg.md) mesurés |
 | G1    | Runtime : interpréteur, threads, GC, réflexion, JNI         | 100 %      | Terminé ([ADR-003](adr/ADR-003-runtime-threads-gc-jni.md)) |
-| G2    | Vraie libcore d'AOSP (Android 17)                           | 97 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART ([ADR-004](adr/ADR-004-libcore-aosp.md)). Vérifié sur la vraie libcore (e2e `host-libcore`, 60 lignes) : E/S scatter-gather, POSIX résiduel, `MethodHandle` porté d'ART, `invoke-custom`, `const-method-handle` et `const-method-type`, réflexion par les vraies classes de libcore, annotations, `Proxy`, `VerifyAccess`, fuseaux horaires, `NativeBN` (BigInteger), `Character` et ICU par ICU4J avec les données ICU de l'image, sérialisation, `InMemoryDexClassLoader` et filtres de compilation, piles des fils et `ThreadGroup`. `Thread` et `Throwable` gardent leur état dans les champs de libcore et exécutent le bytecode d'Android 17 (`Thread.ofPlatform`, `ThreadContainer`, sérialisation des exceptions, `initCause`, `printStackTrace` au format d'Android) ; `AtomicXFieldUpdater` et `findVirtual` sur une méthode par défaut fonctionnent. `libcore natives --core` : 0 membre absent du cœur atteignable ; 0 liaison orpheline. Reste : 253 natives de libcore (sockets et NIO réseau, `Expat`, `UnixNativeDispatcher`, `VMDebug`, `ZygoteHooks`, `StackStreamFactory`…), les finaliseurs (jamais exécutés), les fils virtuels (`Continuation`), l'application de la lecture seule au chargement dynamique de code, et ni fichier ni numéro de ligne dans les `StackTraceElement` |
+| G2    | Vraie libcore d'AOSP (Android 17)                           | 98 %       | NIO.2 et `FileChannel` sur VFS, `java.util.zip`, condensés conscrypt et `SecureRandom`, mémoire native émulée, références mises en file et `Cleaner` exécutés comme dans ART ([ADR-004](adr/ADR-004-libcore-aosp.md)). **Réseau** sur Winsock : sockets TCP/UDP de `java.net`, résolution de noms (fichier `hosts` de l'image puis résolveur de l'hôte, refus sans la permission INTERNET comme Android), NIO réseau (`SocketChannel`, `ServerSocketChannel`, `DatagramChannel`, sélecteur `EPoll`, tubes, canaux asynchrones), interfaces (`getifaddrs`), `sendmsg`/`recvmsg` ; **AF_UNIX** (flux, datagrammes, `SOCK_SEQPACKET`, noms abstraits et chemins, `socketpair`, `SCM_RIGHTS`) ; **liens symboliques** dans les zones inscriptibles et `link` refusé comme le fait la politique SELinux d'Android 17. Vérifié sur la vraie libcore : e2e `host-libcore` (84 lignes : E/S scatter-gather, POSIX résiduel, `MethodHandle` porté d'ART, `invoke-custom`, réflexion par les vraies classes de libcore, annotations, `Proxy`, `VerifyAccess`, fuseaux horaires, `NativeBN`, ICU4J, sérialisation, `InMemoryDexClassLoader`, piles des fils, utilisateurs bionic, NIO.2 de `sun.nio.fs`, `VMDebug`, AF_UNIX, `SCM_RIGHTS`…), `host-net` (10 lignes) et `host-nio` (10 lignes). `libcore natives --libcore-only` : 968 natives liées sur 1035 (+24 remplacées par le cœur de la VM, 1 inatteignable, 7 sans implémentation dans Android 17), **35 manquantes** ; 0 liaison orpheline. Reste : `Expat` (20 natives, analyseur SAX), `LinuxWatchService` (8, inotify), `StackStreamFactory` (2, `StackWalker`), fils virtuels (`Thread` et `Continuation`, 4), `mkfifo` (1) ; les finaliseurs (jamais exécutés), la lecture seule du chargement dynamique de code, ni fichier ni numéro de ligne dans les `StackTraceElement`. Hors G2 (chantier « réseau et TLS » de l'ADR-002) : le TLS de conscrypt |
 | G3    | Vrai `framework.jar` et une application AOSP affichée       | 87 %       | **En cours** : plan de l'[ADR-006](adr/ADR-006-demarrage-applications.md). J0-J2, J4, J5 faits ; J6 et J7 faits pour l'application d'exemple (image complète vérifiée au pixel, à 420 dpi depuis le 23 octobre) ; J8 fait (fenêtre Win32, clics et touches jusqu'à `View.onClick`, BACK comme Android 12+, prouvés par des tests e2e) ; J9 fait (navigation entre activités, toasts et dialogues prouvés par des e2e) ; J10 à faire ; J3 en cours |
 | G4    | Couche native ELF (bibliothèques `.so` des applications)    | 0 %        | À faire : architecture proposée dans l'[ADR-009](adr/ADR-009-couche-native-elf.md) (chargeur ELF x86_64, bionic, JNI) |
 | G5    | Services Google : microG, puis GApps                        | 0 %        | À faire |
@@ -56,7 +56,7 @@ le nombre de fichiers, et ne montent qu'avec une preuve sur le vrai framework ou
 ```
 G0 ██████████ 100 %
 G1 ██████████ 100 %
-G2 █████████░  97 %
+G2 █████████░  98 %
 G3 ████████░░  87 %
 G4 ░░░░░░░░░░   0 %
 G5 ░░░░░░░░░░   0 %
@@ -64,7 +64,7 @@ G5 ░░░░░░░░░░   0 %
    █████░░░░░ ≈ 50 % vers « Android natif sur Windows »
 ```
 
-## Ce qui marche aujourd'hui (vérifié par 48 suites de tests et 197 tests unitaires)
+## Ce qui marche aujourd'hui (vérifié par 50 suites de tests et 199 tests unitaires)
 
 - **Analyse d'APK sans rien exécuter** (`anyandroid inspect`). L'analyse est durcie contre les
   archives piégées et produit un verdict de compatibilité.
@@ -99,7 +99,26 @@ G5 ░░░░░░░░░░   0 %
     (exemple `zip-demo`).
   - **`MessageDigest`** (MD5, SHA-1, SHA-224, SHA-256, SHA-384, SHA-512) par le fournisseur
     `AndroidOpenSSL` de conscrypt, dont les natives de condensé sont réécrites (contextes en
-    identifiants bornés). Pas de chiffrement ni de TLS.
+    identifiants bornés). `SecureRandom` (conscrypt `OpenSSLRandom`) tire ses octets du générateur
+    cryptographique du système. Pas de chiffrement ni de TLS.
+  - **Réseau sur Winsock** (e2e `host-net` et `host-nio`, application avec la permission
+    INTERNET ; sans elle, `socket` échoue avec EACCES comme sur Android) : sockets TCP et UDP de
+    `java.net`, délais, options, fermeture d'un socket bloqué depuis un autre fil ; noms résolus par
+    le fichier `hosts` de l'image puis par le résolveur de l'hôte ; NIO réseau (canaux bloquants
+    et non bloquants, sélecteur `EPoll`, `wakeup`, tubes, `pipe2`, datagrammes, canaux
+    asynchrones, interruption d'une lecture) ; `getifaddrs` et `NetworkInterface` ; `sendmsg` et
+    `recvmsg`. Toute attente se fait verrou global relâché.
+  - **AF_UNIX** (e2e `host-libcore`) : flux, datagrammes et `SOCK_SEQPACKET`, noms abstraits et
+    chemins (nœud S_IFSOCK du VFS), `socketpair`, `SCM_RIGHTS` (le descripteur reçu partage la
+    description ouverte) et `SCM_CREDENTIALS`. Ce sont des sockets de la boucle locale réservés au
+    processus : une connexion ou un datagramme venant d'un autre programme de l'hôte est rejeté.
+    Limite : un datagramme AF_UNIX ne dépasse pas 65 499 octets (UDP de la boucle locale ; au-delà,
+    EMSGSIZE, vérifié le 24 octobre), contre environ 212 Kio sous Linux.
+  - **Liens symboliques** dans `/data` et `/sdcard` (fichiers hôtes marqués, comme Cygwin) ;
+    `link` échoue avec EACCES, comme la politique SELinux d'Android 17 l'impose aux applications.
+  - **Identités et processus de bionic** : `getpwuid`/`getpwnam` par la table AID d'Android
+    (`u0_a0` pour l'application), limites (`RLIMIT_NOFILE` 32768), `capget`, `strsignal`,
+    `memfd_create`, `mincore`, `sendfile`.
   - **Mémoire native émulée** : `Unsafe.allocateMemory` et les accès par adresse,
     `libcore.io.Memory`, `ByteBuffer` directs, `Os.mmap` (anonyme, ou copie privée d'un fichier)
     et `FileChannel.map`. Les adresses sont des valeurs étiquetées vérifiées à chaque accès, jamais
@@ -431,8 +450,11 @@ déroulants, sous-fenêtres) et les changements de configuration (rotation, recr
   lieu de 147) alors que l'écran annonce 420 dpi. Les images vérifiées au pixel avant cette date
   l'étaient à cette densité ; les sondes des e2e ont été refaites à 420 dpi.
 - **CI Windows** : depuis le 23 octobre, toutes les exécutions GitHub Actions du dépôt échouent en
-  quelques secondes sans journal (problème du compte, pas du code) ; les vérifications sont faites
-  sous wine avec les entrées Android en attendant.
+  une seconde, sans étape ni journal (le dernier essai, le 24 octobre sur `56de189`, aussi) : le
+  compte GitHub ne démarre plus les tâches (facturation ou limite d'Actions à vérifier dans ses
+  réglages), ce n'est pas le code. Les vérifications sont faites sous wine avec les entrées
+  Android en attendant ; ce qui dépend du vrai Windows (sémantique POSIX de NTFS, attribut
+  SYSTEM des liens symboliques) n'est donc vérifié que sous wine.
 
 ## Prochaines étapes, dans l'ordre
 
@@ -443,11 +465,10 @@ vrais gestionnaires d'`ActivityThread`.
 1. **J10** : une vraie application AOSP affichée et utilisable (d'abord un exemple en Java sur les
    widgets du framework : listes, `PopupWindow`, `startActivityForResult`, puis `Music` de la
    GSI).
-2. **Fin de G2** (`invoke-custom`, `Thread`, `Throwable` et membres du cœur faits) : les natives
-   de libcore encore absentes (`libcore natives --all` : sockets et NIO réseau par Winsock,
-   `Expat`, `UnixNativeDispatcher`, `VMDebug`…), les finaliseurs, les fils virtuels et la
-   lecture seule du chargement dynamique de code ; relancer la CI Windows dès que le compte GitHub
-   Actions fonctionne.
+2. **Fin de G2** (réseau, NIO réseau, AF_UNIX, `UnixNativeDispatcher`, `VMDebug` faits) : les
+   35 natives de libcore encore absentes (`Expat`, `LinuxWatchService`, `StackStreamFactory`, fils
+   virtuels, `mkfifo`), les finaliseurs et la lecture seule du chargement dynamique de code ;
+   relancer la CI Windows dès que le compte GitHub Actions fonctionne.
 3. **G4** : chargeur ELF et bionic, pour les applications avec du code natif (`.so` x86_64), selon l'[ADR-009](adr/ADR-009-couche-native-elf.md).
 4. **G5** : microG (démarrage de GmsCore avec les mêmes services), puis les GApps.
 
