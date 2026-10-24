@@ -19,6 +19,12 @@ public final class OsConstants {
   public static final int SOCK_STREAM = Stubs.integer();
   public static final int O_NONBLOCK = Stubs.integer();
   public static final int EAGAIN = Stubs.integer();
+  public static final int RLIMIT_NOFILE = Stubs.integer();
+  public static final int PROT_READ = Stubs.integer();
+  public static final int MAP_SHARED = Stubs.integer();
+  public static final int MS_SYNC = Stubs.integer();
+  public static final int SOCK_DGRAM = Stubs.integer();
+  public static final int MSG_TRUNC = Stubs.integer();
 }
 
 final class Stubs {

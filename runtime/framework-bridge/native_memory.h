@@ -56,6 +56,9 @@ int64_t native_wrap_lazy(rt::Runtime& rt, uint64_t size, std::function<std::vect
                          RangeReader read = {});
 
 bool is_native_address(int64_t address);
+// Whether `size` bytes from `address` lie in one live region (madvise,
+// mlock, msync and mincore report ENOMEM otherwise); never throws.
+bool native_range_mapped(int64_t address, uint64_t size);
 // `size` bytes at `address`; throws (IllegalArgumentException for an unknown
 // address, IndexOutOfBoundsException past the end of its region,
 // ReadOnlyBufferException when `write` targets a read-only region).

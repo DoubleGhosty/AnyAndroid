@@ -3,10 +3,12 @@
 // 0-2 are the host's standard streams; every other descriptor and every path
 // goes through the Vfs: the code never reaches a host path directly.
 #include <algorithm>
+#include <atomic>
 #include <climits>
 #include <cstdio>
 #include <cstring>
 #include <io.h>
+#include <mutex>
 #include <new>
 #include <string_view>
 #include <vector>
@@ -37,6 +39,49 @@ namespace {
 FILE* std_stream(int32_t fd) { return fd == 1 ? stdout : fd == 2 ? stderr : nullptr; }
 
 constexpr uint64_t kMaxMapping = uint64_t(2) << 30;
+
+// An anonymous file in memory (memfd_create): a regular file of its own,
+// gone with its last descriptor.
+class MemoryFile final : public vfs::OpenFile {
+ public:
+  vfs::VStat stat() override {
+    std::lock_guard<std::mutex> guard(lock_);
+    vfs::VStat st;
+    st.type = vfs::NodeType::kFile;
+    st.mode = 0100777;  // as the kernel reports a memfd
+    st.size = bytes_.size();
+    st.ino = ino_;
+    return st;
+  }
+  size_t read(uint64_t offset, std::span<uint8_t> out) override {
+    std::lock_guard<std::mutex> guard(lock_);
+    if (offset >= bytes_.size()) return 0;
+    size_t n = std::min<size_t>(out.size(), bytes_.size() - size_t(offset));
+    std::memcpy(out.data(), bytes_.data() + offset, n);
+    return n;
+  }
+  size_t write(uint64_t offset, std::span<const uint8_t> data) override {
+    std::lock_guard<std::mutex> guard(lock_);
+    if (offset + data.size() > kMaxMapping) throw vfs::VfsError{vfs::kEFBIG, "write"};
+    if (offset + data.size() > bytes_.size()) bytes_.resize(size_t(offset + data.size()));
+    std::memcpy(bytes_.data() + offset, data.data(), data.size());
+    return data.size();
+  }
+  void truncate(uint64_t size) override {
+    std::lock_guard<std::mutex> guard(lock_);
+    if (size > kMaxMapping) throw vfs::VfsError{vfs::kEFBIG, "ftruncate"};
+    bytes_.resize(size_t(size));
+  }
+
+ private:
+  static uint64_t next_ino() {
+    static std::atomic<uint64_t> counter{300000};
+    return ++counter;
+  }
+  std::mutex lock_;
+  std::vector<uint8_t> bytes_;
+  const uint64_t ino_ = next_ino();
+};
 
 // Zeroed bytes for a mapping of `length` bytes, or ENOMEM (size limit, budget
 // of the emulated native memory, host memory) before anything is published.
@@ -264,13 +309,16 @@ void register_linux(rt::NativeRegistry& r) {
     // 0 at the end, as read(2); IoBridge maps it to -1.
     return rt::ret_int(int32_t(guarded(rt, "read", [&] { return read_fd(fd, buf); })));
   }, S::kPartial, "système de fichiers virtuel");
+  // readNoThrow: -errno instead of an exception (IO_FAILURE_RETRY_NOTHROW).
   r.bind(lx, "readNoThrow", "(Ljava/io/FileDescriptor;[BII)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(1));
     auto buf = byte_range(rt, a.h(2), a.i32(3), a.i32(4));
+    int32_t err = 0;
+    if (auto n = socket_read_nothrow(rt, fd, buf, err)) return rt::ret_int(*n < 0 ? -err : int32_t(*n));
     try {
       return rt::ret_int(int32_t(read_fd(fd, buf)));
-    } catch (const vfs::VfsError&) {
-      return rt::ret_int(-1);
+    } catch (const vfs::VfsError& e) {
+      return rt::ret_int(-e.err);
     }
   });
   r.bind(lx, "writeBytes", "(Ljava/io/FileDescriptor;Ljava/lang/Object;II)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
@@ -444,6 +492,144 @@ void register_linux(rt::NativeRegistry& r) {
     if (a.i64(3) <= 0 || !native_try_free(a.i64(1))) throw_errno(rt, "munmap", vfs::kEINVAL);
     return 0;
   });
+  // madvise, mlock, munlock, msync, mincore over emulated mappings: the
+  // range must lie in one mapping (ENOMEM), madvise, msync and mincore want a
+  // page-aligned address (EINVAL). The pages are always resident and never
+  // shared with a file, so the advice and the syncs have nothing to do.
+  constexpr int64_t kPageMask = 4095;
+  auto check_range = [](Runtime& rt, const char* name, int64_t address, int64_t length, bool aligned) {
+    if (length < 0 || (aligned && (address & kPageMask) != 0)) throw_errno(rt, name, vfs::kEINVAL);
+    if (length > 0 && !native_range_mapped(address, uint64_t(length))) throw_errno(rt, name, vfs::kENOMEM);
+  };
+  r.bind(lx, "madvise", "(JJI)V", [check_range](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t advice = a.i32(5);
+    // MADV_NORMAL to MADV_PAGEOUT, without the holes 5-7 of Linux's numbering.
+    if (advice < 0 || (advice >= 5 && advice <= 7) || advice > 21) throw_errno(rt, "madvise", vfs::kEINVAL);
+    check_range(rt, "madvise", a.i64(1), a.i64(3), true);
+    return 0;
+  }, S::kPartial, "conseil sans effet (pages toujours résidentes)");
+  for (const char* name : {"mlock", "munlock"}) {
+    r.bind(lx, name, "(JJ)V", [check_range, name](Runtime& rt, NativeArgs& a) -> uint64_t {
+      check_range(rt, name, a.i64(1), a.i64(3), false);
+      return 0;
+    });
+  }
+  r.bind(lx, "msync", "(JJI)V", [check_range](Runtime& rt, NativeArgs& a) -> uint64_t {
+    constexpr int32_t kMsAsync = 1, kMsInvalidate = 2, kMsSync = 4;
+    int32_t flags = a.i32(5);
+    if ((flags & ~(kMsAsync | kMsInvalidate | kMsSync)) || ((flags & kMsAsync) && (flags & kMsSync))) {
+      throw_errno(rt, "msync", vfs::kEINVAL);
+    }
+    check_range(rt, "msync", a.i64(1), a.i64(3), true);
+    return 0;
+  }, S::kPartial, "copies privées : rien à écrire dans le fichier");
+  r.bind(lx, "mincore", "(JJ[B)V", [check_range](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int64_t address = a.i64(1), length = a.i64(3);
+    check_range(rt, "mincore", address, length, true);
+    uint64_t pages = (uint64_t(length) + kPageMask) / (kPageMask + 1);
+    rt::ArrayObject& vec = rt.array(a.h(5), "byte[]");
+    constexpr int32_t kEFAULT = 14;  // the kernel would write past the array
+    if (vec.length < pages) throw_errno(rt, "mincore", kEFAULT);
+    std::fill(vec.data.begin(), vec.data.begin() + ptrdiff_t(pages), uint8_t(1));  // every page resident
+    return 0;
+  });
+  // memfd_create: an anonymous file in memory, as /proc/self/fd names it.
+  r.bind(lx, "memfd_create", "(Ljava/lang/String;I)Ljava/io/FileDescriptor;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (a.h(1) == kNull) rt.throw_npe({});
+    std::string name = rt.string_utf8(a.h(1));
+    constexpr int32_t kMfdCloexec = 1, kMfdAllowSealing = 2;
+    if ((a.i32(2) & ~(kMfdCloexec | kMfdAllowSealing)) || name.size() > 249) throw_errno(rt, "memfd_create", vfs::kEINVAL);
+    int32_t fd = guarded(rt, "memfd_create", [&] {
+      return the_vfs().install(std::make_shared<MemoryFile>(), vfs::kO_RDWR, "/memfd:" + name + " (deleted)");
+    });
+    return new_file_descriptor(rt, fd);
+  });
+  // sendfile(out, in, offset, count): from a regular file (read at
+  // *offset, then advanced, or at its position) to any descriptor.
+  r.bind(lx, "sendfile", "(Ljava/io/FileDescriptor;Ljava/io/FileDescriptor;Landroid/system/Int64Ref;J)J",
+         [](Runtime& rt, NativeArgs& a) -> uint64_t {
+           int32_t out = fd_of(rt, a.h(1)), in = fd_of(rt, a.h(2));
+           Handle offset_ref = a.h(3);
+           int64_t count = a.i64(4);
+           if (count < 0) throw_errno(rt, "sendfile", vfs::kEINVAL);
+           rt::Field* value = offset_ref != kNull ? find_field(rt.class_of(offset_ref), "value", "J") : nullptr;
+           auto get_long = [&](Handle h, rt::Field* f) {
+             rt::Object& o = *rt.object(h);
+             return int64_t(uint64_t(o.fields.at(f->slot)) | (uint64_t(o.fields.at(f->slot + 1)) << 32));
+           };
+           int64_t offset = value ? get_long(offset_ref, value) : 0;
+           if (offset < 0) throw_errno(rt, "sendfile", vfs::kEINVAL);
+           vfs::VStat st = guarded(rt, "sendfile", [&] { return fstat_fd(in); });
+           if (st.type != vfs::NodeType::kFile) throw_errno(rt, "sendfile", vfs::kEINVAL);  // in must be mmap-able
+           std::vector<uint8_t> chunk;
+           int64_t done = 0;
+           while (done < count) {
+             chunk.resize(size_t(std::min<int64_t>(count - done, 1 << 16)));
+             size_t got = guarded(rt, "sendfile", [&] {
+               return value ? the_vfs().pread(in, chunk, uint64_t(offset + done)) : the_vfs().read(in, chunk);
+             });
+             if (got == 0) break;
+             std::span<const uint8_t> data(chunk.data(), got);
+             size_t put = 0;
+             if (auto n = socket_write(rt, out, data)) put = *n;
+             else put = guarded(rt, "sendfile", [&] { return write_fd(out, data); });
+             done += int64_t(put);
+             if (put < got) {
+               if (!value) guarded(rt, "sendfile", [&] { the_vfs().lseek(in, int64_t(put) - int64_t(got), 1); });
+               break;
+             }
+           }
+           if (value) {
+             rt::Object& o = *rt.object(offset_ref);
+             uint64_t v = uint64_t(offset + done);
+             o.fields.at(value->slot) = uint32_t(v);
+             o.fields.at(value->slot + 1) = uint32_t(v >> 32);
+           }
+           return rt::ret_long(done);
+         }, S::kPartial, "copie par le VFS");
+  // splice: one end must be a pipe (EINVAL), whose offset must be null (ESPIPE).
+  r.bind(lx, "splice", "(Ljava/io/FileDescriptor;Landroid/system/Int64Ref;Ljava/io/FileDescriptor;Landroid/system/Int64Ref;JI)J",
+         [](Runtime& rt, NativeArgs& a) -> uint64_t {
+           int32_t in = fd_of(rt, a.h(1)), out = fd_of(rt, a.h(3));
+           Handle off_in = a.h(2), off_out = a.h(4);
+           int64_t len = a.i64(5);
+           auto is_pipe = [&](int32_t fd) {
+             return fd > 2 && the_vfs().is_open(fd) && fstat_fd(fd).type == vfs::NodeType::kFifo;
+           };
+           for (int32_t fd : {in, out}) {
+             if (fd < 0 || (fd > 2 && !the_vfs().is_open(fd))) throw_errno(rt, "splice", vfs::kEBADF);
+           }
+           bool pipe_in = is_pipe(in), pipe_out = is_pipe(out);
+           if (!pipe_in && !pipe_out) throw_errno(rt, "splice", vfs::kEINVAL);
+           if ((pipe_in && off_in != kNull) || (pipe_out && off_out != kNull)) throw_errno(rt, "splice", vfs::kESPIPE);
+           if (len <= 0) return rt::ret_long(0);
+           auto long_of = [&](Handle h) -> std::pair<rt::Field*, int64_t> {
+             if (h == kNull) return {nullptr, 0};
+             rt::Field* f = find_field(rt.class_of(h), "value", "J");
+             rt::Object& o = *rt.object(h);
+             return {f, int64_t(uint64_t(o.fields.at(f->slot)) | (uint64_t(o.fields.at(f->slot + 1)) << 32))};
+           };
+           auto [in_field, in_offset] = long_of(off_in);
+           auto [out_field, out_offset] = long_of(off_out);
+           std::vector<uint8_t> chunk(size_t(std::min<int64_t>(len, 1 << 16)));
+           size_t got = 0;
+           if (auto n = socket_read(rt, in, chunk)) got = *n;
+           else got = guarded(rt, "splice", [&] { return in_field ? the_vfs().pread(in, chunk, uint64_t(in_offset)) : read_fd(in, chunk); });
+           std::span<const uint8_t> data(chunk.data(), got);
+           size_t put = 0;
+           if (got > 0) {
+             if (auto n = socket_write(rt, out, data)) put = *n;
+             else put = guarded(rt, "splice", [&] { return out_field ? the_vfs().pwrite(out, data, uint64_t(out_offset)) : write_fd(out, data); });
+           }
+           auto set_long = [&](Handle h, rt::Field* f, int64_t v) {
+             rt::Object& o = *rt.object(h);
+             o.fields.at(f->slot) = uint32_t(uint64_t(v));
+             o.fields.at(f->slot + 1) = uint32_t(uint64_t(v) >> 32);
+           };
+           if (in_field) set_long(off_in, in_field, in_offset + int64_t(put));
+           if (out_field) set_long(off_out, out_field, out_offset + int64_t(put));
+           return rt::ret_long(int64_t(put));
+         }, S::kPartial, "copie par le VFS (lecture puis écriture)");
   for (const char* name : {"fsync", "fdatasync"}) {
     r.bind(lx, name, "(Ljava/io/FileDescriptor;)V", [name](Runtime& rt, NativeArgs& a) -> uint64_t {
       int32_t fd = fd_of(rt, a.h(1));

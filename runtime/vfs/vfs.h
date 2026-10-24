@@ -41,8 +41,9 @@ struct VfsError {
 
 enum class NodeType { kFile, kDirectory, kSymlink, kCharDevice, kSocket, kFifo };
 
-// Descriptors a process may have open (RLIMIT_NOFILE): EMFILE beyond.
-constexpr size_t kMaxOpenFiles = 1024;
+// Descriptors a process may have open (RLIMIT_NOFILE, 32768 for zygote's
+// children as init.rc sets it): EMFILE beyond.
+constexpr size_t kMaxOpenFiles = 32768;
 
 // Linux open(2) flags (x86_64 values, as published by OsConstants).
 constexpr int32_t kO_ACCMODE = 03, kO_RDONLY = 0, kO_WRONLY = 01, kO_RDWR = 02, kO_CREAT = 0100, kO_EXCL = 0200,
@@ -139,9 +140,6 @@ class Vfs {
   // A descriptor for an open file made outside the mount points (a socket):
   // the lowest free one, EMFILE beyond the limit.
   int32_t install(std::shared_ptr<OpenFile> file, int32_t flags, std::string path);
-  // dup2 of such an open file over `fd` (3 and above): its previous file, if
-  // any, is closed with its last descriptor.
-  void replace(int32_t fd, std::shared_ptr<OpenFile> file, int32_t flags, std::string path);
   int32_t dup(int32_t fd);
   // newfd (3 and above) refers to fd's open file description, closed first if open.
   void dup2(int32_t fd, int32_t newfd);

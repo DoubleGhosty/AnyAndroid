@@ -764,6 +764,72 @@ public final class LibcoreProbe {
         return e.getClass().getSimpleName() + ": " + e.getMessage() + " (cause " + e.getCause().getMessage() + ")";
       }
     });
+    // bionic's users: the AID table, then the applications' names (u<user>_a<n>, u<user>_<platform id>).
+    check("utilisateurs de bionic", () -> {
+      android.system.StructPasswd self = Os.getpwuid(Os.getuid());
+      android.system.StructPasswd other = Os.getpwnam("u1_system");
+      String missing;
+      try {
+        Os.getpwnam("u0_system");  // a platform id is no application of user 0
+        missing = "trouvé";
+      } catch (android.system.ErrnoException e) {
+        missing = e.getMessage();
+      }
+      return self.pw_name + " " + self.pw_dir + " " + self.pw_shell + ", root " + Os.getpwnam("root").pw_uid + ", "
+          + other.pw_name + " " + other.pw_uid + " " + other.pw_dir + ", u10_a7 " + Os.getpwnam("u10_a7").pw_uid + ", "
+          + missing;
+    });
+    check("limites et identité", () -> {
+      android.system.StructRlimit files = Os.getrlimit(OsConstants.RLIMIT_NOFILE);
+      Os.setuid(Os.getuid());
+      String root;
+      try {
+        Os.setuid(0);
+        root = "root";
+      } catch (android.system.ErrnoException e) {
+        root = e.getMessage();
+      }
+      android.system.StructCapUserData[] caps = Os.capget(new android.system.StructCapUserHeader(0x20080522, 0));
+      android.system.StructCapUserHeader old = new android.system.StructCapUserHeader(1, 0);
+      String version;
+      try {
+        Os.capget(old);
+        version = "accepté";
+      } catch (android.system.ErrnoException e) {
+        version = e.getMessage() + " puis 0x" + Integer.toHexString(old.version);
+      }
+      String child;
+      try {
+        Os.waitpid(-1, new android.system.Int32Ref(0), 0);
+        child = "enfant";
+      } catch (android.system.ErrnoException e) {
+        child = e.getMessage();
+      }
+      return "nofile " + files.rlim_cur + "/" + files.rlim_max + ", setuid(0) " + root + ", capacités " + caps.length + " mots à "
+          + caps[0].effective + ", version inconnue " + version + ", waitpid " + child;
+    });
+    check("strsignal", () -> Os.strsignal(11) + " / " + Os.strsignal(31) + " / " + Os.strsignal(45) + " / " + Os.strsignal(99));
+    check("memfd, mmap, mincore, sendfile", () -> {
+      FileDescriptor memfd = Os.memfd_create("aa", 0);
+      byte[] text = "anyandroid".getBytes(StandardCharsets.US_ASCII);
+      Os.write(memfd, text, 0, text.length);
+      long address = Os.mmap(0, 4096, OsConstants.PROT_READ, OsConstants.MAP_SHARED, memfd, 0);
+      byte[] vector = new byte[1];
+      Os.mincore(address, 4096, vector);
+      Os.msync(address, 4096, OsConstants.MS_SYNC);
+      Os.munmap(address, 4096);
+      FileDescriptor[] pipe = Os.pipe2(0);
+      android.system.Int64Ref offset = new android.system.Int64Ref(3);
+      long sent = Os.sendfile(pipe[1], memfd, offset, 4);
+      byte[] in = new byte[8];
+      int got = Os.read(pipe[0], in, 0, in.length);
+      Os.close(pipe[0]);
+      Os.close(pipe[1]);
+      Os.close(memfd);
+      int closed = Os.readNoThrow(memfd, in, 0, 1);  // -EBADF instead of an exception
+      return "résident " + vector[0] + ", sendfile " + sent + " octets : " + new String(in, 0, got, StandardCharsets.US_ASCII)
+          + ", décalage " + offset.value + ", readNoThrow fermé " + closed;
+    });
     // Android 17: OsConstantsHolder.initConstants fills these from bionic's headers.
     check("OsConstantsHolder et sysconf", () -> "AI_ADDRCONFIG 0x" + Integer.toHexString(OsConstants.AI_ADDRCONFIG)
         + ", EAI_NONAME " + OsConstants.EAI_NONAME + ", SIGRTMIN " + OsConstants.SIGRTMIN

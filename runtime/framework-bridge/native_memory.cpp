@@ -283,6 +283,17 @@ Found region_of(rt::Runtime& rt, int64_t address, bool write) {
 
 bool is_native_address(int64_t address) { return decode(address).has_value(); }
 
+bool native_range_mapped(int64_t address, uint64_t size) {
+  auto d = decode(address);
+  if (!d) return false;
+  Memory& m = memory();
+  std::lock_guard<std::mutex> guard(m.lock);
+  Region* r = find(m, *d);
+  if (!r) return false;
+  uint64_t total = r->bytes ? r->bytes->size() : r->loader ? r->lazy_size : r->array ? r->array->data.size() : 0;
+  return d->offset <= total && size <= total - d->offset;
+}
+
 int64_t native_alloc(rt::Runtime& rt, uint64_t size) {
   if (size > kMaxRegionSize) rt.throw_new("Ljava/lang/OutOfMemoryError;", "allocateMemory : taille trop grande");
   if (!native_memory_fits(size)) out_of_memory(rt, "allocateMemory");  // before building the buffer

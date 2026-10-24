@@ -15,6 +15,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <mstcpip.h>
+#include <iphlpapi.h>
 
 #include <algorithm>
 #include <array>
@@ -202,6 +203,18 @@ void ensure_winsock() {
   (void)started;
 }
 
+// ipv6_available() of net_util_md.c: whether an IPv6 socket can be made.
+bool ipv6_available() {
+  static const bool available = [] {
+    ensure_winsock();
+    SOCKET s = socket(AF_INET6, SOCK_STREAM, 0);
+    if (s == INVALID_SOCKET) return false;
+    closesocket(s);
+    return true;
+  }();
+  return available;
+}
+
 // A socket of the emulated process. Reads and writes reaching it through the
 // Vfs directly (other paths than libcore's descriptor natives) never block.
 // A pipe (pipe2, IOUtil.makePipe) is one too: Windows has no pipe that WSAPoll
@@ -292,6 +305,10 @@ int32_t io_errno(const NetSocket& s, int wsa, bool sending) {
 // read(2) on a pipe's write end, write(2) on its read end: EBADF.
 bool wrong_pipe_end(const NetSocket& s, bool sending) {
   return s.pipe == (sending ? NetSocket::Pipe::kRead : NetSocket::Pipe::kWrite);
+}
+
+[[noreturn]] void throw_net(Runtime& rt, const char* cls, const std::string& message) {
+  throw rt::JavaThrow{construct(rt, cls, "(Ljava/lang/String;)V", {rt.new_string_utf8(message)})};
 }
 
 // What a close signalled from another thread throws: SocketException for the
@@ -420,6 +437,29 @@ int64_t retry(Runtime& rt, NetSocket& s, int32_t fd, const char* function, short
     switch (wait_socket(rt, s, fd, events, timeout_us)) {
       case Wait::kClosed: throw_closed(rt, io, function);
       case Wait::kTimeout: throw_errno(rt, function, lx::kEAGAIN);
+      case Wait::kReady:
+      case Wait::kInterrupted: break;
+    }
+  }
+}
+
+// IO_FAILURE_RETRY_NOTHROW: the call's result, or -1 with the Linux errno
+// in `err` (EBADF once a close is signalled, EAGAIN after a timeout).
+template <typename Call>
+int64_t retry_nothrow(Runtime& rt, NetSocket& s, int32_t fd, short events, int64_t timeout_us, bool dontwait,
+                      bool sending, int32_t& err, Call call) {
+  for (;;) {
+    int64_t r = call();
+    if (r >= 0) return r;
+    int wsa = WSAGetLastError();
+    if (wsa == WSAEINTR) continue;
+    if (wsa != WSAEWOULDBLOCK || s.nonblocking || dontwait) {
+      err = io_errno(s, wsa, sending);
+      return -1;
+    }
+    switch (wait_socket(rt, s, fd, events, timeout_us)) {
+      case Wait::kClosed: err = lx::kEBADF; return -1;
+      case Wait::kTimeout: err = lx::kEAGAIN; return -1;
       case Wait::kReady:
       case Wait::kInterrupted: break;
     }
@@ -805,6 +845,236 @@ void set_int_option(Runtime& rt, NetSocket& s, int32_t level, int32_t option, in
   if (int32_t err = set_option(s, level, option, value)) throw_errno(rt, "setsockopt", err);
 }
 
+// --- Messages (recvmsg, sendmsg) --------------------------------------------------------
+
+constexpr int32_t kAppUid = 10000;  // the application's uid (u0_a0), as libcore_natives.cpp reports it
+constexpr std::string_view kStructMsghdr = "Landroid/system/StructMsghdr;";
+
+// The buffers of StructMsghdr.msg_iov as libcore's byteBufferArrayToIOV takes
+// them: from the start of each buffer (a direct buffer's address, a heap
+// buffer's array), remaining() bytes long, its position and array offset
+// aside.
+std::vector<WSABUF> message_buffers(Runtime& rt, Handle msg, bool writable) {
+  if (msg == kNull) rt.throw_npe("missing structMsghdr");
+  Handle iov = field_of(rt, msg, kStructMsghdr, "msg_iov", "[Ljava/nio/ByteBuffer;");
+  if (iov == kNull) rt.throw_npe("null StructMsghdr.msg_iov");
+  uint32_t count = rt.array(iov, "ByteBuffer[]").length;
+  std::vector<WSABUF> out;
+  for (uint32_t i = 0; i < count; ++i) {
+    Handle b;
+    std::memcpy(&b, &rt.array(iov, "ByteBuffer[]").data[size_t(i) * 4], 4);
+    if (b == kNull) rt.throw_npe({});
+    int32_t remaining = int32_t(rt.call_virtual(b, "remaining", "()I"));
+    std::span<uint8_t> bytes;
+    if (rt.call_virtual(b, "isDirect", "()Z") != 0) {
+      rt::Field* f = find_field(rt.find_class("Ljava/nio/Buffer;"), "address", "J");
+      rt::Object& o = rt.nonnull(b, "ByteBuffer");
+      int64_t address = int64_t(uint64_t(o.fields.at(f->slot)) | (uint64_t(o.fields.at(f->slot + 1)) << 32));
+      if (remaining > 0) bytes = native_span(rt, address, uint64_t(remaining), writable);
+    } else {
+      rt::ArrayObject& array = rt.array(Handle(rt.call_virtual(b, "array", "()[B")), "byte[]");
+      if (uint32_t(remaining) > array.length) rt.throw_new("Ljava/lang/IndexOutOfBoundsException;", "msg_iov");
+      bytes = std::span<uint8_t>(array.data.data(), size_t(remaining));
+    }
+    WSABUF w;
+    w.len = ULONG(bytes.size());
+    w.buf = reinterpret_cast<char*>(bytes.data());
+    out.push_back(w);
+  }
+  return out;
+}
+
+// recvmsg(2) into a StructMsghdr: msg_name filled with the sender,
+// msg_flags with MSG_TRUNC for a datagram cut short; no ancillary data.
+// `throwing`: recvmsg (ErrnoException, SocketException when a close is
+// signalled); otherwise recvmsgNoThrow (-errno).
+int32_t recv_message(Runtime& rt, Handle java_fd, Handle msg, int32_t flags, bool throwing) {
+  auto bufs = message_buffers(rt, msg, true);
+  Handle name = field_of(rt, msg, kStructMsghdr, "msg_name", "Ljava/net/SocketAddress;");
+  int32_t fd = fd_of(rt, java_fd);
+  auto s = socket_of(fd);
+  if (!s || s->pipe != NetSocket::Pipe::kNone) {
+    int32_t err = fd < 0 || (fd > 2 && !libcore_vfs().is_open(fd)) ? lx::kEBADF : lx::kENOTSOCK;
+    if (throwing) throw_errno(rt, "recvmsg", err);
+    return -err;
+  }
+  size_t total = 0;
+  for (const WSABUF& w : bufs) total += w.len;
+  sockaddr_storage ss{};
+  int len = sizeof ss;
+  bool truncated = false;
+  auto call = [&]() -> int64_t {
+    DWORD got = 0, f = DWORD(win_msg_flags(flags));
+    len = sizeof ss;
+    int rc = WSARecvFrom(s->handle(), bufs.data(), DWORD(bufs.size()), &got, &f,
+                         name != kNull ? reinterpret_cast<sockaddr*>(&ss) : nullptr, name != kNull ? &len : nullptr,
+                         nullptr, nullptr);
+    if (rc == SOCKET_ERROR && WSAGetLastError() == WSAEMSGSIZE) {
+      truncated = true;
+      return int64_t(total);
+    }
+    return rc == SOCKET_ERROR ? -1 : int64_t(got);
+  };
+  bool dontwait = (flags & lx::kMsgDontwait) != 0;
+  int64_t n;
+  if (throwing) {
+    n = retry(rt, *s, fd, "recvmsg", POLLRDNORM, s->rcvtimeo_us, dontwait, false, false, call);
+  } else {
+    int32_t err = 0;
+    n = retry_nothrow(rt, *s, fd, POLLRDNORM, s->rcvtimeo_us, dontwait, false, err, call);
+    if (n < 0) return -err;
+  }
+  if (name != kNull) {
+    bool inet = ss.ss_family == AF_INET || ss.ss_family == AF_INET6;
+    if (throwing && !inet) throw_net(rt, "Ljava/net/SocketException;", "unknown socket address type");
+    if (inet) {
+      if (!is_inet_socket_address(rt, name)) {
+        rt.throw_new("Ljava/lang/UnsupportedOperationException;", "unsupported SocketAddress subclass");
+      }
+      fill_inet_socket_address(rt, name, reinterpret_cast<const sockaddr*>(&ss));
+    }
+  }
+  constexpr int32_t kMsgTrunc = 0x20;
+  field_of(rt, msg, kStructMsghdr, "msg_flags", "I") = uint32_t(truncated ? kMsgTrunc : 0);
+  return int32_t(n);
+}
+
+// --- Network interfaces -----------------------------------------------------------------
+
+// Linux interface flags (if.h).
+constexpr uint32_t kIffUp = 0x1, kIffBroadcast = 0x2, kIffLoopback = 0x8, kIffRunning = 0x40, kIffMulticast = 0x1000;
+
+struct IfAddress {
+  sockaddr_storage addr{}, netmask{}, broadcast{};
+  bool has_broadcast = false;
+};
+
+struct Interface {
+  std::string name;
+  int32_t index = 0;
+  uint32_t flags = 0;
+  int32_t mtu = 0;
+  ULONG win_index = 0;  // the Windows interface index (0 for lo)
+  std::vector<IfAddress> addresses;
+};
+
+void ipv4_mask(sockaddr_storage& ss, unsigned prefix) {
+  auto& sin = reinterpret_cast<sockaddr_in&>(ss);
+  sin.sin_family = AF_INET;
+  sin.sin_addr.s_addr = htonl(prefix == 0 ? 0 : uint32_t(0xffffffffu << (32 - std::min(prefix, 32u))));
+}
+
+void ipv6_mask(sockaddr_storage& ss, unsigned prefix) {
+  auto& sin6 = reinterpret_cast<sockaddr_in6&>(ss);
+  sin6.sin6_family = AF_INET6;
+  for (unsigned i = 0; i < 16; ++i) {
+    unsigned bits = prefix > i * 8 ? std::min(8u, prefix - i * 8) : 0;
+    sin6.sin6_addr.s6_addr[i] = uint8_t(bits == 0 ? 0 : 0xff << (8 - bits));
+  }
+}
+
+// The interfaces an application sees, as bionic's getifaddrs gives them to
+// an application targeting Android 11 or later (no RTM_GETLINK, hence no
+// link-layer entries and no hardware address): lo, then the host's adapters
+// that are up with an address, Wi-Fi as wlanN and Ethernet as ethN, indexed
+// from 1 in that order as the kernel numbers them. Link-local IPv6
+// addresses carry their interface's index as scope.
+std::vector<Interface> interfaces() {
+  std::vector<Interface> out;
+  Interface lo;
+  lo.name = "lo";
+  lo.index = 1;
+  lo.flags = kIffUp | kIffLoopback | kIffRunning;
+  lo.mtu = 65536;
+  IfAddress v4;
+  auto& sin = reinterpret_cast<sockaddr_in&>(v4.addr);
+  sin.sin_family = AF_INET;
+  sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  ipv4_mask(v4.netmask, 8);
+  lo.addresses.push_back(v4);
+  IfAddress v6;
+  auto& sin6 = reinterpret_cast<sockaddr_in6&>(v6.addr);
+  sin6.sin6_family = AF_INET6;
+  sin6.sin6_addr.s6_addr[15] = 1;
+  ipv6_mask(v6.netmask, 128);
+  lo.addresses.push_back(v6);
+  out.push_back(lo);
+
+  ensure_winsock();
+  ULONG size = 16 * 1024;
+  std::vector<uint8_t> buffer;
+  ULONG rc = ERROR_BUFFER_OVERFLOW;
+  for (int attempt = 0; attempt < 3 && rc == ERROR_BUFFER_OVERFLOW; ++attempt) {
+    buffer.assign(size, 0);
+    rc = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
+                              nullptr, reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data()), &size);
+  }
+  if (rc != NO_ERROR) return out;
+  int wlan = 0, eth = 0;
+  for (auto* a = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data()); a; a = a->Next) {
+    if (a->OperStatus != IfOperStatusUp || !a->FirstUnicastAddress) continue;
+    bool wifi = a->IfType == IF_TYPE_IEEE80211;
+    if (!wifi && a->IfType != IF_TYPE_ETHERNET_CSMACD) continue;  // loopback, tunnels and the like
+    Interface itf;
+    itf.name = wifi ? "wlan" + std::to_string(wlan++) : "eth" + std::to_string(eth++);
+    itf.index = int32_t(out.size()) + 1;
+    itf.flags = kIffUp | kIffBroadcast | kIffRunning | kIffMulticast;
+    itf.mtu = int32_t(a->Mtu);
+    itf.win_index = a->IfIndex ? a->IfIndex : a->Ipv6IfIndex;
+    for (auto* u = a->FirstUnicastAddress; u; u = u->Next) {
+      const sockaddr* sa = u->Address.lpSockaddr;
+      if (!sa || (sa->sa_family != AF_INET && sa->sa_family != AF_INET6)) continue;
+      if (sa->sa_family == AF_INET6 && !ipv6_available()) continue;
+      IfAddress ia;
+      std::memcpy(&ia.addr, sa, std::min<size_t>(size_t(u->Address.iSockaddrLength), sizeof ia.addr));
+      unsigned prefix = u->OnLinkPrefixLength;
+      if (sa->sa_family == AF_INET) {
+        ipv4_mask(ia.netmask, prefix);
+        if (prefix < 32) {
+          auto& b = reinterpret_cast<sockaddr_in&>(ia.broadcast);
+          b.sin_family = AF_INET;
+          b.sin_addr.s_addr = reinterpret_cast<sockaddr_in&>(ia.addr).sin_addr.s_addr |
+                              ~reinterpret_cast<sockaddr_in&>(ia.netmask).sin_addr.s_addr;
+          ia.has_broadcast = true;
+        }
+      } else {
+        ipv6_mask(ia.netmask, prefix);
+        auto& a6 = reinterpret_cast<sockaddr_in6&>(ia.addr);
+        a6.sin6_port = 0;
+        a6.sin6_flowinfo = 0;
+        a6.sin6_scope_id = IN6_IS_ADDR_LINKLOCAL(&a6.sin6_addr) ? ULONG(itf.index) : 0;
+      }
+      itf.addresses.push_back(ia);
+    }
+    if (!itf.addresses.empty()) out.push_back(std::move(itf));
+  }
+  return out;
+}
+
+std::optional<Interface> interface_named(const std::string& name) {
+  for (auto& itf : interfaces()) {
+    if (itf.name == name) return itf;
+  }
+  return std::nullopt;
+}
+
+// The Windows interface index of a Linux one (0: the default interface).
+ULONG win_interface_index(int32_t index) {
+  if (index <= 0) return 0;
+  for (const auto& itf : interfaces()) {
+    if (itf.index == index) return itf.win_index;
+  }
+  return ULONG(-1);  // unknown: the system call fails as for a missing device
+}
+
+// fillIfreq: ifr_name, truncated to IFNAMSIZ - 1 bytes.
+std::string ifreq_name(Runtime& rt, Handle name) {
+  if (name == kNull) rt.throw_npe({});
+  std::string n = rt.string_utf8(name);
+  if (n.size() > 15) n.resize(15);
+  return n;
+}
+
 // --- Natives --------------------------------------------------------------------------------
 
 // A descriptor for the socket (or pipe end), as /proc/self/fd names them;
@@ -972,10 +1242,6 @@ int poll_once(std::vector<PollEntry>& entries, int timeout_ms) {
   return ready;
 }
 
-[[noreturn]] void throw_net(Runtime& rt, const char* cls, const std::string& message) {
-  throw rt::JavaThrow{construct(rt, cls, "(Ljava/lang/String;)V", {rt.new_string_utf8(message)})};
-}
-
 // The socket of a SocketInputStream or SocketOutputStream: "Socket closed"
 // for a null or released descriptor (Bug 4086704 in ojluni).
 std::shared_ptr<NetSocket> stream_socket(Runtime& rt, Handle java_fd) {
@@ -1080,6 +1346,19 @@ std::optional<size_t> socket_write(Runtime& rt, int32_t fd, std::span<const uint
   }));
 }
 
+std::optional<int64_t> socket_read_nothrow(Runtime& rt, int32_t fd, std::span<uint8_t> out, int32_t& err) {
+  auto s = socket_of(fd);
+  if (!s) return std::nullopt;
+  if (wrong_pipe_end(*s, false)) {
+    err = lx::kEBADF;
+    return -1;
+  }
+  int len = int(std::min<size_t>(out.size(), INT32_MAX));
+  return retry_nothrow(rt, *s, fd, POLLRDNORM, s->rcvtimeo_us, false, false, err, [&]() -> int64_t {
+    return recv(s->handle(), reinterpret_cast<char*>(out.data()), len, 0);
+  });
+}
+
 std::optional<int32_t> socket_available(Runtime& rt, int32_t fd) {
   auto s = socket_of(fd);
   if (!s) return std::nullopt;
@@ -1127,10 +1406,10 @@ constexpr int32_t kIosEof = -1, kIosUnavailable = -2, kIosInterrupted = -3, kIos
 constexpr int32_t kEproto = 71;
 constexpr int32_t kMaxPacketLen = 65536;  // DatagramChannelImpl.c MAX_PACKET_LEN
 
-// Net.c handleSocketError: the exception of a socket call's errno, carrying
-// strerror's text (JNU_ThrowByNameWithLastError).
-[[noreturn]] void throw_socket_error(Runtime& rt, int32_t err) {
-  const char* cls = "Ljava/net/SocketException;";
+// Net.c handleSocketErrorWithDefault: the exception of a socket call's
+// errno, carrying strerror's text (JNU_ThrowByNameWithLastError).
+[[noreturn]] void throw_socket_error(Runtime& rt, int32_t err, const char* fallback = "Ljava/net/SocketException;") {
+  const char* cls = fallback;
   switch (err) {
     case kEproto: cls = "Ljava/net/ProtocolException;"; break;
     case lx::kECONNREFUSED:
@@ -1148,18 +1427,6 @@ constexpr int32_t kMaxPacketLen = 65536;  // DatagramChannelImpl.c MAX_PACKET_LE
 
 [[noreturn]] void throw_port_unreachable(Runtime& rt) {
   throw rt::JavaThrow{construct(rt, "Ljava/net/PortUnreachableException;", "()V", {})};
-}
-
-// ipv6_available() of net_util_md.c: whether an IPv6 socket can be made.
-bool ipv6_available() {
-  static const bool available = [] {
-    ensure_winsock();
-    SOCKET s = socket(AF_INET6, SOCK_STREAM, 0);
-    if (s == INVALID_SOCKET) return false;
-    closesocket(s);
-    return true;
-  }();
-  return available;
 }
 
 // The socket of a FileDescriptor for NIO's natives (fdval): EBADF or ENOTSOCK
@@ -1305,25 +1572,6 @@ int32_t make_pipe(bool nonblocking, int32_t fds[2]) {
   return 0;
 }
 
-// FileDispatcherImpl's preCloseFD: one end of a socketpair whose other end
-// is closed (reads see the end of the stream, writes fail with EPIPE), made
-// once as libcore does when it registers the natives; null if that failed.
-std::shared_ptr<NetSocket> pre_close_marker() {
-  static auto* marker = new std::shared_ptr<NetSocket>;  // under the GIL; never destroyed
-  static bool tried = false;
-  if (!tried) {
-    tried = true;
-    ensure_winsock();
-    auto [one, two] = loopback_pair(SOCK_STREAM);
-    if (one != INVALID_SOCKET) {
-      closesocket(two);
-      shutdown(one, SD_SEND);
-      *marker = std::make_shared<NetSocket>(one, lx::kAfUnix, lx::kSockStream, 0, AF_INET);
-    }
-  }
-  return *marker;
-}
-
 // One read(2) or write(2) that never waits (IOUtil.drain, the selector's
 // wakeup byte): bytes, or -1 and the Linux errno.
 int64_t once(int32_t fd, std::span<uint8_t> data, bool sending, int32_t& err) {
@@ -1437,12 +1685,20 @@ void register_nio_net(rt::NativeRegistry& r) {
     if (!libcore_config().internet) throw_socket_error(rt, lx::kEACCES);
     int af = prefer6 && ipv6_available() ? AF_INET6 : AF_INET;
     SOCKET h = new_win_socket(af, stream ? SOCK_STREAM : SOCK_DGRAM, 0);
-    if (h == INVALID_SOCKET) throw_socket_error(rt, linux_errno(WSAGetLastError()));
-    auto sock = std::make_shared<NetSocket>(h, linux_family(af), stream ? lx::kSockStream : lx::kSockDgram, 0, af);
-    if (reuse) set_option(*sock, lx::kSolSocket, lx::kSoReuseaddr, 1);
-    if (!stream) sock->multicast_all = 0;  // IP_MULTICAST_ALL off, as socket0 sets it
-    int32_t fd = -1;
-    if (int32_t err = install_fd(std::move(sock), fd)) throw_socket_error(rt, err);
+    int32_t fd = -1, err = h == INVALID_SOCKET ? linux_errno(WSAGetLastError()) : 0;
+    if (!err) {
+      auto sock = std::make_shared<NetSocket>(h, linux_family(af), stream ? lx::kSockStream : lx::kSockDgram, 0, af);
+      if (reuse) set_option(*sock, lx::kSolSocket, lx::kSoReuseaddr, 1);
+      if (!stream) sock->multicast_all = 0;  // IP_MULTICAST_ALL off
+      if (!stream && af == AF_INET6) set_option(*sock, lx::kIpprotoIpv6, lx::kIpv6MulticastHops, 1);  // not the route's
+      err = install_fd(std::move(sock), fd);
+    }
+    // tagSocket (socket_tagger_util.cpp): SocketTagger.get().tag(fd), the
+    // descriptor -1 when socket(2) failed.
+    rt::GlobalRef java_fd(rt, new_file_descriptor(rt, err ? -1 : fd));
+    Handle tagger = Handle(rt.call_static("Ldalvik/system/SocketTagger;", "get", "()Ldalvik/system/SocketTagger;", {}));
+    if (tagger != kNull) rt.call_virtual(tagger, "tag", "(Ljava/io/FileDescriptor;)V", {java_fd.get()});
+    if (err) throw_socket_error(rt, err);
     return rt::ret_int(fd);
   }, S::kPartial, "AF_INET et AF_INET6 (TCP, UDP) sur Winsock");
   r.bind(net, "bind0", "(Ljava/io/FileDescriptor;ZZLjava/net/InetAddress;I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
@@ -1457,7 +1713,8 @@ void register_nio_net(rt::NativeRegistry& r) {
   r.bind(net, "listen", "(Ljava/io/FileDescriptor;I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = -1;
     auto s = nio_socket(rt, a.h(0), fd);
-    if (listen(s->handle(), std::max(a.i32(1), 0)) == SOCKET_ERROR) throw_socket_error(rt, linux_errno(WSAGetLastError()));
+    int backlog = a.i32(1) < 0 ? SOMAXCONN : a.i32(1);  // Linux takes a negative backlog as unsigned, then the maximum
+    if (listen(s->handle(), backlog) == SOCKET_ERROR) throw_socket_error(rt, linux_errno(WSAGetLastError()));
     return 0;
   });
   // connect0: 1 once connected; IOS_UNAVAILABLE for a non-blocking socket
@@ -1469,13 +1726,14 @@ void register_nio_net(rt::NativeRegistry& r) {
     if (connect(s->handle(), reinterpret_cast<const sockaddr*>(&e.ss), e.len) == 0) return rt::ret_int(1);
     int err = WSAGetLastError();
     if (err == WSAEINVAL && s->connecting) err = WSAEALREADY;
+    constexpr const char* kConnectException = "Ljava/net/ConnectException;";
     if (err == WSAEINTR) return rt::ret_int(kIosInterrupted);
-    if (err != WSAEWOULDBLOCK) throw_socket_error(rt, linux_errno(err));
+    if (err != WSAEWOULDBLOCK) throw_socket_error(rt, linux_errno(err), kConnectException);
     s->connecting = true;
     if (s->nonblocking) return rt::ret_int(kIosUnavailable);
     if (wait_socket(rt, *s, fd, POLLWRNORM, 0, true) != Wait::kReady) return rt::ret_int(kIosInterrupted);
     s->connecting = false;
-    if (int failed = pending_error(s->handle())) throw_socket_error(rt, linux_errno(failed));
+    if (int failed = pending_error(s->handle())) throw_socket_error(rt, linux_errno(failed), kConnectException);
     return rt::ret_int(1);
   });
   r.bind(net, "localInetAddress", "(Ljava/io/FileDescriptor;)Ljava/net/InetAddress;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
@@ -1516,7 +1774,7 @@ void register_nio_net(rt::NativeRegistry& r) {
     int32_t fd = -1;
     auto s = nio_socket(rt, a.h(0), fd);
     int32_t level = a.i32(2), option = a.i32(3), value = a.i32(4);
-    bool is_ipv6 = a.i32(5) != 0;
+    bool convert = a.i32(1) != 0, is_ipv6 = a.i32(5) != 0;
     if (level == lx::kSolSocket && option == lx::kSoLinger) {
       LINGER l{};
       l.l_onoff = u_short(value >= 0);
@@ -1527,6 +1785,12 @@ void register_nio_net(rt::NativeRegistry& r) {
       return 0;
     }
     if (level == lx::kIpprotoIp && (option == lx::kIpMulticastTtl || option == lx::kIpMulticastLoop)) value &= 0xff;
+    if (convert) {  // NET_SetSockOpt of Linux
+      if (level == lx::kSolSocket && option == lx::kSoRcvbuf && value < 1024) value = 1024;
+      if (level == lx::kIpprotoIp && option == lx::kIpTos && s->win_af == AF_INET6) {
+        set_option(*s, lx::kIpprotoIpv6, lx::kIpv6Tclass, value);  // IPV6_TCLASS too (IPV6_FLOWINFO_SEND: none here)
+      }
+    }
     if (int32_t err = set_option(*s, level, option, value)) throw_net(rt, "Ljava/net/SocketException;", strerror_text(err));
     if (level == lx::kIpprotoIpv6 && option == lx::kIpv6Tclass && is_ipv6) {
       set_option(*s, lx::kIpprotoIp, lx::kIpTos, value);  // the IPv4 option too, its failure ignored
@@ -1792,19 +2056,27 @@ void register_nio_net(rt::NativeRegistry& r) {
     throw rt::JavaThrow{construct(rt, "Ljava/lang/UnsupportedOperationException;", "()V", {})};
   });
 
-  // FileDispatcherImpl: preClose0 puts the marker descriptor under the
-  // channel's number (dup2), so that the number stays taken until close0
-  // while NativeThread.signal stops the threads blocked on it.
+  // FileDispatcherImpl: preClose0 puts /dev/null under the channel's number
+  // (dup2), so that the number stays taken until close0 while
+  // NativeThread.signal stops the threads blocked on it.
   const char* fdi = "Lsun/nio/ch/FileDispatcherImpl;";
   r.bind(fdi, "preClose0", "(Ljava/io/FileDescriptor;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(0));
-    auto marker = pre_close_marker();
-    if (!marker || (fd >= 0 && fd <= 2)) return 0;
+    vfs::Vfs& v = libcore_vfs();
+    int32_t null_fd = -1;
     try {
-      libcore_vfs().replace(fd, marker, vfs::kO_RDWR, "socket:[" + std::to_string(marker->ino) + "]");
+      null_fd = v.open("/dev/null", vfs::kO_RDWR, 0);
     } catch (const vfs::VfsError& e) {
-      throw_io_errno(rt, e.err);
+      throw_io_errno(rt, e.err);  // open("/dev/null") failed
     }
+    int32_t err = 0;
+    try {
+      if (fd < 0 || fd > 2) v.dup2(null_fd, fd);  // the host's standard streams stay
+    } catch (const vfs::VfsError& e) {
+      err = e.err;  // dup2 failed
+    }
+    v.close(null_fd);
+    if (err) throw_io_errno(rt, err);
     return 0;
   });
   r.bind(fdi, "closeIntFD", "(I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
@@ -1865,6 +2137,11 @@ void register_nio_net(rt::NativeRegistry& r) {
     if (n < 0) return rt::ret_int(int32_t(n));
     Handle self = a.h(0);
     rt::Class* cls = rt.class_of(self);
+    if (n == 0 && ss.ss_family == 0) {  // an orderly shutdown: no sender, receive() returns null
+      rt::Field* sender = find_field(cls, "sender", "Ljava/net/SocketAddress;");
+      if (sender) rt.object(self)->fields.at(sender->slot) = kNull;
+      return 0;
+    }
     rt::Field* cached_f = find_field(cls, "cachedSenderInetAddress", "Ljava/net/InetAddress;");
     rt::Field* port_f = find_field(cls, "cachedSenderPort", "I");
     rt::Field* sender_f = find_field(cls, "sender", "Ljava/net/SocketAddress;");
@@ -2572,6 +2849,222 @@ void register_libcore_net(rt::NativeRegistry& r) {
     }
     return result.get();
   }, S::kPartial, "deux sockets de la boucle locale");
+
+  // Network interfaces (NetworkInterface): getifaddrs lists each address as
+  // bionic does, prepending as it reads the netlink dump (IPv4 addresses,
+  // then IPv6 ones, by interface), so that the last address comes first.
+  r.bind(lxc, "getifaddrs", "()[Landroid/system/StructIfaddrs;", [](Runtime& rt, NativeArgs&) -> uint64_t {
+    struct Entry {
+      const Interface* itf;
+      const IfAddress* address;
+    };
+    auto list = interfaces();
+    std::vector<Entry> entries;
+    for (int family : {AF_INET, AF_INET6}) {
+      for (const auto& itf : list) {
+        for (const auto& address : itf.addresses) {
+          if (address.addr.ss_family == family) entries.push_back(Entry{&itf, &address});
+        }
+      }
+    }
+    std::reverse(entries.begin(), entries.end());
+    rt::GlobalRef result(rt, rt.new_array("[Landroid/system/StructIfaddrs;", int32_t(entries.size())));
+    for (size_t i = 0; i < entries.size(); ++i) {
+      const Entry& e = entries[i];
+      rt::GlobalRef name(rt, rt.new_string_utf8(e.itf->name));
+      rt::GlobalRef addr(rt, to_inet_address(rt, reinterpret_cast<const sockaddr*>(&e.address->addr), nullptr));
+      rt::GlobalRef mask(rt, to_inet_address(rt, reinterpret_cast<const sockaddr*>(&e.address->netmask), nullptr));
+      rt::GlobalRef broad(rt, e.address->has_broadcast && (e.itf->flags & kIffBroadcast)
+                                  ? to_inet_address(rt, reinterpret_cast<const sockaddr*>(&e.address->broadcast), nullptr)
+                                  : kNull);
+      Handle item = construct(rt, "Landroid/system/StructIfaddrs;",
+                              "(Ljava/lang/String;ILjava/net/InetAddress;Ljava/net/InetAddress;Ljava/net/InetAddress;[B)V",
+                              {name.get(), e.itf->flags, addr.get(), mask.get(), broad.get(), kNull});
+      std::memcpy(&rt.array(result.get(), "StructIfaddrs[]").data[i * 4], &item, 4);
+    }
+    return result.get();
+  }, S::kPartial, "lo et les cartes Wi-Fi/Ethernet actives de l'hôte (wlanN, ethN), sans adresse matérielle");
+  r.bind(lxc, "if_nametoindex", "(Ljava/lang/String;)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (a.h(1) == kNull) rt.throw_npe({});
+    auto itf = interface_named(rt.string_utf8(a.h(1)));
+    return rt::ret_int(itf ? itf->index : 0);
+  });
+  r.bind(lxc, "if_indextoname", "(I)Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    for (const auto& itf : interfaces()) {
+      if (itf.index == a.i32(1)) return rt.new_string_utf8(itf.name);
+    }
+    return kNull;
+  });
+  // ioctl(SIOCGIFFLAGS, SIOCGIFMTU, SIOCGIF*ADDR) on a socket: ENODEV for an
+  // unknown interface, ENOTTY on another descriptor.
+  auto ioctl_interface = [](Runtime& rt, NativeArgs& a, Handle name) -> Interface {
+    std::string n = ifreq_name(rt, name);
+    int32_t fd = fd_of(rt, a.h(1));
+    if (fd < 0 || (fd > 2 && !libcore_vfs().is_open(fd))) throw_errno(rt, "ioctl", lx::kEBADF);
+    auto s = socket_of(fd);
+    if (!s || s->pipe != NetSocket::Pipe::kNone) throw_errno(rt, "ioctl", 25);  // ENOTTY
+    auto itf = interface_named(n);
+    if (!itf) throw_errno(rt, "ioctl", 19);  // ENODEV
+    return *itf;
+  };
+  r.bind(lxc, "ioctlFlags", "(Ljava/io/FileDescriptor;Ljava/lang/String;)I", [ioctl_interface](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_int(int32_t(ioctl_interface(rt, a, a.h(2)).flags));
+  });
+  r.bind(lxc, "ioctlMTU", "(Ljava/io/FileDescriptor;Ljava/lang/String;)I", [ioctl_interface](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_int(ioctl_interface(rt, a, a.h(2)).mtu);
+  });
+  r.bind(lxc, "ioctlInetAddress", "(Ljava/io/FileDescriptor;ILjava/lang/String;)Ljava/net/InetAddress;",
+         [ioctl_interface](Runtime& rt, NativeArgs& a) -> uint64_t {
+           Interface itf = ioctl_interface(rt, a, a.h(3));
+           constexpr int32_t kSiocgifaddr = 0x8915, kSiocgifdstaddr = 0x8917, kSiocgifbrdaddr = 0x8919,
+                             kSiocgifnetmask = 0x891b;
+           int32_t cmd = a.i32(2);
+           if (cmd != kSiocgifaddr && cmd != kSiocgifdstaddr && cmd != kSiocgifbrdaddr && cmd != kSiocgifnetmask) {
+             throw_errno(rt, "ioctl", lx::kEINVAL);
+           }
+           for (const auto& address : itf.addresses) {  // the first IPv4 address, as devinet_ioctl
+             if (address.addr.ss_family != AF_INET) continue;
+             sockaddr_storage ss{};
+             ss.ss_family = AF_INET;
+             if (cmd == kSiocgifaddr || cmd == kSiocgifdstaddr) ss = address.addr;
+             else if (cmd == kSiocgifnetmask) ss = address.netmask;
+             else if (address.has_broadcast) ss = address.broadcast;
+             return to_inet_address(rt, reinterpret_cast<const sockaddr*>(&ss), nullptr);
+           }
+           throw_errno(rt, "ioctl", lx::kEADDRNOTAVAIL);
+         });
+  // ioctl(fd, cmd, 0): no request without argument is known here.
+  r.bind(lxc, "ioctlRet", "(Ljava/io/FileDescriptor;I)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = fd_of(rt, a.h(1));
+    if (fd < 0 || (fd > 2 && !libcore_vfs().is_open(fd))) throw_errno(rt, "ioctl", lx::kEBADF);
+    throw_errno(rt, "ioctl", 25);  // ENOTTY
+  }, S::kPartial, "aucune requête ioctl sans argument");
+
+  // Options with a structure.
+  r.bind(lxc, "getsockoptInAddr", "(Ljava/io/FileDescriptor;II)Ljava/net/InetAddress;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto s = socket_arg(rt, a.h(1), "getsockopt");
+    constexpr int32_t kIpMulticastIf = 32;
+    if (a.i32(2) != lx::kIpprotoIp || a.i32(3) != kIpMulticastIf) throw_errno(rt, "getsockopt", lx::kENOPROTOOPT);
+    sockaddr_storage ss{};
+    auto& sin = reinterpret_cast<sockaddr_in&>(ss);
+    sin.sin_family = AF_INET;
+    int len = sizeof sin.sin_addr;
+    if (getsockopt(s->handle(), IPPROTO_IP, IP_MULTICAST_IF, reinterpret_cast<char*>(&sin.sin_addr), &len) == SOCKET_ERROR) {
+      throw_errno(rt, "getsockopt", linux_errno(WSAGetLastError()));
+    }
+    return to_inet_address(rt, reinterpret_cast<const sockaddr*>(&ss), nullptr);
+  });
+  // SO_PEERCRED: this process for its own AF_UNIX sockets; a TCP or UDP
+  // socket has no peer credentials (pid 0, uid and gid -1).
+  r.bind(lxc, "getsockoptUcred", "(Ljava/io/FileDescriptor;II)Landroid/system/StructUcred;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto s = socket_arg(rt, a.h(1), "getsockopt");
+    constexpr int32_t kSoPeercred = 17;
+    if (a.i32(2) != lx::kSolSocket || a.i32(3) != kSoPeercred) throw_errno(rt, "getsockopt", lx::kENOPROTOOPT);
+    bool local = s->family == lx::kAfUnix;
+    uint32_t pid = local ? uint32_t(GetCurrentProcessId()) : 0, id = local ? uint32_t(kAppUid) : uint32_t(-1);
+    return construct(rt, "Landroid/system/StructUcred;", "(III)V", {pid, id, id});
+  });
+  // SO_BINDTODEVICE needs CAP_NET_RAW, which applications lack.
+  r.bind(lxc, "setsockoptIfreq", "(Ljava/io/FileDescriptor;IILjava/lang/String;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    ifreq_name(rt, a.h(4));
+    socket_arg(rt, a.h(1), "setsockopt");
+    constexpr int32_t kSoBindtodevice = 25;
+    throw_errno(rt, "setsockopt", a.i32(2) == lx::kSolSocket && a.i32(3) == kSoBindtodevice ? lx::kEPERM : lx::kENOPROTOOPT);
+  });
+  // ip_mreqn with only imr_ifindex: IP_MULTICAST_IF by interface index.
+  r.bind(lxc, "setsockoptIpMreqn", "(Ljava/io/FileDescriptor;III)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto s = socket_arg(rt, a.h(1), "setsockopt");
+    constexpr int32_t kIpMulticastIf = 32;
+    if (a.i32(2) != lx::kIpprotoIp || a.i32(3) != kIpMulticastIf) throw_errno(rt, "setsockopt", lx::kENOPROTOOPT);
+    ULONG index = win_interface_index(a.i32(4));
+    if (index == ULONG(-1)) throw_errno(rt, "setsockopt", 19);  // ENODEV
+    DWORD value = htonl(index);  // 0.0.0.x: an interface index for Windows
+    if (setsockopt(s->handle(), IPPROTO_IP, IP_MULTICAST_IF, reinterpret_cast<const char*>(&value), sizeof value) == SOCKET_ERROR) {
+      throw_errno(rt, "setsockopt", linux_errno(WSAGetLastError()));
+    }
+    return 0;
+  });
+  // MCAST_JOIN_GROUP and MCAST_LEAVE_GROUP (struct group_req).
+  r.bind(lxc, "setsockoptGroupReq", "(Ljava/io/FileDescriptor;IILandroid/system/StructGroupReq;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto s = socket_arg(rt, a.h(1), "setsockopt");
+    Handle req = a.h(4);
+    if (req == kNull) rt.throw_npe({});
+    int32_t level = a.i32(2), option = a.i32(3);
+    constexpr int32_t kMcastJoinGroup = 42, kMcastLeaveGroup = 45;
+    if ((level != lx::kIpprotoIp && level != lx::kIpprotoIpv6) || (option != kMcastJoinGroup && option != kMcastLeaveGroup)) {
+      throw_errno(rt, "setsockopt", lx::kENOPROTOOPT);
+    }
+    GROUP_REQ g{};
+    ULONG index = win_interface_index(int32_t(field_of(rt, req, "Landroid/system/StructGroupReq;", "gr_interface", "I")));
+    if (index == ULONG(-1)) throw_errno(rt, "setsockopt", 19);  // ENODEV
+    g.gr_interface = index;
+    Handle group = field_of(rt, req, "Landroid/system/StructGroupReq;", "gr_group", "Ljava/net/InetAddress;");
+    Endpoint e = to_sockaddr(rt, group, 0, false);  // verbatim: no IPv4-mapped form
+    std::memcpy(&g.gr_group, &e.ss, sizeof g.gr_group);
+    int win_level = level == lx::kIpprotoIp ? IPPROTO_IP : IPPROTO_IPV6;
+    int win_option = option == kMcastJoinGroup ? MCAST_JOIN_GROUP : MCAST_LEAVE_GROUP;
+    if (setsockopt(s->handle(), win_level, win_option, reinterpret_cast<const char*>(&g), sizeof g) == SOCKET_ERROR) {
+      throw_errno(rt, "setsockopt", linux_errno(WSAGetLastError()));
+    }
+    return 0;
+  });
+
+  // recvfromNoThrow, recvmsg, recvmsgNoThrow, sendmsg.
+  r.bind(lxc, "recvfromNoThrow", "(Ljava/io/FileDescriptor;[BIIILjava/net/InetSocketAddress;)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = fd_of(rt, a.h(1));
+    auto buf = extract_io_buffer(rt, a.h(2), a.i32(3), a.i32(4), true);
+    int32_t flags = a.i32(5);
+    Handle from = a.h(6);
+    auto s = socket_of(fd);
+    if (!s || s->pipe != NetSocket::Pipe::kNone) {
+      return rt::ret_int(fd < 0 || (fd > 2 && !libcore_vfs().is_open(fd)) ? -lx::kEBADF : -lx::kENOTSOCK);
+    }
+    sockaddr_storage ss{};
+    int len = sizeof ss;
+    int size = int(std::min<size_t>(buf.size(), INT32_MAX));
+    int32_t err = 0;
+    int64_t n = retry_nothrow(rt, *s, fd, POLLRDNORM, s->rcvtimeo_us, (flags & lx::kMsgDontwait) != 0, false, err, [&]() -> int64_t {
+      len = sizeof ss;
+      int got = recvfrom(s->handle(), reinterpret_cast<char*>(buf.data()), size, win_msg_flags(flags),
+                         from != kNull ? reinterpret_cast<sockaddr*>(&ss) : nullptr, from != kNull ? &len : nullptr);
+      if (got == SOCKET_ERROR && WSAGetLastError() == WSAEMSGSIZE) return size;
+      return got;
+    });
+    if (n < 0) return rt::ret_int(-err);
+    if (from != kNull && (ss.ss_family == AF_INET || ss.ss_family == AF_INET6)) {
+      fill_inet_socket_address(rt, from, reinterpret_cast<const sockaddr*>(&ss));
+    }
+    return rt::ret_int(int32_t(n));
+  });
+  r.bind(lxc, "recvmsg", "(Ljava/io/FileDescriptor;Landroid/system/StructMsghdr;I)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_int(recv_message(rt, a.h(1), a.h(2), a.i32(3), true));
+  }, S::kPartial, "sans message de contrôle");
+  r.bind(lxc, "recvmsgNoThrow", "(Ljava/io/FileDescriptor;Landroid/system/StructMsghdr;I)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt::ret_int(recv_message(rt, a.h(1), a.h(2), a.i32(3), false));
+  }, S::kPartial, "sans message de contrôle");
+  r.bind(lxc, "sendmsg", "(Ljava/io/FileDescriptor;Landroid/system/StructMsghdr;I)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    Handle msg = a.h(2);
+    auto bufs = message_buffers(rt, msg, false);
+    auto s = socket_arg(rt, a.h(1), "sendmsg");
+    Handle control = field_of(rt, msg, "Landroid/system/StructMsghdr;", "msg_control", "[Landroid/system/StructCmsghdr;");
+    if (control != kNull && rt.array(control, "StructCmsghdr[]").length > 0) {
+      throw_errno(rt, "sendmsg", lx::kEOPNOTSUPP);  // no ancillary data (SCM_RIGHTS, IP_PKTINFO...) here
+    }
+    Handle name = field_of(rt, msg, "Landroid/system/StructMsghdr;", "msg_name", "Ljava/net/SocketAddress;");
+    Endpoint to;
+    if (name != kNull) to = socket_address_arg(rt, *s, name, "sendmsg");
+    int32_t flags = a.i32(3);
+    int32_t fd = fd_of(rt, a.h(1));
+    int64_t n = retry(rt, *s, fd, "sendmsg", POLLWRNORM, s->sndtimeo_us, (flags & lx::kMsgDontwait) != 0, false, true,
+                      [&]() -> int64_t {
+                        DWORD sent = 0;
+                        int rc = WSASendTo(s->handle(), bufs.data(), DWORD(bufs.size()), &sent, DWORD(win_msg_flags(flags)),
+                                           name != kNull ? reinterpret_cast<const sockaddr*>(&to.ss) : nullptr,
+                                           name != kNull ? to.len : 0, nullptr, nullptr);
+                        return rc == SOCKET_ERROR ? -1 : int64_t(sent);
+                      });
+    return rt::ret_int(int32_t(n));
+  }, S::kPartial, "sans message de contrôle");
 
   register_nio_net(r);
   register_epoll(r);

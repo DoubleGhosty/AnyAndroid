@@ -237,6 +237,9 @@ std::span<uint8_t> extract_io_buffer(rt::Runtime& rt, rt::Handle buffer, int32_t
 // like read(2) and write(2) on a socket, the GIL released.
 std::optional<size_t> socket_read(rt::Runtime& rt, int32_t fd, std::span<uint8_t> out);
 std::optional<size_t> socket_write(rt::Runtime& rt, int32_t fd, std::span<const uint8_t> data);
+// readNoThrow on a socket: bytes, or -1 and the Linux errno in `err` (EBADF
+// when a close is signalled).
+std::optional<int64_t> socket_read_nothrow(rt::Runtime& rt, int32_t fd, std::span<uint8_t> out, int32_t& err);
 // ioctl(FIONREAD) of a socket.
 std::optional<int32_t> socket_available(rt::Runtime& rt, int32_t fd);
 // fcntl(F_SETFL) on a socket: its O_NONBLOCK.

@@ -9,8 +9,10 @@
 // host file, environment variable or user name is exposed.
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cwctype>
 #include <functional>
@@ -18,6 +20,7 @@
 #include <io.h>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <thread>
 #include <string>
@@ -118,7 +121,9 @@ using rt::Runtime;
 using S = rt::ApiStatus;
 
 // Linux errno values (asm-generic), also published through OsConstants.
-enum Errno : int32_t { kENOENT = 2 };
+enum Errno : int32_t {
+  kEPERM = 1, kENOENT = 2, kESRCH = 3, kENOEXEC = 8, kEBADF = 9, kECHILD = 10, kEINVAL = 22, kENOTTY = 25,
+};
 
 // Environment of the emulated Android process: Android's at start (never the
 // host's), then what the process itself sets (Os.setenv, unsetenv).
@@ -1158,6 +1163,179 @@ std::string strerror_text(int32_t err) {
 
 namespace {
 
+// --- Users and process control: bionic's grp_pwd.cpp, the kernel's checks ---------------
+
+struct AndroidId {
+  const char* name;
+  uint32_t aid;
+};
+
+// android_ids of bionic, as fs_config_generator.py makes it from
+// android_filesystem_config.h (android-17.0.0_r1): AID_FOO is "foo".
+constexpr AndroidId kAndroidIds[] = {
+    {"root", 0}, {"daemon", 1}, {"bin", 2}, {"sys", 3}, {"system", 1000}, {"radio", 1001}, {"bluetooth", 1002},
+    {"graphics", 1003}, {"input", 1004}, {"audio", 1005}, {"camera", 1006}, {"log", 1007}, {"compass", 1008},
+    {"mount", 1009}, {"wifi", 1010}, {"adb", 1011}, {"install", 1012}, {"media", 1013}, {"dhcp", 1014},
+    {"sdcard_rw", 1015}, {"vpn", 1016}, {"keystore", 1017}, {"usb", 1018}, {"drm", 1019}, {"mdnsr", 1020},
+    {"gps", 1021}, {"media_rw", 1023}, {"mtp", 1024}, {"drmrpc", 1026}, {"nfc", 1027}, {"sdcard_r", 1028},
+    {"clat", 1029}, {"loop_radio", 1030}, {"media_drm", 1031}, {"package_info", 1032}, {"sdcard_pics", 1033},
+    {"sdcard_av", 1034}, {"sdcard_all", 1035}, {"logd", 1036}, {"shared_relro", 1037}, {"dbus", 1038},
+    {"tlsdate", 1039}, {"media_ex", 1040}, {"audioserver", 1041}, {"metrics_coll", 1042}, {"metricsd", 1043},
+    {"webserv", 1044}, {"debuggerd", 1045}, {"media_codec", 1046}, {"cameraserver", 1047}, {"firewall", 1048},
+    {"trunks", 1049}, {"nvram", 1050}, {"dns", 1051}, {"dns_tether", 1052}, {"webview_zygote", 1053},
+    {"vehicle_network", 1054}, {"media_audio", 1055}, {"media_video", 1056}, {"media_image", 1057},
+    {"tombstoned", 1058}, {"media_obb", 1059}, {"ese", 1060}, {"ota_update", 1061}, {"automotive_evs", 1062},
+    {"lowpan", 1063}, {"hsm", 1064}, {"reserved_disk", 1065}, {"statsd", 1066}, {"incidentd", 1067},
+    {"secure_element", 1068}, {"lmkd", 1069}, {"llkd", 1070}, {"iorapd", 1071}, {"gpu_service", 1072},
+    {"network_stack", 1073}, {"gsid", 1074}, {"fsverity_cert", 1075}, {"credstore", 1076},
+    {"external_storage", 1077}, {"ext_data_rw", 1078}, {"ext_obb_rw", 1079}, {"context_hub", 1080},
+    {"virtualizationservice", 1081}, {"artd", 1082}, {"uwb", 1083}, {"thread_network", 1084}, {"diced", 1085},
+    {"dmesgd", 1086}, {"jc_weaver", 1087}, {"jc_strongbox", 1088}, {"jc_identitycred", 1089},
+    {"sdk_sandbox", 1090}, {"security_log_writer", 1091}, {"prng_seeder", 1092}, {"uprobestats", 1093},
+    {"cros_ec", 1094}, {"mmd", 1095}, {"update_engine_log", 1096}, {"ap_firmware", 1097}, {"pmgd", 1098},
+    {"sdv_sd_agent", 1099}, {"sdv_dt_agent", 1100}, {"sdv_rpc_agent", 1101}, {"sdv_init_open_dice", 1102},
+    {"shell", 2000}, {"cache", 2001}, {"diag", 2002}, {"net_bt_admin", 3001}, {"net_bt", 3002}, {"inet", 3003},
+    {"net_raw", 3004}, {"net_admin", 3005}, {"net_bw_stats", 3006}, {"net_bw_acct", 3007}, {"readproc", 3009},
+    {"wakelock", 3010}, {"uhid", 3011}, {"readtracefs", 3012}, {"virtualmachine", 3013}, {"everybody", 9997},
+    {"misc", 9998}, {"nobody", 9999}, {"overflowuid", 65534},
+};
+
+constexpr uint32_t kAidAppStart = 10000, kAidAppEnd = 19999, kAidIsolatedStart = 90000, kAidIsolatedEnd = 99999,
+                   kAidUserOffset = 100000, kAidOverflowUid = 65534;
+constexpr uint32_t kAppUid = 10000;  // this application (u0_a0), as getuid() reports
+
+const AndroidId* android_id(uint32_t aid) {
+  for (const auto& id : kAndroidIds) {
+    if (id.aid == aid) return &id;
+  }
+  return nullptr;
+}
+
+const AndroidId* android_id(std::string_view name) {
+  for (const auto& id : kAndroidIds) {
+    if (name == id.name) return &id;
+  }
+  return nullptr;
+}
+
+// Platform AIDs valid in secondary users (PackageManagerService's shared users).
+bool secondary_user_allowed(uint32_t aid) {
+  for (const char* name : {"system", "radio", "log", "nfc", "bluetooth", "shell", "secure_element", "network_stack"}) {
+    const AndroidId* id = android_id(name);
+    if (id && id->aid == aid) return true;
+  }
+  return false;
+}
+
+bool valid_app_uid(uint32_t uid) {
+  uint32_t appid = uid % kAidUserOffset;
+  if (appid == kAidOverflowUid) return false;
+  if (appid < kAidAppStart && secondary_user_allowed(appid)) return true;
+  return (appid >= kAidAppStart && appid <= kAidAppEnd) || (appid >= kAidIsolatedStart && appid <= kAidIsolatedEnd);
+}
+
+struct Passwd {
+  std::string name, dir, shell;
+  uint32_t uid = 0;
+};
+
+// app_id_to_passwd: u0_a12, u0_i3, u10_system...
+std::optional<Passwd> app_passwd(uint32_t uid) {
+  if (uid < kAidAppStart || !valid_app_uid(uid)) return std::nullopt;
+  uint32_t appid = uid % kAidUserOffset, user = uid / kAidUserOffset;
+  Passwd p;
+  if (appid >= kAidIsolatedStart) {
+    p.name = "u" + std::to_string(user) + "_i" + std::to_string(appid - kAidIsolatedStart);
+  } else if (appid < kAidAppStart) {
+    if (const AndroidId* id = android_id(appid)) p.name = "u" + std::to_string(user) + "_" + id->name;
+  } else {
+    p.name = "u" + std::to_string(user) + "_a" + std::to_string(appid - kAidAppStart);
+  }
+  p.dir = appid < kAidAppStart ? "/" : "/data";
+  p.shell = "/bin/sh";
+  p.uid = uid;
+  return p;
+}
+
+bool oem_id(uint32_t id) { return (id >= 2900 && id <= 2999) || (id >= 5000 && id <= 5999); }
+
+// getpwuid_internal: the AID table, the OEM ranges, then the applications'.
+std::optional<Passwd> passwd_by_uid(uint32_t uid) {
+  if (const AndroidId* id = android_id(uid)) return Passwd{id->name, "/", "/bin/sh", uid};
+  if (oem_id(uid)) return Passwd{"oem_" + std::to_string(uid), "/", "/bin/sh", uid};
+  return app_passwd(uid);
+}
+
+// app_id_from_name (users): u<user>_a<n>, u<user>_i<n>, u<user>_<platform id>; 0 if none.
+uint32_t app_id_from_name(const std::string& name) {
+  if (name.size() < 2 || name[0] != 'u' || !std::isdigit(static_cast<unsigned char>(name[1]))) return 0;
+  char* end = nullptr;
+  unsigned long user = std::strtoul(name.c_str() + 1, &end, 10);
+  if (end[0] != '_' || end[1] == 0) return 0;
+  unsigned long appid = 0;
+  if (end[1] == 'a' && std::isdigit(static_cast<unsigned char>(end[2]))) {
+    appid = std::strtoul(end + 2, &end, 10) + kAidAppStart;
+  } else if (end[1] == 'i' && std::isdigit(static_cast<unsigned char>(end[2]))) {
+    appid = std::strtoul(end + 2, &end, 10) + kAidIsolatedStart;
+  } else if (const AndroidId* id = android_id(std::string_view(end + 1))) {
+    appid = id->aid;
+    end += std::strlen(id->name) + 1;
+    if (!secondary_user_allowed(uint32_t(appid))) return 0;
+  }
+  if (end[0] != 0 || user > 1000 || appid >= kAidUserOffset) return 0;
+  return uint32_t(appid + user * kAidUserOffset);
+}
+
+std::optional<Passwd> passwd_by_name(const std::string& name) {
+  if (const AndroidId* id = android_id(std::string_view(name))) return Passwd{id->name, "/", "/bin/sh", id->aid};
+  unsigned oem = 0;
+  if (std::sscanf(name.c_str(), "oem_%u", &oem) == 1 && oem_id(oem)) return passwd_by_uid(oem);
+  return app_passwd(app_id_from_name(name));
+}
+
+Handle make_passwd(Runtime& rt, const Passwd& p) {
+  rt::GlobalRef name(rt, rt.new_string_utf8(p.name)), dir(rt, rt.new_string_utf8(p.dir));
+  rt::GlobalRef shell(rt, rt.new_string_utf8(p.shell));
+  return construct(rt, "Landroid/system/StructPasswd;", "(Ljava/lang/String;IILjava/lang/String;Ljava/lang/String;)V",
+                   {name.get(), p.uid, p.uid, dir.get(), shell.get()});
+}
+
+// bionic's strsignal (its sys_siglist stops before SIGSYS); SIGRTMIN 42 to SIGRTMAX 64.
+std::string signal_text(int32_t sig) {
+  static const char* const kNames[] = {
+      nullptr, "Hangup", "Interrupt", "Quit", "Illegal instruction", "Trap", "Aborted", "Bus error",
+      "Floating point exception", "Killed", "User signal 1", "Segmentation fault", "User signal 2", "Broken pipe",
+      "Alarm clock", "Terminated", "Stack fault", "Child exited", "Continue", "Stopped (signal)", "Stopped",
+      "Stopped (tty input)", "Stopped (tty output)", "Urgent I/O condition", "CPU time limit exceeded",
+      "File size limit exceeded", "Virtual timer expired", "Profiling timer expired", "Window size changed",
+      "I/O possible", "Power failure",
+  };
+  constexpr int32_t kSigsys = 31, kSigrtmin = 42, kSigrtmax = 64;
+  if (sig >= 1 && sig < kSigsys) return kNames[sig];
+  if (sig >= kSigrtmin && sig <= kSigrtmax) return "Real-time signal " + std::to_string(sig - kSigrtmin);
+  return "Unknown signal " + std::to_string(sig);
+}
+
+// The resource limits of an application process (RLIM_INFINITY is -1):
+// zygote's init.rc sets nofile to 32768 (the Vfs' limit) and nice
+// to 40; the others are the kernel's defaults, nproc and sigpending as for
+// a device with about 3.7 GiB of memory.
+std::optional<std::pair<int64_t, int64_t>> resource_limit(int32_t resource) {
+  constexpr int64_t kInf = -1;
+  switch (resource) {
+    case 0: case 1: case 2: case 5: case 9: case 10: case 15: return std::pair{kInf, kInf};  // CPU, FSIZE, DATA, RSS, AS, LOCKS, RTTIME
+    case 3: return std::pair{int64_t(8) << 20, kInf};                       // STACK
+    case 4: return std::pair{int64_t(0), kInf};                             // CORE
+    case 6: case 11: return std::pair{int64_t(14936), int64_t(14936)};      // NPROC, SIGPENDING
+    case 7: return std::pair{int64_t(vfs::kMaxOpenFiles), int64_t(vfs::kMaxOpenFiles)};  // NOFILE
+    case 8: return std::pair{int64_t(64) << 10, int64_t(64) << 10};         // MEMLOCK
+    case 12: return std::pair{int64_t(819200), int64_t(819200)};            // MSGQUEUE
+    case 13: return std::pair{int64_t(40), int64_t(40)};                    // NICE
+    case 14: return std::pair{int64_t(0), int64_t(0)};                      // RTPRIO
+    default: return std::nullopt;
+  }
+}
+
 void register_os(rt::NativeRegistry& r) {
   // android_system_OsConstants.cpp: in Android 17, OsConstantsHolder.initConstants fills the
   // holder's own fields, and OsConstants.<clinit> copies them (the values that differ
@@ -1268,9 +1446,142 @@ void register_os(rt::NativeRegistry& r) {
   }, S::kStub, "fdsan sans objet");
   r.bind(lx, "android_fdsan_get_tag_value", "(J)J", [](Runtime&, NativeArgs&) -> uint64_t { return 0; },
          S::kStub, "fdsan sans objet");
-  r.bind(lx, "getpwuid", "(I)Landroid/system/StructPasswd;", [](Runtime& rt, NativeArgs&) -> uint64_t {
-    throw_errno(rt, "getpwuid", kENOENT);
-  }, S::kPartial, "aucune base d'utilisateurs");
+  r.bind(lx, "getpwuid", "(I)Landroid/system/StructPasswd;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto p = passwd_by_uid(uint32_t(a.i32(1)));
+    if (!p) throw_errno(rt, "getpwuid_r", kENOENT);
+    return make_passwd(rt, *p);
+  });
+  r.bind(lx, "getpwnam", "(Ljava/lang/String;)Landroid/system/StructPasswd;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (a.h(1) == kNull) rt.throw_npe({});
+    auto p = passwd_by_name(rt.string_utf8(a.h(1)));
+    if (!p) throw_errno(rt, "getpwnam_r", kENOENT);
+    return make_passwd(rt, *p);
+  });
+  r.bind(lx, "getrlimit", "(I)Landroid/system/StructRlimit;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto limit = resource_limit(a.i32(1));
+    if (!limit) throw_errno(rt, "getrlimit", kEINVAL);
+    auto [cur, max] = *limit;
+    return construct(rt, "Landroid/system/StructRlimit;", "(JJ)V",
+                     {uint32_t(uint64_t(cur)), uint32_t(uint64_t(cur) >> 32), uint32_t(uint64_t(max)), uint32_t(uint64_t(max) >> 32)});
+  }, S::kPartial, "limites d'un processus d'application (nofile : celle du VFS)");
+  // Identities: an application has no CAP_SETUID nor CAP_SETGID, so it may
+  // only take an id it already holds (10000 everywhere); -1 leaves one alone.
+  auto own_ids = [](std::initializer_list<int32_t> ids, const char* name, Runtime& rt) {
+    for (int32_t id : ids) {
+      if (id != -1 && uint32_t(id) != kAppUid) throw_errno(rt, name, kEPERM);
+    }
+  };
+  for (const char* name : {"setuid", "setgid"}) {
+    r.bind(lx, name, "(I)V", [own_ids, name](Runtime& rt, NativeArgs& a) -> uint64_t {
+      if (a.i32(1) == -1) throw_errno(rt, name, kEINVAL);
+      own_ids({a.i32(1)}, name, rt);
+      return 0;
+    });
+  }
+  for (const char* name : {"seteuid", "setegid"}) {
+    r.bind(lx, name, "(I)V", [own_ids, name](Runtime& rt, NativeArgs& a) -> uint64_t {
+      if (a.i32(1) == -1) throw_errno(rt, name, kEINVAL);
+      own_ids({a.i32(1)}, name, rt);
+      return 0;
+    });
+  }
+  for (const char* name : {"setreuid", "setregid"}) {
+    r.bind(lx, name, "(II)V", [own_ids, name](Runtime& rt, NativeArgs& a) -> uint64_t {
+      own_ids({a.i32(1), a.i32(2)}, name, rt);
+      return 0;
+    });
+  }
+  // setsid: an application process leads its process group (getpgid is its pid).
+  r.bind(lx, "setsid", "()I", [](Runtime& rt, NativeArgs&) -> uint64_t { throw_errno(rt, "setsid", kEPERM); });
+  // capget/capset: an application holds no capability; version 1 has one
+  // data word, versions 2 and 3 two; another version is EINVAL, the header
+  // then naming version 3, as the kernel answers.
+  auto cap_words = [](Runtime& rt, Handle header, const char* name) -> size_t {
+    if (header == kNull) rt.throw_npe("header is null");
+    constexpr int32_t kV1 = 0x19980330, kV2 = 0x20071026, kV3 = 0x20080522;
+    rt::Field* version = find_field(rt.class_of(header), "version", "I");
+    rt::Field* pid = find_field(rt.class_of(header), "pid", "I");
+    int32_t v = int32_t(rt.object(header)->fields.at(version->slot));
+    if (v != kV1 && v != kV2 && v != kV3) {
+      rt.object(header)->fields.at(version->slot) = uint32_t(kV3);
+      throw_errno(rt, name, kEINVAL);
+    }
+    int32_t target = int32_t(rt.object(header)->fields.at(pid->slot));
+    if (target < 0) throw_errno(rt, name, kEINVAL);
+    if (target != 0 && uint32_t(target) != GetCurrentProcessId()) throw_errno(rt, name, std::string_view(name) == "capget" ? kESRCH : kEPERM);
+    return v == kV1 ? 1 : 2;
+  };
+  r.bind(lx, "capget", "(Landroid/system/StructCapUserHeader;)[Landroid/system/StructCapUserData;", [cap_words](Runtime& rt, NativeArgs& a) -> uint64_t {
+    size_t words = cap_words(rt, a.h(1), "capget");
+    rt::GlobalRef result(rt, rt.new_array("[Landroid/system/StructCapUserData;", int32_t(words)));
+    for (size_t i = 0; i < words; ++i) {
+      Handle data = construct(rt, "Landroid/system/StructCapUserData;", "(III)V", {0, 0, 0});
+      std::memcpy(&rt.array(result.get(), "StructCapUserData[]").data[i * 4], &data, 4);
+    }
+    return result.get();
+  });
+  r.bind(lx, "capset", "(Landroid/system/StructCapUserHeader;[Landroid/system/StructCapUserData;)V", [cap_words](Runtime& rt, NativeArgs& a) -> uint64_t {
+    size_t words = cap_words(rt, a.h(1), "capset");
+    Handle data = a.h(2);
+    if (data == kNull) rt.throw_npe({});
+    uint32_t length = rt.array(data, "StructCapUserData[]").length;
+    if (length != words) {
+      rt.throw_new("Ljava/lang/IllegalArgumentException;",
+                   "Unsupported input length " + std::to_string(length) + " (expected " + std::to_string(words) + ")");
+    }
+    for (uint32_t i = 0; i < length; ++i) {
+      Handle item;
+      std::memcpy(&item, &rt.array(data, "StructCapUserData[]").data[size_t(i) * 4], 4);
+      if (item == kNull) rt.throw_npe({});
+      for (const char* field : {"effective", "permitted", "inheritable"}) {
+        rt::Field* f = find_field(rt.class_of(item), field, "I");
+        if (rt.object(item)->fields.at(f->slot) != 0) throw_errno(rt, "capset", kEPERM);  // no capability to raise
+      }
+    }
+    return 0;
+  });
+  // No child process here: waitpid has nothing to wait for.
+  r.bind(lx, "waitpid", "(ILandroid/system/Int32Ref;I)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    constexpr int32_t kWnohang = 1, kWuntraced = 2, kWcontinued = 8, kWnothread = 0x20000000, kWall = 0x40000000,
+                      kWclone = int32_t(0x80000000);
+    if (a.i32(3) & ~(kWnohang | kWuntraced | kWcontinued | kWnothread | kWall | kWclone)) throw_errno(rt, "waitpid", kEINVAL);
+    throw_errno(rt, "waitpid", kECHILD);
+  }, S::kPartial, "aucun processus enfant");
+  // exec: the Linux binaries of the image cannot run on Windows (ENOEXEC);
+  // a missing file is ENOENT as with execve(2).
+  auto exec = [](Runtime& rt, NativeArgs& a, const char* name) -> uint64_t {
+    if (a.h(1) == kNull) rt.throw_npe({});
+    std::string path = rt.string_utf8(a.h(1));
+    try {
+      libcore_vfs().stat(path);
+    } catch (const vfs::VfsError& e) {
+      throw_errno(rt, name, e.err);
+    }
+    throw_errno(rt, name, kENOEXEC);
+  };
+  r.bind(lx, "execv", "(Ljava/lang/String;[Ljava/lang/String;)V",
+         [exec](Runtime& rt, NativeArgs& a) -> uint64_t { return exec(rt, a, "execv"); }, S::kPartial, "aucun binaire Linux exécutable");
+  r.bind(lx, "execve", "(Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;)V",
+         [exec](Runtime& rt, NativeArgs& a) -> uint64_t { return exec(rt, a, "execve"); }, S::kPartial, "aucun binaire Linux exécutable");
+  r.bind(lx, "strsignal", "(I)Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    return rt.new_string_utf8(signal_text(a.i32(1)));
+  });
+  // tcdrain, tcsendbreak: the standard streams are terminals; any other
+  // descriptor is not (ENOTTY).
+  for (const char* name : {"tcdrain", "tcsendbreak"}) {
+    r.bind(lx, name, std::string_view(name) == "tcdrain" ? "(Ljava/io/FileDescriptor;)V" : "(Ljava/io/FileDescriptor;I)V",
+           [name](Runtime& rt, NativeArgs& a) -> uint64_t {
+             int32_t fd = fd_of(rt, a.h(1));
+             if (fd >= 0 && fd <= 2) {
+               if (fd > 0) std::fflush(fd == 1 ? stdout : stderr);
+               return 0;
+             }
+             if (fd < 0 || !libcore_vfs().is_open(fd)) throw_errno(rt, name, kEBADF);
+             throw_errno(rt, name, kENOTTY);
+           });
+  }
+  // dladdr: no native library is mapped in this process.
+  r.bind(lx, "dladdr", "(J)Landroid/system/StructDlInfo;", [](Runtime&, NativeArgs&) -> uint64_t { return kNull; });
   r.bind(lx, "strerror", "(I)Ljava/lang/String;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     return rt.new_string_utf8(strerror_text(a.i32(1)));
   });

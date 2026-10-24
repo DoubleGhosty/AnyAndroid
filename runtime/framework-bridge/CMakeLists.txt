@@ -46,6 +46,6 @@ add_library(aa_bridge STATIC
   text_services.cpp)
 target_link_libraries(aa_bridge PRIVATE aa_miniz aa_regex aa_skia)
 if(WIN32)
-  target_link_libraries(aa_bridge PRIVATE ws2_32)  # sockets of libcore (libcore_net.cpp)
+  target_link_libraries(aa_bridge PRIVATE ws2_32 iphlpapi)  # sockets and interfaces of libcore (libcore_net.cpp)
 endif()
 target_link_libraries(aa_bridge PUBLIC aa_dex aa_vfs aa_res aa_text)

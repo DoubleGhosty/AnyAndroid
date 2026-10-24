@@ -67,4 +67,8 @@ dup, dup2, fcntl, ioctl : FIONREAD 7, FD_CLOEXEC de la copie false
 getpgid, umask : groupe true, umask rendu 22
 socket sans la permission INTERNET : socket failed: EACCES (Permission denied)
 nom sans la permission INTERNET : SecurityException: Permission denied (missing INTERNET permission?) (cause android_getaddrinfo failed: EAI_NODATA (No address associated with hostname))
+utilisateurs de bionic : u0_a0 /data /bin/sh, root 0, u1_system 101000 /, u10_a7 1010007, getpwnam_r failed: ENOENT (No such file or directory)
+limites et identité : nofile 32768/32768, setuid(0) setuid failed: EPERM (Operation not permitted), capacités 2 mots à 0, version inconnue capget failed: EINVAL (Invalid argument) puis 0x20080522, waitpid waitpid failed: ECHILD (No child processes)
+strsignal : Segmentation fault / Unknown signal 31 / Real-time signal 3 / Unknown signal 99
+memfd, mmap, mincore, sendfile : résident 1, sendfile 4 octets : andr, décalage 7, readNoThrow fermé -9
 OsConstantsHolder et sysconf : AI_ADDRCONFIG 0x400, EAI_NONAME 8, SIGRTMIN 42, O_NOFOLLOW 0400000, sysconf(_SC_PAGESIZE = 0x27) 4096

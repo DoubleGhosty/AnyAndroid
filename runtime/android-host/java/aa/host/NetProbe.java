@@ -1,6 +1,11 @@
 package aa.host;
 
+import android.system.Os;
+import android.system.OsConstants;
+import android.system.StructIfaddrs;
+import android.system.StructMsghdr;
 import java.io.BufferedReader;
+import java.io.FileDescriptor;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -9,12 +14,17 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 
 /**
  * Self-test of libcore's sockets (G2) on AOSP's real libcore, through java.net as an application
@@ -115,6 +125,38 @@ public final class NetProbe {
       server.close();
       waiter.join(5000);
       return seen[0] + ", fil terminé " + !waiter.isAlive();
+    });
+    // lo, whatever the host's adapters (which differ from one machine to another).
+    check("interface lo", () -> {
+      NetworkInterface lo = NetworkInterface.getByName("lo");
+      List<String> addresses = new ArrayList<>();
+      for (InetAddress a : Collections.list(lo.getInetAddresses())) addresses.add(a.getHostAddress());
+      int entries = 0;
+      for (StructIfaddrs ifa : Os.getifaddrs()) {
+        if (ifa.ifa_name.equals("lo")) entries++;
+      }
+      return "index " + lo.getIndex() + " (if_nametoindex " + Os.if_nametoindex("lo") + "), boucle " + lo.isLoopback()
+          + ", active " + lo.isUp() + ", MTU " + lo.getMTU() + ", " + addresses + ", " + entries + " entrées getifaddrs"
+          + ", adresse matérielle " + lo.getHardwareAddress() + ", par adresse " + NetworkInterface.getByInetAddress(LOOPBACK).getName()
+          + ", inconnue " + NetworkInterface.getByName("aa0");
+    });
+    check("sendmsg et recvmsg", () -> {
+      FileDescriptor fd = Os.socket(OsConstants.AF_INET, OsConstants.SOCK_DGRAM, 0);
+      try {
+        Os.bind(fd, LOOPBACK, 0);
+        InetSocketAddress self = (InetSocketAddress) Os.getsockname(fd);
+        ByteBuffer[] out = {ByteBuffer.wrap("ras".getBytes(StandardCharsets.US_ASCII)),
+                            ByteBuffer.wrap("semblé".getBytes(StandardCharsets.UTF_8))};
+        int sent = Os.sendmsg(fd, new StructMsghdr(self, out, null, 0), 0);
+        ByteBuffer in = ByteBuffer.allocate(5);
+        InetSocketAddress from = new InetSocketAddress(0);
+        StructMsghdr msg = new StructMsghdr(from, new ByteBuffer[] {in}, null, 0);
+        int got = Os.recvmsg(fd, msg, 0);
+        return sent + " envoyés, " + got + " reçus : " + new String(in.array(), 0, got, StandardCharsets.US_ASCII) + ", MSG_TRUNC "
+            + ((msg.msg_flags & OsConstants.MSG_TRUNC) != 0) + ", de " + from.getAddress() + " port " + (from.getPort() == self.getPort());
+      } finally {
+        Os.close(fd);
+      }
     });
     check("UDP en boucle locale", () -> {
       try (DatagramSocket a = new DatagramSocket(0, LOOPBACK); DatagramSocket b = new DatagramSocket(0, LOOPBACK)) {

@@ -1073,16 +1073,6 @@ int32_t Vfs::install(std::shared_ptr<OpenFile> file, int32_t flags, std::string 
   return fd;
 }
 
-void Vfs::replace(int32_t fd, std::shared_ptr<OpenFile> file, int32_t flags, std::string path) {
-  if (fd < 3) throw VfsError{kEBADF, "fd " + std::to_string(fd)};
-  if (!fds_.count(fd) && fds_.size() >= kMaxOpenFiles) throw VfsError{kEMFILE, path};
-  auto entry = std::make_shared<Fd>();
-  entry->file = std::move(file);
-  entry->flags = flags;
-  entry->path = std::move(path);
-  fds_[fd] = std::move(entry);
-}
-
 int32_t Vfs::lowest_free_fd() const {
   int32_t fd = 3;
   while (fds_.count(fd)) ++fd;
