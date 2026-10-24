@@ -381,10 +381,18 @@ void register_unix_native_dispatcher(rt::NativeRegistry& r) {
       return 0;
     }, S::kStub, "droits fixes dans le système de fichiers virtuel");
   }
-  // No `link` permission for applications in Android's SELinux policy.
-  r.bind(und, "link0", "(JJ)V", [](Runtime& rt, NativeArgs&) -> uint64_t { throw_unix(rt, vfs::kEACCES); });
-  r.bind(und, "symlink0", "(JJ)V", [](Runtime& rt, NativeArgs&) -> uint64_t { throw_unix(rt, vfs::kEPERM); },
-         S::kUnsupported, "aucun lien créé par l'application (bac à sable)");
+  // link: EACCES once checked (no `link` permission in Android's SELinux policy).
+  r.bind(und, "link0", "(JJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::string from = path_from_address(rt, a.i64(0)), to = path_from_address(rt, a.i64(2));
+    unix_call(rt, [&] { the_vfs().link(from, to); });
+    return 0;
+  });
+  // symlink0(name1, name2): name2 becomes a link to name1, stored as given.
+  r.bind(und, "symlink0", "(JJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::string target = path_from_address(rt, a.i64(0)), path = path_from_address(rt, a.i64(2));
+    unix_call(rt, [&] { the_vfs().symlink(target, path); });
+    return 0;
+  });
   // mknod: a regular file (S_IFREG or no type), as open(O_CREAT|O_EXCL);
   // devices need CAP_MKNOD, FIFOs a node type the Vfs lacks.
   r.bind(und, "mknod0", "(JIJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {

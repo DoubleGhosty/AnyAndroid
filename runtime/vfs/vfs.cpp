@@ -564,6 +564,44 @@ void host_rename(const std::filesystem::path& from, const std::filesystem::path&
 }
 #endif
 
+// Host attributes (FILE_ATTRIBUTE_*) of `p`; 0 when unknown or off Windows.
+constexpr uint32_t kAttrSystem = 0x4, kAttrReparse = 0x400;
+uint32_t host_attributes(const std::filesystem::path& p) {
+#ifdef _WIN32
+  DWORD attrs = GetFileAttributesW(p.c_str());
+  return attrs == INVALID_FILE_ATTRIBUTES ? 0 : attrs;
+#else
+  (void)p;
+  return 0;
+#endif
+}
+
+// Symbolic links made in host areas: a host file with the SYSTEM attribute
+// whose content is kLinkMagic then the target, as Cygwin stores them. NTFS's
+// own links need a privilege, and host areas never follow reparse points.
+constexpr char kLinkMagic[] = "!<symlink>";
+constexpr size_t kLinkMagicLen = sizeof kLinkMagic - 1;
+
+// The target stored in `p`, nullopt if `p` is not such a link.
+std::optional<std::string> host_link_target(const std::filesystem::path& p) {
+#ifdef _WIN32
+  HANDLE h = CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                         OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  if (h == INVALID_HANDLE_VALUE) return std::nullopt;
+  std::string data(kLinkMagicLen + kMaxPath, '\0');  // a target is shorter than PATH_MAX
+  DWORD got = 0;
+  bool ok = ReadFile(h, data.data(), DWORD(data.size()), &got, nullptr);
+  CloseHandle(h);
+  if (!ok || got <= kLinkMagicLen || got >= data.size() || data.compare(0, kLinkMagicLen, kLinkMagic) != 0) {
+    return std::nullopt;
+  }
+  return data.substr(kLinkMagicLen, got - kLinkMagicLen);
+#else
+  (void)p;
+  return std::nullopt;
+#endif
+}
+
 class HostMount final : public Mount {
  public:
   HostMount(std::filesystem::path dir, bool read_only) : root_(std::move(dir)), read_only_(read_only) {
@@ -577,7 +615,9 @@ class HostMount final : public Mount {
     std::error_code ec;
     auto st = std::filesystem::symlink_status(p, ec);
     if (ec || !std::filesystem::exists(st)) return std::nullopt;
-    if (std::filesystem::is_symlink(st) || is_reparse_point(p)) throw VfsError{kEACCES, rel};  // never followed
+    uint32_t attrs = host_attributes(p);
+    // Junctions and symbolic links created on the host are never traversed.
+    if (std::filesystem::is_symlink(st) || (attrs & kAttrReparse)) throw VfsError{kEACCES, rel};
     VStat v;
     v.uid = v.gid = 10000;
     auto t = std::filesystem::last_write_time(p, ec);
@@ -589,6 +629,10 @@ class HostMount final : public Mount {
       v.type = NodeType::kDirectory;
       v.mode = kIfDir | (read_only_ ? 0755 : 0771);
       v.nlink = 2;
+    } else if (auto target = (attrs & kAttrSystem) ? host_link_target(p) : std::nullopt) {
+      v.type = NodeType::kSymlink;
+      v.mode = kIfLnk | 0777;
+      v.size = target->size();
     } else {
       v.type = NodeType::kFile;
       v.mode = kIfReg | (read_only_ ? 0644 : 0660);
@@ -598,8 +642,12 @@ class HostMount final : public Mount {
     return v;
   }
   std::string readlink(const std::string& rel) override {
-    if (!lstat(rel)) throw VfsError{kENOENT, rel};
-    throw VfsError{kEINVAL, rel};  // no symbolic links in host areas
+    auto st = lstat(rel);
+    if (!st) throw VfsError{kENOENT, rel};
+    if (st->type != NodeType::kSymlink) throw VfsError{kEINVAL, rel};
+    auto target = host_link_target(host(rel));
+    if (!target) throw VfsError{kENOENT, rel};  // removed in between
+    return *target;
   }
   std::vector<std::string> list(const std::string& rel) override {
     auto st = lstat(rel);
@@ -621,6 +669,7 @@ class HostMount final : public Mount {
     auto st = lstat(rel);
     if (st && (flags & kO_CREAT) && (flags & kO_EXCL)) throw VfsError{kEEXIST, rel};
     if (!st && !(flags & kO_CREAT)) throw VfsError{kENOENT, rel};
+    if (st && st->type == NodeType::kSymlink) throw VfsError{kELOOP, rel};  // the Vfs follows links
     if (st && st->type == NodeType::kDirectory) {
       if (acc != kO_RDONLY) throw VfsError{kEISDIR, rel};
       VStat dir = *st;
@@ -704,6 +753,29 @@ class HostMount final : public Mount {
         std::chrono::system_clock::time_point(std::chrono::seconds(seconds)));
     std::filesystem::last_write_time(host(rel), t, ec);
   }
+  void symlink(const std::string& rel, const std::string& target) override {
+    if (read_only_) throw VfsError{kEROFS, rel};
+#ifdef _WIN32
+    std::filesystem::path p = host(rel);
+    HANDLE h = CreateFileW(p.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                           FILE_ATTRIBUTE_SYSTEM | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+      DWORD e = GetLastError();
+      throw VfsError{e == ERROR_FILE_EXISTS ? kEEXIST : host_errno(e), rel};
+    }
+    std::string data = kLinkMagic + target;
+    DWORD done = 0;
+    bool ok = WriteFile(h, data.data(), DWORD(data.size()), &done, nullptr) && done == data.size();
+    CloseHandle(h);
+    if (!ok) {
+      DeleteFileW(p.c_str());
+      throw VfsError{kENOSPC, rel};
+    }
+#else
+    (void)target;
+    throw VfsError{kEIO, rel};
+#endif
+  }
 
  private:
   std::filesystem::path host(const std::string& rel) const {
@@ -722,16 +794,6 @@ class HostMount final : public Mount {
     if (!st) throw VfsError{kENOENT, rel};
     if (st->type != NodeType::kDirectory) throw VfsError{kENOTDIR, rel};
   }
-  // Junctions and symbolic links created on the host are never traversed.
-  bool is_reparse_point(const std::filesystem::path& p) const {
-#ifdef _WIN32
-    DWORD attrs = GetFileAttributesW(p.wstring().c_str());
-    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_REPARSE_POINT);
-#else
-    return false;
-#endif
-  }
-
   std::filesystem::path root_;
   bool read_only_;
 };
@@ -1034,6 +1096,36 @@ void Vfs::rename(std::string_view from, std::string_view to) {
   la.mount->rename(la.rel, lb.rel);
 }
 
+void Vfs::check_new_name(const std::string& p) {
+  if (p == "/" || mount_ancestor(p)) throw VfsError{kEEXIST, p};
+  size_t slash = p.find_last_of('/');
+  if (stat(slash == 0 ? "/" : p.substr(0, slash)).type != NodeType::kDirectory) throw VfsError{kENOTDIR, p};
+  Located l = locate(p);
+  if (l.rel == "/" || l.mount->lstat(l.rel)) throw VfsError{kEEXIST, p};
+}
+
+void Vfs::symlink(std::string_view target, std::string_view path) {
+  // As the kernel's getname(): an empty or overlong target first.
+  if (target.empty()) throw VfsError{kENOENT, std::string(path)};
+  if (target.size() >= kMaxPath) throw VfsError{kENAMETOOLONG, std::string(path)};
+  std::string p = resolve(path, false);
+  check_new_name(p);
+  Located l = locate(p);
+  l.mount->symlink(l.rel, std::string(target));
+}
+
+void Vfs::link(std::string_view from, std::string_view to) {
+  std::string a = resolve(from, false);  // bionic's link() is linkat(..., 0): a link names itself
+  VStat src = stat(a, false);
+  std::string b = resolve(to, false);
+  check_new_name(b);
+  Located la = locate(a), lb = locate(b);
+  if (!lb.mount->writable()) throw VfsError{kEROFS, b};
+  if (la.mount != lb.mount) throw VfsError{kEXDEV, a};
+  if (src.type == NodeType::kDirectory) throw VfsError{kEPERM, a};
+  throw VfsError{kEACCES, b};  // SELinux: no `link` on app_data_file (create_file_perms)
+}
+
 void Vfs::set_mtime(std::string_view path, int64_t seconds) {
   std::string p = resolve(path);
   Located l = locate(p);
@@ -1047,9 +1139,11 @@ bool Vfs::writable(std::string_view path) {
 
 int32_t Vfs::open(std::string_view path, int32_t flags, uint32_t mode) {
   if (fds_.size() >= kMaxOpenFiles) throw VfsError{kEMFILE, std::string(path)};
-  std::string p = resolve(path, !(flags & kO_NOFOLLOW));
+  // O_CREAT | O_EXCL fails on any existing name, a symbolic link included.
+  bool excl = (flags & kO_CREAT) && (flags & kO_EXCL);
+  std::string p = resolve(path, !(flags & kO_NOFOLLOW) && !excl);
   Located l = locate(p);
-  if (flags & kO_NOFOLLOW) {
+  if ((flags & kO_NOFOLLOW) && !excl) {
     auto st = l.mount->lstat(l.rel);
     if (st && st->type == NodeType::kSymlink) throw VfsError{kELOOP, p};
   }

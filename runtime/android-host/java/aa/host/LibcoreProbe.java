@@ -869,6 +869,37 @@ public final class LibcoreProbe {
       return "mtime " + modified + ", propriétaire " + owner + ", groupe " + group + ", lien " + link + ", copie " + copied
           + ", flux sûr " + secure + ", supprimé par lui " + deleted;
     });
+    // Android 17's SELinux policy lets applications create symbolic links in
+    // their data (app_data_file:lnk_file), unlike hard links.
+    check("liens symboliques", () -> {
+      File dir = scratch("liens");
+      dir.mkdirs();
+      java.nio.file.Path target = java.nio.file.Files.write(new File(dir, "cible.txt").toPath(),
+          "contenu".getBytes(StandardCharsets.US_ASCII));
+      java.nio.file.Path link = java.nio.file.Files.createSymbolicLink(dir.toPath().resolve("lien"),
+          java.nio.file.Paths.get("cible.txt"));
+      String read = new String(java.nio.file.Files.readAllBytes(link), StandardCharsets.US_ASCII);
+      int mode = (Integer) java.nio.file.Files.getAttribute(link, "unix:mode", java.nio.file.LinkOption.NOFOLLOW_LINKS);
+      String to = java.nio.file.Files.readSymbolicLink(link).toString();
+      Os.symlink(dir.getPath() + "/absente", dir.getPath() + "/pendant");
+      String dangling = Os.readlink(dir.getPath() + "/pendant");
+      boolean exists = new File(dir, "pendant").exists();
+      String again;
+      try {
+        Os.symlink("x", dir.getPath() + "/lien");
+        again = "recréé";
+      } catch (android.system.ErrnoException e) {
+        again = e.getMessage();
+      }
+      String canonical = new File(dir, "lien").getCanonicalFile().getName();
+      boolean removed = new File(dir, "lien").delete() && new File(dir, "pendant").delete();
+      boolean kept = java.nio.file.Files.exists(target);
+      java.nio.file.Files.delete(target);
+      dir.delete();
+      return read + " par le lien, S_ISLNK " + OsConstants.S_ISLNK(mode) + " vers " + to + ", pendant vers "
+          + dangling.substring(dangling.lastIndexOf('/') + 1) + " existe " + exists + ", " + again + ", canonique "
+          + canonical + ", liens supprimés " + removed + ", cible gardée " + kept;
+    });
     check("transferTo et MappedByteBuffer", () -> {
       File src = scratch("transfert.bin");
       File dst = scratch("transfert.copie");

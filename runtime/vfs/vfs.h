@@ -21,7 +21,8 @@
 //  - APEX modules under /apex/<name>, opened on demand from /system/apex;
 //  - the application's APK under /data/app/<package>, read-only, from memory;
 //  - a host directory per application for writable areas (/data, /sdcard),
-//    sandboxed: Linux names are encoded, reparse points refused;
+//    sandboxed: Linux names are encoded, reparse points refused, symbolic
+//    links made by the application stored as marked host files;
 //  - /dev (null, zero, random, urandom).
 // Symbolic links are resolved at the VFS level, so they may cross mounts.
 // Errors are Linux errno values (VfsError), never host error codes.
@@ -85,6 +86,8 @@ class Mount {
   virtual void remove(const std::string& rel, bool directory) { throw VfsError{kEROFS, rel}; }
   virtual void rename(const std::string& from, const std::string& to) { throw VfsError{kEROFS, from}; }
   virtual void set_mtime(const std::string& rel, int64_t seconds) { throw VfsError{kEROFS, rel}; }
+  // A symbolic link at `rel` (absent, parent checked by the caller's lstat).
+  virtual void symlink(const std::string& rel, const std::string& target) { throw VfsError{kEROFS, rel}; }
   virtual bool writable() const { return false; }
 };
 
@@ -130,6 +133,11 @@ class Vfs {
   void unlink(std::string_view path);
   void rmdir(std::string_view path);
   void rename(std::string_view from, std::string_view to);
+  // symlink(2): `path` becomes a link to `target`, stored as given.
+  void symlink(std::string_view target, std::string_view path);
+  // link(2): the checks of Linux, then EACCES, as Android's SELinux policy
+  // grants applications no `link` permission on their files.
+  void link(std::string_view from, std::string_view to);
   void set_mtime(std::string_view path, int64_t seconds);
   bool writable(std::string_view path);
 
@@ -178,6 +186,8 @@ class Vfs {
   };
   Located locate(const std::string& resolved);
   bool mount_ancestor(const std::string& resolved) const;  // strict parent of a mount point
+  // A name to create: parent directory present (ENOENT, ENOTDIR), name free (EEXIST).
+  void check_new_name(const std::string& resolved);
   Fd& fd_entry(int32_t fd);
   int32_t lowest_free_fd() const;
 

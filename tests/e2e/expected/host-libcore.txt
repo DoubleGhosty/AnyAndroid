@@ -72,6 +72,7 @@ limites et identité : nofile 32768/32768, setuid(0) setuid failed: EPERM (Opera
 strsignal : Segmentation fault / Unknown signal 31 / Real-time signal 3 / Unknown signal 99
 memfd, mmap, mincore, sendfile : résident 1, sendfile 4 octets : andr, décalage 7, readNoThrow fermé -9
 NIO.2 de sun.nio.fs : mtime 1700000000000, propriétaire u0_a0, groupe u0_a0, lien AccessDeniedException null, copie contenu, flux sûr true, supprimé par lui 1
+liens symboliques : contenu par le lien, S_ISLNK true vers cible.txt, pendant vers absente existe false, symlink failed: EEXIST (File exists), canonique cible.txt, liens supprimés true, cible gardée true
 transferTo et MappedByteBuffer : 5 octets transférés : 23456, mappé chargé true 9
 VMDebug : 3 marqueurs comptés 3, statistiques 11, gc-count true, agent SecurityException: Can't attach agent, process is not debuggable.
 OsConstantsHolder et sysconf : AI_ADDRCONFIG 0x400, EAI_NONAME 8, SIGRTMIN 42, O_NOFOLLOW 0400000, sysconf(_SC_PAGESIZE = 0x27) 4096

@@ -13,6 +13,14 @@ public final class Os {
     throw new RuntimeException("stub");
   }
 
+  public static void symlink(String oldPath, String newPath) throws ErrnoException {
+    throw new RuntimeException("stub");
+  }
+
+  public static String readlink(String path) throws ErrnoException {
+    throw new RuntimeException("stub");
+  }
+
   public static int readv(FileDescriptor fd, Object[] buffers, int[] offsets, int[] byteCounts)
       throws ErrnoException, java.io.InterruptedIOException {
     throw new RuntimeException("stub");

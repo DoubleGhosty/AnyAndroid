@@ -676,13 +676,17 @@ void register_linux(rt::NativeRegistry& r) {
       return 0;
     }, S::kStub, "droits fixes dans le système de fichiers virtuel");
   }
-  r.bind(lx, "symlink", "(Ljava/lang/String;Ljava/lang/String;)V", [](Runtime& rt, NativeArgs&) -> uint64_t {
-    throw_errno(rt, "symlink", vfs::kEPERM);
-  }, S::kUnsupported, "aucun lien créé par l'application (bac à sable)");
+  r.bind(lx, "symlink", "(Ljava/lang/String;Ljava/lang/String;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::string target = path_arg(rt, a.h(1)), path = path_arg(rt, a.h(2));
+    guarded(rt, "symlink", [&] { the_vfs().symlink(target, path); });
+    return 0;
+  });
   // Android's SELinux policy grants applications no `link` on their files
-  // (create_file_perms lacks it): every hard link fails with EACCES.
-  r.bind(lx, "link", "(Ljava/lang/String;Ljava/lang/String;)V", [](Runtime& rt, NativeArgs&) -> uint64_t {
-    throw_errno(rt, "link", vfs::kEACCES);
+  // (create_file_perms lacks it): a hard link fails with EACCES once checked.
+  r.bind(lx, "link", "(Ljava/lang/String;Ljava/lang/String;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::string from = path_arg(rt, a.h(1)), to = path_arg(rt, a.h(2));
+    guarded(rt, "link", [&] { the_vfs().link(from, to); });
+    return 0;
   });
   r.bind(lx, "getxattr", "(Ljava/lang/String;Ljava/lang/String;)[B", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     std::string path = path_arg(rt, a.h(1));

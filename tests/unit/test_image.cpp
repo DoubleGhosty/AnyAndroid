@@ -1403,6 +1403,69 @@ TEST(vfs_sandboxed_data_areas) {
   std::filesystem::remove_all(root);
 }
 
+// Android's SELinux policy lets an application create symbolic links in its
+// data (app_data_file:lnk_file create_file_perms) but grants no `link` on its
+// files: hard links fail with EACCES once the kernel's checks pass.
+TEST(vfs_symbolic_and_hard_links_in_host_areas) {
+  auto root = fresh_dir("vfs-links");
+  vfs::LayoutOptions lo;
+  lo.data_root = root;
+  lo.package = "com.example.app";
+  auto v = vfs::make_android_vfs(lo);
+  const std::string d = "/data/data/com.example.app/";
+
+  v->write_file(d + "cible.txt", bytes("contenu"));
+  v->symlink("cible.txt", d + "rel");
+  v->symlink(d + "sub", d + "abs");  // dangling until sub exists
+  vfs::VStat l = v->stat(d + "rel", false);
+  CHECK(l.type == vfs::NodeType::kSymlink);
+  CHECK_EQ(l.mode, uint32_t(0120777));
+  CHECK_EQ(l.size, uint64_t(9));
+  CHECK_EQ(v->readlink(d + "rel"), std::string("cible.txt"));
+  CHECK_EQ(str(v->read_file(d + "rel")), std::string("contenu"));
+  CHECK(v->stat(d + "rel").type == vfs::NodeType::kFile);
+  CHECK_EQ(vfs_errno([&] { v->stat(d + "abs"); }), vfs::kENOENT);
+  v->mkdir(d + "sub", 0700);
+  v->write_file(d + "abs/f", bytes("par le lien"));  // a link inside a path
+  CHECK_EQ(str(v->read_file(d + "sub/f")), std::string("par le lien"));
+  auto names = v->list(d);
+  CHECK(std::find(names.begin(), names.end(), "rel") != names.end());
+  CHECK(std::find(names.begin(), names.end(), "abs") != names.end());
+  CHECK_EQ(vfs_errno([&] { v->readlink(d + "cible.txt"); }), vfs::kEINVAL);
+
+  CHECK_EQ(vfs_errno([&] { v->symlink("x", d + "rel"); }), vfs::kEEXIST);
+  CHECK_EQ(vfs_errno([&] { v->symlink("x", d + "abs"); }), vfs::kEEXIST);
+  CHECK_EQ(vfs_errno([&] { v->symlink("", d + "vide"); }), vfs::kENOENT);
+  CHECK_EQ(vfs_errno([&] { v->symlink(std::string(4096, 'x'), d + "long"); }), vfs::kENAMETOOLONG);
+  CHECK_EQ(vfs_errno([&] { v->symlink("x", d + "absent/l"); }), vfs::kENOENT);
+  CHECK_EQ(vfs_errno([&] { v->symlink("x", d + "cible.txt/l"); }), vfs::kENOTDIR);
+  CHECK_EQ(vfs_errno([&] { v->symlink("x", "/data"); }), vfs::kEEXIST);
+  CHECK_EQ(vfs_errno([&] { v->open(d + "rel", vfs::kO_RDONLY | vfs::kO_NOFOLLOW, 0); }), vfs::kELOOP);
+  CHECK_EQ(vfs_errno([&] { v->open(d + "abs", vfs::kO_WRONLY | vfs::kO_CREAT | vfs::kO_EXCL, 0600); }), vfs::kEEXIST);
+  v->symlink("boucle2", d + "boucle1");
+  v->symlink("boucle1", d + "boucle2");
+  CHECK_EQ(vfs_errno([&] { v->read_file(d + "boucle1"); }), vfs::kELOOP);
+
+  // rename and unlink act on the link, never on its target.
+  v->rename(d + "rel", d + "rel2");
+  CHECK_EQ(v->readlink(d + "rel2"), std::string("cible.txt"));
+  v->unlink(d + "rel2");
+  CHECK(!v->exists(d + "rel2"));
+  CHECK_EQ(str(v->read_file(d + "cible.txt")), std::string("contenu"));
+  CHECK_EQ(vfs_errno([&] { v->rmdir(d + "abs"); }), vfs::kENOTDIR);
+  // A host file holding the marker is not a link without the host attribute.
+  v->write_file(d + "faux", bytes("!<symlink>/etc"));
+  CHECK(v->stat(d + "faux", false).type == vfs::NodeType::kFile);
+
+  CHECK_EQ(vfs_errno([&] { v->link(d + "cible.txt", d + "dur"); }), vfs::kEACCES);
+  CHECK_EQ(vfs_errno([&] { v->link(d + "absent", d + "dur"); }), vfs::kENOENT);
+  CHECK_EQ(vfs_errno([&] { v->link(d + "cible.txt", d + "abs"); }), vfs::kEEXIST);
+  CHECK_EQ(vfs_errno([&] { v->link(d + "sub", d + "dur"); }), vfs::kEPERM);
+  CHECK_EQ(vfs_errno([&] { v->link(d + "cible.txt", "/sdcard/dur"); }), vfs::kEXDEV);
+  CHECK(!v->exists(d + "dur"));
+  std::filesystem::remove_all(root);
+}
+
 // SQLite, AtomicFile and SharedPreferences delete or replace files that are
 // still open, as Linux allows: the name changes at once, open descriptors keep
 // the file they had. Windows's default (delete pending until the last handle
