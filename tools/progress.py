@@ -174,50 +174,39 @@ def parse_api_matrix():
     }
 
 
+LIBCORE_NATIVES_FILE = DOCS_DIR / "compatibility" / "libcore-natives.txt"
+
+
 def parse_libcore_natives():
-    """Retourne la couverture des méthodes natives AOSP libcore."""
-    modules = [
-        {"name": "core-oj.jar", "done": 298, "total": 615, "percent": 48.5},
-        {"name": "core-libart.jar", "done": 141, "total": 350, "percent": 40.3},
-        {"name": "core-icu4j.jar", "done": 16, "total": 69, "percent": 23.2},
-        {"name": "okhttp.jar", "done": 0, "total": 0, "percent": 100.0},
-        {"name": "bouncycastle.jar", "done": 0, "total": 0, "percent": 100.0},
-        {"name": "apache-xml.jar", "done": 0, "total": 0, "percent": 100.0},
-    ]
-    vm_core_handled = 33
-    total_natives = 1034
-    linked_natives = 455
-    implemented_natives = linked_natives + vm_core_handled
-    missing_natives = total_natives - implemented_natives
-
-    top_missing_classes = [
-        {"class": "libcore.io.Linux", "missing": 83},
-        {"class": "dalvik.system.VMDebug", "missing": 38},
-        {"class": "sun.nio.fs.UnixNativeDispatcher", "missing": 32},
-        {"class": "java.lang.invoke.VarHandle", "missing": 31},
-        {"class": "sun.nio.ch.Net", "missing": 30},
-        {"class": "com.android.i18n.timezone.internal.Memory", "missing": 22},
-        {"class": "dalvik.system.DexFile", "missing": 20},
-        {"class": "java.lang.reflect.Field", "missing": 15},
-        {"class": "java.lang.Thread", "missing": 14},
-        {"class": "libcore.io.Memory", "missing": 14},
-        {"class": "sun.misc.Unsafe", "missing": 12},
-        {"class": "com.android.icu.util.regex.MatcherNative", "missing": 11},
-        {"class": "java.lang.Character", "missing": 11},
-        {"class": "java.lang.reflect.Executable", "missing": 11},
-        {"class": "java.util.zip.Deflater", "missing": 10},
-        {"class": "org.apache.harmony.xml.ExpatParser", "missing": 10},
-    ]
-
+    """Couverture des méthodes natives de la libcore d'AOSP, lue dans le rapport de
+    `anyandroid libcore natives --bootclasspath <libcore17> --libcore-only`
+    (docs/compatibility/libcore-natives.txt, régénéré avec la commande)."""
+    modules, top_missing = [], []
+    total = linked = vm_core = unreachable = no_impl = missing = 0
+    if LIBCORE_NATIVES_FILE.exists():
+        text = LIBCORE_NATIVES_FILE.read_text(encoding="utf-8")
+        for m in re.finditer(r"/([\w.-]+\.jar)!classes\d*\.dex : (\d+) / (\d+) natives liées", text):
+            done, count = int(m.group(2)), int(m.group(3))
+            modules.append({"name": m.group(1), "done": done, "total": count,
+                            "percent": round(100 * done / count, 1) if count else 100.0})
+        m = re.search(r"Total : (\d+) méthodes natives ; (\d+) liées par AnyAndroid, (\d+) remplacées par le cœur"
+                      r".*?, (\d+) inatteignables.*?, (\d+) sans implémentation.*?, (\d+) manquantes", text)
+        if m:
+            total, linked, vm_core, unreachable, no_impl, missing = (int(g) for g in m.groups())
+        for m in re.finditer(r"^\s+([\w.$]+) \((\d+)\)\s*$", text, re.M):
+            top_missing.append({"class": m.group(1), "missing": int(m.group(2))})
+    # Natives that need no implementation: replaced by the VM core, unreachable,
+    # or without implementation in Android 17 itself.
+    done = linked + vm_core + unreachable + no_impl
     return {
-        "total": total_natives,
-        "linked": linked_natives,
-        "vm_core": vm_core_handled,
-        "done": implemented_natives,
-        "missing": missing_natives,
-        "percent": round(100 * implemented_natives / total_natives, 1),
+        "total": total,
+        "linked": linked,
+        "vm_core": vm_core,
+        "done": done,
+        "missing": missing,
+        "percent": round(100 * done / total, 1) if total else 0.0,
         "modules": modules,
-        "top_missing": top_missing_classes
+        "top_missing": top_missing
     }
 
 
@@ -234,10 +223,10 @@ def parse_dalvik_opcodes():
         {"name": "Comparisons", "range": "0x2d..0x31", "done": 5, "total": 5},
         {"name": "If Branching", "range": "0x32..0x3d", "done": 12, "total": 12},
         {"name": "Array & Field Access", "range": "0x44..0x6d", "done": 42, "total": 42},
-        {"name": "Method Invocation", "range": "0x6e..0x78", "done": 9, "total": 9},
+        {"name": "Method Invocation", "range": "0x6e..0x78", "done": 10, "total": 10, "notes": "0x73 non assigné"},
         {"name": "Arithmetic & Logic", "range": "0x7b..0xe2", "done": 104, "total": 104},
-        {"name": "Extended & Polymorphic", "range": "0xfa..0xfb", "done": 1, "total": 2, "notes": "invoke-polymorphic supporté (VarHandle), invoke-custom stub"},
-        {"name": "Opcodes réservés / unused", "range": "autres", "done": 37, "total": 37, "notes": "non requis dans DEX (payloads / non assignés)"}
+        {"name": "Extended & Polymorphic", "range": "0xfa..0xff", "done": 6, "total": 6, "notes": "invoke-polymorphic (VarHandle, MethodHandle), invoke-custom, const-method-handle, const-method-type"},
+        {"name": "Opcodes réservés / unused", "range": "autres", "done": 32, "total": 32, "notes": "non assignés : 0x3e..0x43, 0x73, 0x79..0x7a, 0xe3..0xf9"}
     ]
     done = sum(g["done"] for g in groups)
     total = sum(g["total"] for g in groups)
@@ -431,18 +420,15 @@ def render_treemap_svg(data):
     p2_x = p1_x + panel_w + gap
     parts.append(f'<g id="panel-libcore">')
     parts.append(f'<text x="{p2_x}" y="{panel_y + 16}" font-size="14" font-weight="600" fill="{TEXT_COLOR}">Natives Libcore AOSP 17</text>')
-    parts.append(f'<text x="{p2_x + panel_w}" y="{panel_y + 16}" font-size="12" text-anchor="end" fill="{TEXT_MUTED}">{libcore_pct}% ({data["libcore"]["done"]}/{data["libcore"]["total"]})</text>')
+    parts.append(f'<text x="{p2_x + panel_w}" y="{panel_y + 16}" font-size="12" text-anchor="end" fill="{TEXT_MUTED}">{libcore_pct}% ({data["libcore"]["done"]}/{data["libcore"]["total"]}, {data["libcore"]["linked"]} liées)</text>')
     
     parts.append(f'<rect x="{p2_x}" y="{map1_y}" width="{panel_w}" height="{map1_h}" rx="4" fill="{PANEL_BG}" stroke="{BORDER_COLOR}" stroke-width="1"/>')
     
-    lib_mods = [m for m in data["libcore"]["modules"] if m["total"] > 0]
-    # Ajouter le groupe pour le cœur VM
-    lib_groups = [
-        {"name": "core-oj.jar", "done": 298, "total": 615},
-        {"name": "core-libart.jar", "done": 141, "total": 350},
-        {"name": "core-icu4j.jar", "done": 16, "total": 69},
-        {"name": "Cœur VM (Object, String...)", "done": 33, "total": 33}
-    ]
+    # One group per module of the report: its natives bound by AnyAndroid in
+    # green. Those needing no binding (replaced by the VM core, unreachable,
+    # without implementation in Android 17) are counted in the header only:
+    # the report gives their total, not their module.
+    lib_groups = [m for m in data["libcore"]["modules"] if m["total"] > 0]
     lib_values = [g["total"] for g in lib_groups]
     rects2 = squarify(lib_values, p2_x + 2, map1_y + 2, panel_w - 4, map1_h - 4)
 
