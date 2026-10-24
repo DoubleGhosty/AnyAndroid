@@ -26,6 +26,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.lang.reflect.TypeVariable;
+import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
@@ -71,6 +72,7 @@ public final class LibcoreProbe {
     access();
     invokeDynamic();
     smallNatives();
+    bigIntegers();
     timeZones();
     posix();
   }
@@ -440,6 +442,29 @@ public final class LibcoreProbe {
       } catch (InvocationTargetException e) {
         return String.valueOf(e.getCause());
       }
+    });
+  }
+
+  // --- BigInteger's native paths (NativeBN: multiply from 50 ints, division from a 40-int
+  // divisor, modPow for a modulus of 3 ints or more) -----------------------------------------
+
+  static void bigIntegers() {
+    BigInteger a = BigInteger.valueOf(3).pow(1500);
+    BigInteger b = BigInteger.valueOf(7).pow(900).add(BigInteger.ONE);
+    BigInteger e18 = BigInteger.TEN.pow(18);
+    check("BigInteger.multiply", () -> {
+      BigInteger p = a.multiply(b);
+      return p.bitLength() + " bits, modulo 10^18 : " + p.mod(e18);
+    });
+    check("BigInteger.divideAndRemainder", () -> {
+      BigInteger[] qr = a.multiply(b).add(BigInteger.valueOf(12345)).negate().divideAndRemainder(b);
+      return "quotient -3^1500 " + qr[0].equals(a.negate()) + ", reste " + qr[1];
+    });
+    check("BigInteger.modPow", () -> {
+      BigInteger m = BigInteger.ONE.shiftLeft(2203).subtract(BigInteger.ONE);  // Mersenne prime
+      return "Fermat " + BigInteger.valueOf(3).modPow(m.subtract(BigInteger.ONE), m) + ", 5^(10^30) modulo 10^18 : "
+          + BigInteger.valueOf(5).modPow(BigInteger.TEN.pow(30), m).mod(e18) + ", -2^-1 : "
+          + BigInteger.valueOf(-2).modPow(BigInteger.ONE.negate(), BigInteger.TEN.pow(21).add(BigInteger.ONE));
     });
   }
 

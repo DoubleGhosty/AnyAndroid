@@ -35,6 +35,9 @@ annotation d'un paramètre : paramètre, second null
 Thread.getState : NEW WAITING TIMED_WAITING BLOCKED TERMINATED
 ThreadGroup : main (parent system), nouveau fil dans main
 VarHandle.get par réflexion : java.lang.UnsupportedOperationException: VarHandle.get cannot be invoked reflectively.
+BigInteger.multiply : 4905 bits, modulo 10^18 : 526568355018200002
+BigInteger.divideAndRemainder : quotient -3^1500 true, reste -12345
+BigInteger.modPow : Fermat 1, 5^(10^30) modulo 10^18 : 134675696920069392, -2^-1 : 500000000000000000000
 TimeZone Europe/Paris : hiver 1 h, été 2 h, heure d'été true
 java.time America/New_York : 2026-03-08 01:30 -05:00 puis 2026-03-08 03:30 -04:00
 zone inconnue : GMT

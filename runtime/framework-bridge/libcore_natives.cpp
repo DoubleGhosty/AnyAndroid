@@ -2632,6 +2632,7 @@ void register_libcore_natives(rt::NativeRegistry& r) {
   register_libcore_dex(r);
   register_libcore_regex(r);
   register_libcore_lang(r);
+  register_libcore_math(r);
   register_framework_natives(r);
   register_appmem_natives(r);
 }

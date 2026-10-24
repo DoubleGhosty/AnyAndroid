@@ -264,7 +264,8 @@ Fait et vérifié (voir STATUS.md pour le détail) :
 0x1119 Setter, 0x111A Builder, 0x111B Measured, 0x111C LineBreakerConfig, 0x111D LineBreakResult,
 0x111E BufferQueue, 0x111F NativeSurface, 0x1120 Fence, 0x1124 MaskFilter, 0x1125 PathEffect,
 0x1126 KeyCharacterMap, 0x1127 MotionEvent, 0x1128 RuntimeShader.shader_builders, 0x1129 PositionedGlyphs,
-0x112A Interpolator. **Suivante : 0x112B.**
+0x112A Interpolator, 0x112B NativeBN (BIGNUM de BigInteger). Hors de cette plage : 0x0c01 EvpMdCtx
+(condensés), 0x0e01 DexSet (DexFile). **Suivante : 0x112C.**
 
 ## 9. Prochaines étapes, dans l'ordre
 
