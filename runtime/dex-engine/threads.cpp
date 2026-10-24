@@ -71,6 +71,14 @@ const char* current_stack_high() {
 #endif
 }
 
+uint32_t current_os_tid() {
+#ifdef _WIN32
+  return uint32_t(GetCurrentThreadId());
+#else
+  return 0;
+#endif
+}
+
 }  // namespace
 
 // --- Scopes and the GIL ----------------------------------------------------------
@@ -97,6 +105,7 @@ VmThread* Runtime::attach_current_thread(const std::string& name) {
   vt->name = name;
   vt->attached = true;
   vt->stack_high = current_stack_high();
+  vt->os_tid = current_os_tid();
   vt->gil = std::unique_lock<std::mutex>(gil_, std::defer_lock);
   VmThread* t = vt.get();
   acquire_gil(t);
@@ -173,6 +182,14 @@ void Runtime::yield_thread() {
   if (!t || gil_waiters_ == 0) return;
   uint64_t generation = gil_generation_;
   park(t, gil_handoff_, [&] { return gil_generation_ != generation || gil_waiters_ == 0; }, 0);
+}
+
+std::vector<VmThread*> Runtime::live_threads() const {
+  std::vector<VmThread*> out;
+  for (const auto& t : threads_) {
+    if (t->alive) out.push_back(t.get());
+  }
+  return out;
 }
 
 void Runtime::run_blocking(const std::function<void()>& fn) {
@@ -258,6 +275,7 @@ void Runtime::thread_main(VmThread* t) {
   if (instance_id_ == 0) instance_id_ = g_next_instance++;
   remember_attached(instance_id_, t);
   t->stack_high = current_stack_high();
+  t->os_tid = current_os_tid();
   acquire_gil(t);
   t->scope_depth = 1;
   try {

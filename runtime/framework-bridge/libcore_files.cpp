@@ -679,9 +679,11 @@ void register_linux(rt::NativeRegistry& r) {
   r.bind(lx, "symlink", "(Ljava/lang/String;Ljava/lang/String;)V", [](Runtime& rt, NativeArgs&) -> uint64_t {
     throw_errno(rt, "symlink", vfs::kEPERM);
   }, S::kUnsupported, "aucun lien créé par l'application (bac à sable)");
+  // Android's SELinux policy grants applications no `link` on their files
+  // (create_file_perms lacks it): every hard link fails with EACCES.
   r.bind(lx, "link", "(Ljava/lang/String;Ljava/lang/String;)V", [](Runtime& rt, NativeArgs&) -> uint64_t {
-    throw_errno(rt, "link", vfs::kEPERM);
-  }, S::kUnsupported, "aucun lien créé par l'application (bac à sable)");
+    throw_errno(rt, "link", vfs::kEACCES);
+  });
   r.bind(lx, "getxattr", "(Ljava/lang/String;Ljava/lang/String;)[B", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     std::string path = path_arg(rt, a.h(1));
     guarded(rt, "getxattr", [&] {

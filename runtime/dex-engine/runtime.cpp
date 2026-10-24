@@ -997,6 +997,7 @@ Handle Runtime::store(std::unique_ptr<Object> obj, size_t bytes) {
   slots_[idx].bytes = uint32_t(std::min<size_t>(bytes, UINT32_MAX));
   ++live_objects_;
   heap_bytes_ += bytes;
+  gc_stats_.bytes_allocated += bytes;
   if (live_objects_ >= gc_object_threshold_ || heap_bytes_ >= gc_byte_threshold_) gc_requested_ = true;
   return (uint32_t(slots_[idx].gen) << 24) | idx;
 }

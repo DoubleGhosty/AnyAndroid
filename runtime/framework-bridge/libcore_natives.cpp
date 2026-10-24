@@ -756,6 +756,110 @@ void register_vm(rt::NativeRegistry& r) {
     return rt::ret_long(int64_t((k + u) * 100));
   });
 
+  // Heap and instance statistics (dalvik_system_VMDebug.cc): every
+  // collection here stops all threads, so the blocking counts are the counts;
+  // no rate histogram is kept (ART prints none without samples).
+  r.bind(dbg, "countInstancesOfClass", "(Ljava/lang/Class;Z)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (a.h(0) == kNull) return rt::ret_long(0);
+    return rt::ret_long(int64_t(rt.count_instances(rt.mirror_class(a.h(0)), a.i32(1) != 0)));
+  });
+  r.bind(dbg, "countInstancesOfClasses", "([Ljava/lang/Class;Z)[J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    Handle classes = a.h(0);
+    if (classes == kNull) return kNull;
+    uint32_t n = rt.array(classes, "Class[]").length;
+    std::vector<int64_t> counts(n, 0);
+    for (uint32_t i = 0; i < n; ++i) {
+      Handle c;
+      std::memcpy(&c, &rt.array(classes, "Class[]").data[size_t(i) * 4], 4);
+      if (c != kNull) counts[i] = int64_t(rt.count_instances(rt.mirror_class(c), a.i32(1) != 0));
+    }
+    Handle result = rt.new_array("[J", int32_t(n));
+    if (n) std::memcpy(rt.array(result, "long[]").data.data(), counts.data(), size_t(n) * 8);
+    return result;
+  });
+  auto runtime_stat = [](Runtime& rt, int32_t id) -> std::optional<std::string> {
+    const rt::GcStats& g = rt.gc_stats();
+    switch (id) {
+      case 0: case 4: return std::to_string(g.collections);           // art.gc.gc-count, blocking-gc-count
+      case 1: case 5: return std::to_string(uint64_t(g.total_ms));    // art.gc.gc-time, blocking-gc-time (ms)
+      case 2: return std::to_string(g.bytes_allocated);
+      case 3: return std::to_string(g.bytes_freed);
+      case 6: case 7: return std::string();                           // rate histograms: no samples
+      case 8: return std::to_string(rt.object_count());               // objects allocated now
+      case 9: case 10: return std::string("0");                       // time waiting for a collection, pre-OOME ones
+      default: return std::nullopt;
+    }
+  };
+  r.bind(dbg, "getRuntimeStatInternal", "(I)Ljava/lang/String;", [runtime_stat](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto v = runtime_stat(rt, a.i32(0));
+    return v ? rt.new_string_utf8(*v) : kNull;
+  });
+  // getRuntimeStatsInternal: ART fills the first eight of the eleven entries.
+  r.bind(dbg, "getRuntimeStatsInternal", "()[Ljava/lang/String;", [runtime_stat](Runtime& rt, NativeArgs&) -> uint64_t {
+    rt::GlobalRef array(rt, rt.new_array("[Ljava/lang/String;", 11));
+    for (int32_t i = 0; i < 8; ++i) {
+      Handle v = rt.new_string_utf8(*runtime_stat(rt, i));
+      std::memcpy(&rt.array(array.get(), "String[]").data[size_t(i) * 4], &v, 4);
+    }
+    return array.get();
+  });
+  r.bind(dbg, "suspendAllAndSendVmStart", "()V", [](Runtime& rt, NativeArgs&) -> uint64_t {
+    rt.throw_new("Ljava/lang/RuntimeException;", "ART's suspendAllAndSendVmStart is not implemented");
+  });
+  // The application is not debuggable: JDWP agents are refused.
+  r.bind(dbg, "nativeAttachAgent", "(Ljava/lang/String;Ljava/lang/ClassLoader;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (a.h(0) == kNull) rt.throw_npe("agent is null");
+    rt.throw_new("Ljava/lang/SecurityException;", "Can't attach agent, process is not debuggable.");
+  });
+  // No method has AOT or JIT code: everything is interpreted.
+  r.bind(dbg, "getExecutableMethodFileOffsetsNative",
+         "(Ljava/lang/reflect/Executable;)Ldalvik/system/VMDebug$ExecutableMethodFileOffsets;",
+         [](Runtime&, NativeArgs&) -> uint64_t { return kNull; });
+  // Method tracing, low-overhead traces and heap dumps: ART writes trace and
+  // HPROF files; AnyAndroid has no tracer nor HPROF writer, so nothing is written.
+  for (const auto& [name, sig] : std::initializer_list<std::pair<const char*, const char*>>{
+           {"startMethodTracingDdmsImpl", "(IIZI)V"}, {"startMethodTracingFd", "(Ljava/lang/String;IIIZIZ)V"},
+           {"startMethodTracingFilename", "(Ljava/lang/String;IIZI)V"}, {"stopMethodTracing", "()V"},
+           {"startLowOverheadTraceForAllMethodsImpl", "()V"}, {"startLowOverheadTraceForLongRunningMethodsImpl", "(J)V"},
+           {"stopLowOverheadTraceImpl", "()V"}, {"dumpLowOverheadTraceImpl", "(Ljava/lang/String;)V"},
+           {"dumpLowOverheadTraceFdImpl", "(I)V"}, {"dumpHprofDataDdms", "()V"}}) {
+    r.bind(dbg, name, sig, noop, S::kStub, "pas de traceur ni de vidage HPROF dans AnyAndroid");
+  }
+  r.bind(dbg, "dumpHprofData", "(Ljava/lang/String;I)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (a.h(0) == kNull && a.i32(1) < 0) rt.throw_npe("fileName == null && fd == null");
+    return 0;
+  }, S::kStub, "pas de vidage HPROF dans AnyAndroid");
+
+  // ZygoteHooks: only zygote calls them, and there is no zygote here.
+  const char* zygote = "Ldalvik/system/ZygoteHooks;";
+  r.bind(zygote, "nativePreFork", "()J", [](Runtime&, NativeArgs&) -> uint64_t { return 0; }, S::kStub, "pas de zygote dans AnyAndroid");
+  for (const auto& [name, sig] : std::initializer_list<std::pair<const char*, const char*>>{
+           {"nativePostZygoteFork", "()V"}, {"nativePostForkSystemServer", "(I)V"},
+           {"nativePostForkChild", "(JIZZLjava/lang/String;)V"}, {"startZygoteNoThreadCreation", "()V"},
+           {"stopZygoteNoThreadCreation", "()V"}}) {
+    r.bind(zygote, name, sig, noop, S::kStub, "pas de zygote dans AnyAndroid");
+  }
+  r.bind(zygote, "nativeZygoteLongSuspendOk", "()Z", boolean(true));
+  // Read-only dynamic code loading: the aconfig flags are taken as off.
+  r.bind(vm, "isReadOnlyDynamicCodeLoadThrowExceptionEnabled", "()Z", boolean(false), S::kPartial, "drapeaux aconfig considérés désactivés");
+  r.bind(vm, "isReadOnlyDynamicCodeLoadWwLogEnabled", "()Z", boolean(false), S::kPartial, "drapeaux aconfig considérés désactivés");
+  // ICU4J's bridge to Android: atrace (no trace session here) and liblog.
+  r.bind("Lcom/android/i18n/util/ATrace;", "nativeTraceBegin", "(Ljava/lang/String;)V", noop, S::kStub, "pas de session atrace");
+  r.bind("Lcom/android/i18n/util/ATrace;", "nativeTraceEnd", "()V", noop, S::kStub, "pas de session atrace");
+  r.bind("Lcom/android/i18n/util/Log;", "log", "(ILjava/lang/String;Ljava/lang/Throwable;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (a.h(1) == kNull) rt.throw_npe("Log needs a message");
+    static const char levels[] = "??VDIWEA";
+    int32_t prio = a.i32(0);
+    std::string line = std::string(1, prio >= 0 && prio < 8 ? levels[prio] : '?') + "/Log: " + rt.string_utf8(a.h(1)) + "\n";
+    if (a.h(2) != kNull) {
+      Handle text = Handle(rt.call_virtual(a.h(2), "toString", "()Ljava/lang/String;"));
+      if (text != kNull) line += std::string(1, prio >= 0 && prio < 8 ? levels[prio] : '?') + "/Log: " + rt.string_utf8(text) + "\n";
+    }
+    std::fwrite(line.data(), 1, line.size(), stderr);
+    std::fflush(stderr);
+    return 0;
+  }, S::kPartial, "journal sur la sortie d'erreur ; l'exception sur une ligne");
+
   // VMStack: frames of the current thread, innermost last. Frame n-1 is the
   // native method itself, n-2 the method that called it.
   const char* st = "Ldalvik/system/VMStack;";
@@ -819,6 +923,43 @@ void register_vm(rt::NativeRegistry& r) {
            }
            return rt::ret_int(int32_t(n));
          });
+  // DdmVmInternal (the DDM thread and allocation views): no DDM client here.
+  const char* ddmi = "Lorg/apache/harmony/dalvik/ddmc/DdmVmInternal;";
+  r.bind(ddmi, "setThreadNotifyEnabled", "(Z)V", noop, S::kStub, "pas de canal DDM dans AnyAndroid");
+  r.bind(ddmi, "setRecentAllocationsTrackingEnabled", "(Z)V", noop, S::kStub, "pas de suivi des allocations");
+  // getStackTraceById(thin lock id): the trace of the thread with that id, null if none.
+  r.bind(ddmi, "getStackTraceById", "(I)[Ljava/lang/StackTraceElement;", [thread_stack, to_array](Runtime& rt, NativeArgs& a) -> uint64_t {
+    for (rt::VmThread* t : rt.live_threads()) {
+      if (int32_t(t->id) != a.i32(0)) continue;
+      Handle peer = t == rt.current_thread() ? rt.current_thread_peer() : t->peer;
+      if (peer == kNull) return kNull;
+      std::vector<rt::GlobalRef> elements = thread_stack(rt, peer);
+      return to_array(rt, "[Ljava/lang/StackTraceElement;", elements);
+    }
+    return kNull;
+  });
+  // getThreadStats: a THST chunk (header length 4, 18 bytes per thread: id,
+  // JDWP status, tid, utime, stime, daemon), big-endian.
+  r.bind(ddmi, "getThreadStats", "()[B", [](Runtime& rt, NativeArgs&) -> uint64_t {
+    std::vector<rt::VmThread*> threads = rt.live_threads();
+    std::vector<uint8_t> bytes = {4, 18, uint8_t(threads.size() >> 8), uint8_t(threads.size())};
+    auto put4 = [&](uint32_t v) {
+      for (int shift : {24, 16, 8, 0}) bytes.push_back(uint8_t(v >> shift));
+    };
+    for (rt::VmThread* t : threads) {
+      // TS_RUNNING 1, TS_MONITOR 3 (blocked), TS_WAIT 4 (waiting, timed or not).
+      uint8_t status = t->java_state == 2 ? 3 : (t->java_state == 3 || t->java_state == 4) ? 4 : 1;
+      put4(t->id);
+      bytes.push_back(status);
+      put4(t->os_tid);
+      put4(0);  // utime and stime (clock ticks): not measured per thread here
+      put4(0);
+      bytes.push_back(t->daemon ? 1 : 0);
+    }
+    Handle array = rt.new_array("[B", int32_t(bytes.size()));
+    std::memcpy(rt.array(array, "byte[]").data.data(), bytes.data(), bytes.size());
+    return array;
+  }, S::kPartial, "temps CPU des fils non mesurés");
   // getAnnotatedThreadStackTrace: the same frames; the monitors held and the
   // one awaited are not tracked per frame (heldLocks and blockedOn stay null).
   r.bind(st, "getAnnotatedThreadStackTrace", "(Ljava/lang/Thread;)[Ldalvik/system/AnnotatedStackTraceElement;",
@@ -1201,7 +1342,9 @@ constexpr AndroidId kAndroidIds[] = {
 };
 
 constexpr uint32_t kAidAppStart = 10000, kAidAppEnd = 19999, kAidIsolatedStart = 90000, kAidIsolatedEnd = 99999,
-                   kAidUserOffset = 100000, kAidOverflowUid = 65534;
+                   kAidUserOffset = 100000, kAidOverflowUid = 65534, kAidCacheGidStart = 20000, kAidCacheGidEnd = 29999,
+                   kAidExtGidStart = 30000, kAidExtGidEnd = 39999, kAidExtCacheGidStart = 40000,
+                   kAidExtCacheGidEnd = 49999, kAidSharedGidStart = 50000, kAidSharedGidEnd = 59999;
 constexpr uint32_t kAppUid = 10000;  // this application (u0_a0), as getuid() reports
 
 const AndroidId* android_id(uint32_t aid) {
@@ -1227,11 +1370,18 @@ bool secondary_user_allowed(uint32_t aid) {
   return false;
 }
 
-bool valid_app_uid(uint32_t uid) {
-  uint32_t appid = uid % kAidUserOffset;
+// is_valid_app_id: a platform id allowed in secondary users, or an id of the
+// reserved ranges (users: applications, isolated; groups also the cache,
+// external and shared ranges, the shared one for user 0 only).
+bool valid_app_id(uint32_t id, bool is_group) {
+  uint32_t appid = id % kAidUserOffset;
   if (appid == kAidOverflowUid) return false;
   if (appid < kAidAppStart && secondary_user_allowed(appid)) return true;
-  return (appid >= kAidAppStart && appid <= kAidAppEnd) || (appid >= kAidIsolatedStart && appid <= kAidIsolatedEnd);
+  if (appid >= kAidSharedGidStart && appid <= kAidSharedGidEnd && appid != id) return false;
+  auto in = [appid](uint32_t start, uint32_t end) { return appid >= start && appid <= end; };
+  if (in(kAidAppStart, kAidAppEnd) || in(kAidIsolatedStart, kAidIsolatedEnd)) return true;
+  return is_group && (in(kAidCacheGidStart, kAidCacheGidEnd) || in(kAidExtGidStart, kAidExtGidEnd) ||
+                      in(kAidExtCacheGidStart, kAidExtCacheGidEnd) || in(kAidSharedGidStart, kAidSharedGidEnd));
 }
 
 struct Passwd {
@@ -1241,7 +1391,7 @@ struct Passwd {
 
 // app_id_to_passwd: u0_a12, u0_i3, u10_system...
 std::optional<Passwd> app_passwd(uint32_t uid) {
-  if (uid < kAidAppStart || !valid_app_uid(uid)) return std::nullopt;
+  if (uid < kAidAppStart || !valid_app_id(uid, false)) return std::nullopt;
   uint32_t appid = uid % kAidUserOffset, user = uid / kAidUserOffset;
   Passwd p;
   if (appid >= kAidIsolatedStart) {
@@ -1266,15 +1416,39 @@ std::optional<Passwd> passwd_by_uid(uint32_t uid) {
   return app_passwd(uid);
 }
 
-// app_id_from_name (users): u<user>_a<n>, u<user>_i<n>, u<user>_<platform id>; 0 if none.
-uint32_t app_id_from_name(const std::string& name) {
-  if (name.size() < 2 || name[0] != 'u' || !std::isdigit(static_cast<unsigned char>(name[1]))) return 0;
+// app_id_from_name: u<user>_a<n>, u<user>_i<n>, u<user>_<platform id>, and
+// for groups all_a<n>, u<user>_a<n>_cache, _ext and _ext_cache; 0 if none.
+uint32_t app_id_from_name(const std::string& name, bool is_group = false) {
   char* end = nullptr;
-  unsigned long user = std::strtoul(name.c_str() + 1, &end, 10);
+  unsigned long user = 0;
+  bool shared = false;
+  if (is_group && name.compare(0, 3, "all") == 0) {
+    end = const_cast<char*>(name.c_str() + 3);
+    shared = true;
+  } else if (name.size() >= 2 && name[0] == 'u' && std::isdigit(static_cast<unsigned char>(name[1]))) {
+    user = std::strtoul(name.c_str() + 1, &end, 10);
+  } else {
+    return 0;
+  }
   if (end[0] != '_' || end[1] == 0) return 0;
   unsigned long appid = 0;
   if (end[1] == 'a' && std::isdigit(static_cast<unsigned char>(end[2]))) {
-    appid = std::strtoul(end + 2, &end, 10) + kAidAppStart;
+    appid = std::strtoul(end + 2, &end, 10);
+    if (shared) {
+      appid += kAidSharedGidStart;
+      if (appid > kAidSharedGidEnd) return 0;
+    } else if (is_group && std::strcmp(end, "_ext_cache") == 0) {
+      end += 10;
+      appid += kAidExtCacheGidStart;
+    } else if (is_group && std::strcmp(end, "_ext") == 0) {
+      end += 4;
+      appid += kAidExtGidStart;
+    } else if (is_group && std::strcmp(end, "_cache") == 0) {
+      end += 6;
+      appid += kAidCacheGidStart;
+    } else {
+      appid += kAidAppStart;
+    }
   } else if (end[1] == 'i' && std::isdigit(static_cast<unsigned char>(end[2]))) {
     appid = std::strtoul(end + 2, &end, 10) + kAidIsolatedStart;
   } else if (const AndroidId* id = android_id(std::string_view(end + 1))) {
@@ -1292,6 +1466,57 @@ std::optional<Passwd> passwd_by_name(const std::string& name) {
   if (std::sscanf(name.c_str(), "oem_%u", &oem) == 1 && oem_id(oem)) return passwd_by_uid(oem);
   return app_passwd(app_id_from_name(name));
 }
+
+// print_app_name_from_gid.
+std::string app_group_name(uint32_t gid) {
+  uint32_t appid = gid % kAidUserOffset, user = gid / kAidUserOffset;
+  std::string u = "u" + std::to_string(user);
+  if (appid >= kAidIsolatedStart) return u + "_i" + std::to_string(appid - kAidIsolatedStart);
+  if (user == 0 && appid >= kAidSharedGidStart && appid <= kAidSharedGidEnd) return "all_a" + std::to_string(appid - kAidSharedGidStart);
+  if (appid >= kAidExtCacheGidStart && appid <= kAidExtCacheGidEnd) return u + "_a" + std::to_string(appid - kAidExtCacheGidStart) + "_ext_cache";
+  if (appid >= kAidExtGidStart && appid <= kAidExtGidEnd) return u + "_a" + std::to_string(appid - kAidExtGidStart) + "_ext";
+  if (appid >= kAidCacheGidStart && appid <= kAidCacheGidEnd) return u + "_a" + std::to_string(appid - kAidCacheGidStart) + "_cache";
+  if (appid < kAidAppStart) {
+    const AndroidId* id = android_id(appid);
+    return id ? u + "_" + id->name : std::string();
+  }
+  return u + "_a" + std::to_string(appid - kAidAppStart);
+}
+
+}  // namespace
+
+std::optional<std::string> android_user_name(uint32_t uid) {
+  auto p = passwd_by_uid(uid);
+  if (!p) return std::nullopt;
+  return p->name;
+}
+
+std::optional<uint32_t> android_user_id(const std::string& name) {
+  auto p = passwd_by_name(name);
+  if (!p) return std::nullopt;
+  return p->uid;
+}
+
+// getgrgid_internal: the AID table, the OEM ranges, then the applications' groups.
+std::optional<std::string> android_group_name(uint32_t gid) {
+  if (const AndroidId* id = android_id(gid)) return std::string(id->name);
+  if (oem_id(gid)) return "oem_" + std::to_string(gid);
+  if (gid < kAidAppStart || !valid_app_id(gid, true)) return std::nullopt;
+  std::string name = app_group_name(gid);
+  if (name.empty()) return std::nullopt;
+  return name;
+}
+
+std::optional<uint32_t> android_group_id(const std::string& name) {
+  if (const AndroidId* id = android_id(std::string_view(name))) return id->aid;
+  unsigned oem = 0;
+  if (std::sscanf(name.c_str(), "oem_%u", &oem) == 1 && oem_id(oem)) return uint32_t(oem);
+  uint32_t gid = app_id_from_name(name, true);
+  if (gid < kAidAppStart || !valid_app_id(gid, true)) return std::nullopt;
+  return gid;
+}
+
+namespace {
 
 Handle make_passwd(Runtime& rt, const Passwd& p) {
   rt::GlobalRef name(rt, rt.new_string_utf8(p.name)), dir(rt, rt.new_string_utf8(p.dir));

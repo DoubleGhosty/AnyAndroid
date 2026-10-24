@@ -254,6 +254,13 @@ std::optional<int64_t> nio_socket_io(rt::Runtime& rt, int32_t fd, std::span<cons
 // The buffers of an array of `count` struct iovec in native memory.
 std::vector<std::span<uint8_t>> native_iovecs(rt::Runtime& rt, int64_t address, int32_t count, bool write);
 
+// bionic's user and group databases (libcore_natives.cpp): Android's ids,
+// the applications' u<user>_a<n> and the like; nullopt when unknown.
+std::optional<std::string> android_user_name(uint32_t uid);
+std::optional<uint32_t> android_user_id(const std::string& name);
+std::optional<std::string> android_group_name(uint32_t gid);
+std::optional<uint32_t> android_group_id(const std::string& name);
+
 void register_libcore_nio(rt::NativeRegistry& r);
 void register_libcore_zip(rt::NativeRegistry& r);
 void register_libcore_crypto(rt::NativeRegistry& r);

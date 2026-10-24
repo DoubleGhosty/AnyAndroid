@@ -151,10 +151,55 @@ std::shared_ptr<DirStream> dir_stream(Runtime& rt, int64_t id) {
   return s;
 }
 
+// --- Text streams (fopen0, setmntent0) -------------------------------------------------
+
+// A FILE* of the natives that only read (/proc/mounts, getline): the file's
+// bytes when opened and a position, behind a bounded id.
+struct TextStream {
+  std::mutex lock;
+  std::vector<uint8_t> bytes;
+  size_t pos = 0;
+};
+
+HandleTable<TextStream>& text_streams() {
+  static HandleTable<TextStream> table(0x112C);
+  return table;
+}
+
+int64_t open_text_stream(Runtime& rt, const std::string& path) {
+  auto s = std::make_shared<TextStream>();
+  s->bytes = unix_call(rt, [&] { return the_vfs().read_file(path, 16u << 20); });
+  return text_streams().add(std::move(s));
+}
+
+std::shared_ptr<TextStream> text_stream(Runtime& rt, int64_t id) {
+  auto s = text_streams().get(id);
+  if (!s) throw_unix(rt, vfs::kEBADF);
+  return s;
+}
+
+// The path of an *at call: `address` itself if absolute, else an entry of
+// the directory `dfd` (AT_FDCWD -100: the current directory, "/").
+std::string at_path(Runtime& rt, int32_t dfd, int64_t address) {
+  std::string path = path_from_address(rt, address);
+  if (!path.empty() && path[0] == '/') return path;
+  constexpr int32_t kAtFdcwd = -100;
+  if (dfd == kAtFdcwd) return "/" + path;
+  if (dfd < 0 || std_fd(dfd)) throw_unix(rt, std_fd(dfd) ? vfs::kENOTDIR : vfs::kEBADF);
+  std::string dir = unix_call(rt, [&] {
+    if (the_vfs().fstat(dfd).type != vfs::NodeType::kDirectory) throw vfs::VfsError{vfs::kENOTDIR, "openat"};
+    return the_vfs().fd_path(dfd);
+  });
+  return dir == "/" ? "/" + path : dir + "/" + path;
+}
+
 void register_unix_native_dispatcher(rt::NativeRegistry& r) {
   const char* und = "Lsun/nio/fs/UnixNativeDispatcher;";
   // Capabilities: no openat()/futimes()/birth time, so the portable code paths are used.
-  r.bind(und, "init", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
+  // Capabilities, as bionic gives them on Android 17: openat64, fstatat64,
+  // unlinkat, renameat, futimesat and fdopendir exist (SUPPORTS_OPENAT 2,
+  // SUPPORTS_FUTIMES 4); no birth time.
+  r.bind(und, "init", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_int(2 | 4); });
 
   for (bool follow : {true, false}) {
     r.bind(und, follow ? "stat0" : "lstat0", "(JLsun/nio/fs/UnixFileAttributes;)V",
@@ -278,6 +323,163 @@ void register_unix_native_dispatcher(rt::NativeRegistry& r) {
     });
     return 0;
   });
+  // The *at variants: a relative path names an entry of the directory `dfd`
+  // (AT_FDCWD: the current directory, "/").
+  r.bind(und, "dup", "(I)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = a.i32(0);
+    if (std_fd(fd)) return rt::ret_int(fd);  // the host's standard streams stay shared
+    return rt::ret_int(unix_call(rt, [&] { return the_vfs().dup(fd); }));
+  });
+  r.bind(und, "openat0", "(IJII)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::string path = at_path(rt, a.i32(0), a.i64(1));
+    return rt::ret_int(unix_call(rt, [&] { return the_vfs().open(path, a.i32(3), uint32_t(a.i32(4))); }));
+  });
+  r.bind(und, "fstatat0", "(IJILsun/nio/fs/UnixFileAttributes;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::string path = at_path(rt, a.i32(0), a.i64(1));
+    constexpr int32_t kAtSymlinkNofollow = 0x100;
+    bool follow = (a.i32(3) & kAtSymlinkNofollow) == 0;
+    set_unix_attributes(rt, a.h(4), unix_call(rt, [&] { return the_vfs().stat(path, follow); }));
+    return 0;
+  });
+  r.bind(und, "unlinkat0", "(IJI)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::string path = at_path(rt, a.i32(0), a.i64(1));
+    constexpr int32_t kAtRemovedir = 0x200;
+    unix_call(rt, [&] { (a.i32(3) & kAtRemovedir) ? the_vfs().rmdir(path) : the_vfs().unlink(path); });
+    return 0;
+  });
+  r.bind(und, "renameat0", "(IJIJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::string from = at_path(rt, a.i32(0), a.i64(1)), to = at_path(rt, a.i32(3), a.i64(4));
+    unix_call(rt, [&] { the_vfs().rename(from, to); });
+    return 0;
+  });
+  // utimes, futimes (microseconds): the Vfs keeps whole seconds of the
+  // modification time only.
+  r.bind(und, "utimes0", "(JJJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::string path = path_from_address(rt, a.i64(0));
+    unix_call(rt, [&] { the_vfs().set_mtime(path, a.i64(4) / 1000000); });
+    return 0;
+  }, S::kPartial, "date de modification à la seconde");
+  r.bind(und, "futimes", "(IJJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = a.i32(0);
+    if (std_fd(fd)) throw_unix(rt, vfs::kEPERM);
+    unix_call(rt, [&] { the_vfs().set_mtime(the_vfs().fd_path(fd), a.i64(3) / 1000000); });
+    return 0;
+  }, S::kPartial, "date de modification à la seconde");
+  // Permissions and owners stay fixed in the Vfs, as with Linux.chmod and
+  // chown; the file must exist. Links are refused as by Linux.link and symlink.
+  for (const char* name : {"chmod0", "chown0", "lchown0"}) {
+    r.bind(und, name, std::string_view(name) == "chmod0" ? "(JI)V" : "(JII)V", [name](Runtime& rt, NativeArgs& a) -> uint64_t {
+      std::string path = path_from_address(rt, a.i64(0));
+      unix_call(rt, [&] { the_vfs().stat(path, std::string_view(name) != "lchown0"); });
+      return 0;
+    }, S::kStub, "droits fixes dans le système de fichiers virtuel");
+  }
+  for (const char* name : {"fchmod", "fchown"}) {
+    r.bind(und, name, std::string_view(name) == "fchmod" ? "(II)V" : "(III)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+      int32_t fd = a.i32(0);
+      if (!std_fd(fd)) unix_call(rt, [&] { return the_vfs().fstat(fd); });
+      return 0;
+    }, S::kStub, "droits fixes dans le système de fichiers virtuel");
+  }
+  // No `link` permission for applications in Android's SELinux policy.
+  r.bind(und, "link0", "(JJ)V", [](Runtime& rt, NativeArgs&) -> uint64_t { throw_unix(rt, vfs::kEACCES); });
+  r.bind(und, "symlink0", "(JJ)V", [](Runtime& rt, NativeArgs&) -> uint64_t { throw_unix(rt, vfs::kEPERM); },
+         S::kUnsupported, "aucun lien créé par l'application (bac à sable)");
+  // mknod: a regular file (S_IFREG or no type), as open(O_CREAT|O_EXCL);
+  // devices need CAP_MKNOD, FIFOs a node type the Vfs lacks.
+  r.bind(und, "mknod0", "(JIJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::string path = path_from_address(rt, a.i64(0));
+    uint32_t mode = uint32_t(a.i32(2)), type = mode & 0170000;
+    if (type != 0 && type != 0100000) throw_unix(rt, vfs::kEPERM);
+    unix_call(rt, [&] {
+      int32_t fd = the_vfs().open(path, vfs::kO_WRONLY | vfs::kO_CREAT | vfs::kO_EXCL, mode & 07777);
+      the_vfs().close(fd);
+    });
+    return 0;
+  }, S::kPartial, "fichiers ordinaires seulement");
+  r.bind(und, "statvfs0", "(JLsun/nio/fs/UnixFileStoreAttributes;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::string path = path_from_address(rt, a.i64(0));
+    unix_call(rt, [&] { return the_vfs().stat(path); });
+    Handle attrs = a.h(2);
+    rt::Object& o = rt.nonnull(attrs, "UnixFileStoreAttributes");
+    for (auto [name, value] : {std::pair{"f_frsize", int64_t(4096)}, std::pair{"f_blocks", int64_t(1) << 22},
+                               std::pair{"f_bfree", int64_t(1) << 21}, std::pair{"f_bavail", int64_t(1) << 21}}) {
+      rt::Field* f = find_field(o.klass, name, "J");
+      if (!f) rt.throw_new("Ljava/lang/NoSuchFieldError;", name);
+      o.fields.at(f->slot) = uint32_t(uint64_t(value));
+      o.fields.at(f->slot + 1) = uint32_t(uint64_t(value) >> 32);
+    }
+    return 0;
+  }, S::kPartial, "valeurs de capacité fixes, comme Linux.statvfs");
+  // pathconf of bionic on ext4: _PC_LINK_MAX 65000, _PC_NAME_MAX 255,
+  // _PC_PATH_MAX 4096, _PC_PIPE_BUF 4096; other names EINVAL.
+  auto path_limit = [](Runtime& rt, int32_t name) -> int64_t {
+    switch (name) {
+      case 0: return 65000;
+      case 3: return 255;
+      case 4: case 5: return 4096;
+      default: throw_unix(rt, vfs::kEINVAL);
+    }
+  };
+  r.bind(und, "pathconf0", "(JI)J", [path_limit](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::string path = path_from_address(rt, a.i64(0));
+    unix_call(rt, [&] { return the_vfs().stat(path); });
+    return rt::ret_long(path_limit(rt, a.i32(2)));
+  });
+  r.bind(und, "fpathconf", "(II)J", [path_limit](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = a.i32(0);
+    if (!std_fd(fd)) unix_call(rt, [&] { return the_vfs().fstat(fd); });
+    return rt::ret_long(path_limit(rt, a.i32(1)));
+  });
+  // Users and groups by bionic's databases.
+  r.bind(und, "getpwuid", "(I)[B", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto name = android_user_name(uint32_t(a.i32(0)));
+    if (!name) throw_unix(rt, vfs::kENOENT);
+    return make_byte_array(rt, *name);
+  });
+  r.bind(und, "getgrgid", "(I)[B", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto name = android_group_name(uint32_t(a.i32(0)));
+    if (!name) throw_unix(rt, vfs::kENOENT);
+    return make_byte_array(rt, *name);
+  });
+  r.bind(und, "getpwnam0", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto id = android_user_id(native_cstring(rt, a.i64(0)));
+    return rt::ret_int(id ? int32_t(*id) : -1);
+  });
+  r.bind(und, "getgrnam0", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto id = android_group_id(native_cstring(rt, a.i64(0)));
+    return rt::ret_int(id ? int32_t(*id) : -1);
+  });
+  // Read-only text streams (fopen, getline): a snapshot of the file's lines.
+  r.bind(und, "fopen0", "(JJ)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::string path = path_from_address(rt, a.i64(0)), mode = native_cstring(rt, a.i64(2));
+    if (mode.empty() || mode[0] != 'r' || mode.find('+') != std::string::npos) throw_unix(rt, vfs::kEINVAL);  // read-only use
+    return rt::ret_long(open_text_stream(rt, path));
+  }, S::kPartial, "flux en lecture seule");
+  r.bind(und, "fclose", "(J)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    text_stream(rt, a.i64(0));
+    text_streams().remove(a.i64(0));
+    return 0;
+  });
+  r.bind(und, "rewind", "(J)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto s = text_stream(rt, a.i64(0));
+    std::lock_guard<std::mutex> guard(s->lock);
+    s->pos = 0;
+    return 0;
+  });
+  // getlinelen: the length of the next line, its '\n' included, -1 at the end.
+  r.bind(und, "getlinelen", "(J)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto s = text_stream(rt, a.i64(0));
+    std::lock_guard<std::mutex> guard(s->lock);
+    if (s->pos >= s->bytes.size()) return rt::ret_int(-1);
+    size_t end = s->pos;
+    while (end < s->bytes.size() && s->bytes[end] != '\n') ++end;
+    if (end < s->bytes.size()) ++end;
+    int32_t length = int32_t(end - s->pos);
+    s->pos = end;
+    return rt::ret_int(length);
+  });
+
   r.bind(und, "getcwd", "()[B", [](Runtime& rt, NativeArgs&) -> uint64_t {
     return make_byte_array(rt, "/");
   }, S::kPartial, "dossier courant fixe");
@@ -451,6 +653,189 @@ void register_file_dispatcher(rt::NativeRegistry& r) {
   });
 }
 
+// --- sun.nio.fs.LinuxNativeDispatcher, UnixCopyFile; FileKey, MappedByteBuffer,
+// FileChannelImpl.transferTo0, java.util.prefs.FileSystemPreferences ----------------------
+
+// getmntent: the next line of a mount table, "fsname dir type opts freq
+// passno", its fields unescaped (\040 is a space), comments skipped.
+bool next_mount_entry(TextStream& s, std::vector<std::string>& fields) {
+  while (s.pos < s.bytes.size()) {
+    size_t end = s.pos;
+    while (end < s.bytes.size() && s.bytes[end] != '\n') ++end;
+    std::string line(s.bytes.begin() + ptrdiff_t(s.pos), s.bytes.begin() + ptrdiff_t(end));
+    s.pos = end < s.bytes.size() ? end + 1 : end;
+    fields.clear();
+    size_t i = 0;
+    while (i < line.size()) {
+      while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+      if (i >= line.size()) break;
+      std::string field;
+      while (i < line.size() && line[i] != ' ' && line[i] != '\t') {
+        if (line[i] == '\\' && i + 3 < line.size() && line[i + 1] >= '0' && line[i + 1] <= '3') {
+          field += char((line[i + 1] - '0') * 64 + (line[i + 2] - '0') * 8 + (line[i + 3] - '0'));
+          i += 4;
+        } else {
+          field += line[i++];
+        }
+      }
+      fields.push_back(std::move(field));
+    }
+    if (fields.empty() || fields[0][0] == '#') continue;
+    while (fields.size() < 4) fields.emplace_back();
+    return true;
+  }
+  return false;
+}
+
+void register_nio_misc(rt::NativeRegistry& r) {
+  const char* lnd = "Lsun/nio/fs/LinuxNativeDispatcher;";
+  r.bind(lnd, "init", "()V", [](Runtime&, NativeArgs&) -> uint64_t { return 0; });
+  // Extended attributes: the host areas keep none, as Linux.getxattr and setxattr say.
+  r.bind(lnd, "fgetxattr0", "(IJJI)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = a.i32(0);
+    if (!std_fd(fd)) unix_call(rt, [&] { return the_vfs().fstat(fd); });
+    throw_unix(rt, vfs::kENODATA);
+  });
+  r.bind(lnd, "flistxattr", "(IJI)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = a.i32(0);
+    if (!std_fd(fd)) unix_call(rt, [&] { return the_vfs().fstat(fd); });
+    return 0;  // an empty list
+  });
+  r.bind(lnd, "fsetxattr0", "(IJJI)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = a.i32(0);
+    if (!std_fd(fd)) unix_call(rt, [&] { return the_vfs().fstat(fd); });
+    throw_unix(rt, vfs::kEOPNOTSUPP);
+  }, S::kUnsupported, "pas d'attributs étendus dans le bac à sable (EOPNOTSUPP)");
+  r.bind(lnd, "fremovexattr0", "(IJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t fd = a.i32(0);
+    if (!std_fd(fd)) unix_call(rt, [&] { return the_vfs().fstat(fd); });
+    throw_unix(rt, vfs::kENODATA);
+  });
+  r.bind(lnd, "setmntent0", "(JJ)J", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    std::string path = path_from_address(rt, a.i64(0));
+    return rt::ret_long(open_text_stream(rt, path));
+  });
+  // getmntent0(stream, entry, buffer, bufLen): 0 and the entry's byte arrays
+  // set, -1 at the end.
+  r.bind(lnd, "getmntent0", "(JLsun/nio/fs/UnixMountEntry;JI)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    auto s = text_stream(rt, a.i64(0));
+    std::vector<std::string> fields;
+    {
+      std::lock_guard<std::mutex> guard(s->lock);
+      if (!next_mount_entry(*s, fields)) return rt::ret_int(-1);
+    }
+    Handle entry = a.h(2);
+    rt::Object& o = rt.nonnull(entry, "UnixMountEntry");
+    const char* names[] = {"name", "dir", "fstype", "opts"};
+    for (int i = 0; i < 4; ++i) {
+      rt::Field* f = find_field(o.klass, names[i], "[B");
+      if (!f) rt.throw_new("Ljava/lang/NoSuchFieldError;", names[i]);
+      Handle bytes = make_byte_array(rt, fields[size_t(i)]);
+      rt.object(entry)->fields.at(f->slot) = bytes;
+    }
+    return 0;
+  });
+  r.bind(lnd, "endmntent", "(J)V", [](Runtime&, NativeArgs& a) -> uint64_t {
+    text_streams().remove(a.i64(0));
+    return 0;
+  });
+
+  // UnixCopyFile.transfer(dst, src, cancelAddress): 8 KiB at a time, until the
+  // end, ECANCELED once the int at cancelAddress is set.
+  r.bind("Lsun/nio/fs/UnixCopyFile;", "transfer", "(IIJ)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    int32_t dst = a.i32(0), src = a.i32(1);
+    int64_t cancel = a.i64(2);
+    std::vector<uint8_t> buf(8192);
+    for (;;) {
+      size_t n = unix_call(rt, [&] { return read_fd(src, buf); });
+      if (n == 0) return 0;
+      if (cancel != 0) {
+        int32_t flag = 0;
+        std::memcpy(&flag, native_span(rt, cancel, 4, false).data(), 4);
+        if (flag != 0) throw_unix(rt, 125);  // ECANCELED
+      }
+      size_t done = 0;
+      while (done < n) done += unix_call(rt, [&] { return write_fd(dst, std::span<const uint8_t>(buf.data() + done, n - done)); });
+    }
+  });
+
+  // FileKey.init: st_dev and st_ino of the descriptor's file.
+  r.bind("Lsun/nio/ch/FileKey;", "init", "(Ljava/io/FileDescriptor;)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    vfs::VStat st = io_call(rt, [&] { return fstat_fd(fd_of(rt, a.h(1))); });
+    rt::Object& self = a.self();
+    for (auto [name, value] : {std::pair{"st_dev", int64_t(st.dev ? st.dev : 0xFD00)}, std::pair{"st_ino", int64_t(st.ino)}}) {
+      rt::Field* f = find_field(self.klass, name, "J");
+      if (!f) rt.throw_new("Ljava/lang/NoSuchFieldError;", name);
+      self.fields.at(f->slot) = uint32_t(uint64_t(value));
+      self.fields.at(f->slot + 1) = uint32_t(uint64_t(value) >> 32);
+    }
+    return 0;
+  });
+
+  // MappedByteBuffer: mappings are private copies always resident; the range
+  // must still be mapped (mincore, madvise, msync: ENOMEM).
+  const char* mbb = "Ljava/nio/MappedByteBuffer;";  // instance natives
+  auto check_mapping = [](Runtime& rt, int64_t address, int64_t length) {
+    if (length > 0 && !native_range_mapped(address, uint64_t(length))) throw_io(rt, vfs::kENOMEM);
+  };
+  r.bind(mbb, "isLoaded0", "(JJJ)Z", [check_mapping](Runtime& rt, NativeArgs& a) -> uint64_t {
+    check_mapping(rt, a.i64(1), a.i64(3));
+    return 1;
+  });
+  r.bind(mbb, "load0", "(JJ)V", [check_mapping](Runtime& rt, NativeArgs& a) -> uint64_t {
+    check_mapping(rt, a.i64(1), a.i64(3));
+    return 0;
+  });
+  r.bind(mbb, "force0", "(Ljava/io/FileDescriptor;JJ)V", [check_mapping](Runtime& rt, NativeArgs& a) -> uint64_t {
+    check_mapping(rt, a.i64(2), a.i64(4));
+    return 0;
+  }, S::kPartial, "copie privée : rien à écrire dans le fichier");
+
+  // transferTo0: sendfile64 is not emulated here, which the real native
+  // reports as IOStatus.UNSUPPORTED_CASE (EINVAL): FileChannelImpl then
+  // copies through a mapping or a buffer.
+  r.bind("Lsun/nio/ch/FileChannelImpl;", "transferTo0", "(Ljava/io/FileDescriptor;JJLjava/io/FileDescriptor;)J",
+         [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_long(-6); }, S::kPartial, "repli Java (UNSUPPORTED_CASE)");
+
+  // FileSystemPreferences: locks of the Vfs are not enforced (as
+  // FileDispatcherImpl.lock0), so lockFile0 opens the file and succeeds.
+  const char* fsp = "Ljava/util/prefs/FileSystemPreferences;";
+  r.bind(fsp, "chmod", "(Ljava/lang/String;I)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (a.h(0) == kNull) rt.throw_npe({});
+    std::string path = rt.string_utf8(a.h(0));
+    try {
+      the_vfs().stat(path);
+      return 0;
+    } catch (const vfs::VfsError& e) {
+      return rt::ret_int(e.err);
+    }
+  }, S::kStub, "droits fixes dans le système de fichiers virtuel");
+  r.bind(fsp, "lockFile0", "(Ljava/lang/String;IZ)[I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    if (a.h(0) == kNull) rt.throw_npe({});
+    std::string path = rt.string_utf8(a.h(0));
+    bool shared = a.i32(2) != 0;
+    int32_t result[2] = {0, 0};
+    try {
+      result[0] = shared ? the_vfs().open(path, vfs::kO_RDONLY, 0)
+                         : the_vfs().open(path, vfs::kO_WRONLY | vfs::kO_CREAT, uint32_t(a.i32(1)));
+    } catch (const vfs::VfsError& e) {
+      result[0] = 0;
+      result[1] = e.err;
+    }
+    Handle array = rt.new_array("[I", 2);
+    std::memcpy(rt.array(array, "int[]").data.data(), result, sizeof result);
+    return array;
+  }, S::kPartial, "verrou non appliqué entre processus");
+  r.bind(fsp, "unlockFile0", "(I)I", [](Runtime&, NativeArgs& a) -> uint64_t {
+    try {
+      the_vfs().close(a.i32(0));
+      return 0;
+    } catch (const vfs::VfsError& e) {
+      return rt::ret_int(e.err);
+    }
+  });
+}
+
 void register_ch_misc(rt::NativeRegistry& r) {
   r.bind("Lsun/nio/ch/IOUtil;", "iovMax", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return 1024; });
   // NativeThread, IOUtil's descriptors and pipes: libcore_net.cpp.
@@ -462,6 +847,7 @@ void register_libcore_nio(rt::NativeRegistry& r) {
   register_unix_native_dispatcher(r);
   register_file_dispatcher(r);
   register_ch_misc(r);
+  register_nio_misc(r);
 }
 
 }  // namespace aa::bridge

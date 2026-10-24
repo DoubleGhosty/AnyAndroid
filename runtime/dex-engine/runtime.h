@@ -335,6 +335,7 @@ struct Monitor {
 struct VmThread {
   Runtime* rt = nullptr;
   uint32_t id = 0;
+  uint32_t os_tid = 0;  // the host thread's id (what gettid() reports in it)
   std::string name;
   Handle peer = kNull;  // java.lang.Thread (created lazily for attached threads)
   bool daemon = false;
@@ -448,6 +449,9 @@ struct GcStats {
   uint64_t freed = 0;
   uint64_t last_live = 0;
   double last_ms = 0;
+  double total_ms = 0;            // every collection
+  uint64_t bytes_allocated = 0;   // since start (VMDebug's art.gc.bytes-allocated)
+  uint64_t bytes_freed = 0;       // by the collections
 };
 
 class Runtime {
@@ -538,6 +542,8 @@ class Runtime {
   Handle class_mirror(Class* cls);
   Class* mirror_class(Handle h);
   size_t object_count() const { return live_objects_; }
+  // Live objects of `cls`, or of any class assignable to it (VMDebug.countInstancesOfClass).
+  uint64_t count_instances(const Class* cls, bool assignable) const;
 
   // --- Invocation ----------------------------------------------------------
   uint64_t invoke(Method* method, const uint32_t* args, uint32_t nargs);
@@ -610,6 +616,8 @@ class Runtime {
   void interrupt(VmThread* t);
   bool join(VmThread* t, int64_t millis);  // false on timeout
   VmThread* thread_of_peer(Handle peer);
+  // The threads alive now (started or attached), in their creation order.
+  std::vector<VmThread*> live_threads() const;
   // Waits until every non-daemon thread started by Thread.start() has ended.
   void wait_for_non_daemon_threads();
   // Stops every started thread (ThreadKill) and joins them. Called by ~Runtime.

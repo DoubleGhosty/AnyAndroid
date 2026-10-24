@@ -166,6 +166,7 @@ void Runtime::collect_garbage() {
   for (uint32_t i : dying) {
     Slot& s = slots_[i];
     heap_bytes_ -= std::min<size_t>(heap_bytes_, s.bytes);
+    gc_stats_.bytes_freed += s.bytes;
     s.obj.reset();
     s.bytes = 0;
     s.gen = uint8_t(s.gen + 1);
@@ -181,6 +182,7 @@ void Runtime::collect_garbage() {
   gc_stats_.freed += dying.size();
   gc_stats_.last_live = live_objects_;
   gc_stats_.last_ms = ms;
+  gc_stats_.total_ms += ms;
   if (options_.verbose_gc || log::enabled(log::Level::Debug)) {
     char buf[160];
     std::snprintf(buf, sizeof buf, "collecte #%llu : %zu objets libérés, %zu vivants, %.1f Mio, %.2f ms",
@@ -247,6 +249,16 @@ void Runtime::start_reference_daemon() {
   call_virtual(latch.get(), "<init>", "(I)V", {1});
   daemons->statics.at(latch_f->slot) = latch.get();
   call_virtual(daemon_cls->statics.at(instance_f->slot), "start", "()V");
+}
+
+uint64_t Runtime::count_instances(const Class* cls, bool assignable) const {
+  uint64_t count = 0;
+  for (const Slot& s : slots_) {
+    if (!s.obj) continue;
+    const Class* k = s.obj->klass;
+    if (k == cls || (assignable && is_assignable(k, cls))) ++count;
+  }
+  return count;
 }
 
 }  // namespace aa::rt

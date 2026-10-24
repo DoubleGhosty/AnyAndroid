@@ -56,6 +56,8 @@ public final class LibcoreProbe {
   interface Check {
     String run() throws Throwable;
   }
+  // true prints the stack of each failure (debugging a check, never committed).
+  static final boolean DEBUG = false;
 
   static void check(String what, Check c) {
     String result;
@@ -63,6 +65,10 @@ public final class LibcoreProbe {
       result = c.run();
     } catch (Throwable t) {
       result = "échec : " + t.getClass().getName();  // messages differ from ART's
+      if (DEBUG) {
+        System.out.println(t);
+        for (StackTraceElement e : t.getStackTrace()) System.out.println("  " + e);
+      }
     }
     System.out.println(what + " : " + result);
   }
@@ -830,10 +836,81 @@ public final class LibcoreProbe {
       return "résident " + vector[0] + ", sendfile " + sent + " octets : " + new String(in, 0, got, StandardCharsets.US_ASCII)
           + ", décalage " + offset.value + ", readNoThrow fermé " + closed;
     });
+    // NIO.2 with the capabilities of Android 17 (openat, futimes): a SecureDirectoryStream, owners
+    // and groups from bionic's databases, links refused in the sandbox, copies and mappings.
+    check("NIO.2 de sun.nio.fs", () -> {
+      java.nio.file.Path dir = java.nio.file.Files.createTempDirectory("nio2");
+      java.nio.file.Path a = java.nio.file.Files.write(dir.resolve("a.txt"), "contenu".getBytes(StandardCharsets.US_ASCII));
+      java.nio.file.Files.setLastModifiedTime(a, java.nio.file.attribute.FileTime.fromMillis(1_700_000_000_000L));
+      long modified = java.nio.file.Files.getLastModifiedTime(a).toMillis();
+      String owner = java.nio.file.Files.getOwner(a).getName();
+      String group = java.nio.file.Files.readAttributes(a, java.nio.file.attribute.PosixFileAttributes.class).group().getName();
+      String link;
+      try {
+        java.nio.file.Files.createLink(dir.resolve("b.txt"), a);
+        link = "créé";
+      } catch (java.nio.file.FileSystemException e) {
+        link = e.getClass().getSimpleName() + " " + e.getReason();
+      }
+      java.nio.file.Path copy = java.nio.file.Files.copy(a, dir.resolve("c.txt"));
+      String copied = new String(java.nio.file.Files.readAllBytes(copy), StandardCharsets.US_ASCII);
+      String secure;
+      int deleted = 0;
+      try (java.nio.file.DirectoryStream<java.nio.file.Path> ds = java.nio.file.Files.newDirectoryStream(dir)) {
+        secure = String.valueOf(ds instanceof java.nio.file.SecureDirectoryStream);
+        if (ds instanceof java.nio.file.SecureDirectoryStream) {
+          java.nio.file.SecureDirectoryStream<java.nio.file.Path> sds = (java.nio.file.SecureDirectoryStream<java.nio.file.Path>) ds;
+          sds.deleteFile(java.nio.file.Paths.get("c.txt"));
+          deleted++;
+        }
+      }
+      java.nio.file.Files.delete(a);
+      java.nio.file.Files.delete(dir);
+      return "mtime " + modified + ", propriétaire " + owner + ", groupe " + group + ", lien " + link + ", copie " + copied
+          + ", flux sûr " + secure + ", supprimé par lui " + deleted;
+    });
+    check("transferTo et MappedByteBuffer", () -> {
+      File src = scratch("transfert.bin");
+      File dst = scratch("transfert.copie");
+      java.nio.file.Files.write(src.toPath(), "0123456789".getBytes(StandardCharsets.US_ASCII));
+      long moved;
+      try (FileChannel in = FileChannel.open(src.toPath(), StandardOpenOption.READ);
+           FileChannel out = FileChannel.open(dst.toPath(), StandardOpenOption.CREATE, StandardOpenOption.WRITE,
+               StandardOpenOption.TRUNCATE_EXISTING)) {
+        moved = in.transferTo(2, 5, out);
+      }
+      String mapped;
+      try (FileChannel ch = FileChannel.open(src.toPath(), StandardOpenOption.READ)) {
+        java.nio.MappedByteBuffer m = ch.map(FileChannel.MapMode.READ_ONLY, 0, 10);
+        m.load();
+        mapped = m.isLoaded() + " " + (char) m.get(9);
+      }
+      String copied = new String(java.nio.file.Files.readAllBytes(dst.toPath()), StandardCharsets.US_ASCII);
+      src.delete();
+      dst.delete();
+      return moved + " octets transférés : " + copied + ", mappé chargé " + mapped;
+    });
+    check("VMDebug", () -> {
+      Class<?> vmDebug = Class.forName("dalvik.system.VMDebug");
+      Object[] keep = {new CountedMarker(), new CountedMarker(), new CountedMarker()};
+      long count = (Long) vmDebug.getMethod("countInstancesOfClass", Class.class, boolean.class).invoke(null, CountedMarker.class, false);
+      Map<?, ?> stats = (Map<?, ?>) vmDebug.getMethod("getRuntimeStats").invoke(null);
+      String attach;
+      try {
+        vmDebug.getMethod("attachAgent", String.class, ClassLoader.class).invoke(null, "agent.so", null);
+        attach = "attaché";
+      } catch (InvocationTargetException e) {
+        attach = e.getCause().getClass().getSimpleName() + ": " + e.getCause().getMessage();
+      }
+      return keep.length + " marqueurs comptés " + count + ", statistiques " + stats.size() + ", gc-count "
+          + (stats.get("art.gc.gc-count") != null) + ", agent " + attach;
+    });
     // Android 17: OsConstantsHolder.initConstants fills these from bionic's headers.
     check("OsConstantsHolder et sysconf", () -> "AI_ADDRCONFIG 0x" + Integer.toHexString(OsConstants.AI_ADDRCONFIG)
         + ", EAI_NONAME " + OsConstants.EAI_NONAME + ", SIGRTMIN " + OsConstants.SIGRTMIN
         + ", O_NOFOLLOW 0" + Integer.toOctalString(OsConstants.O_NOFOLLOW)
         + ", sysconf(_SC_PAGESIZE = 0x" + Integer.toHexString(OsConstants._SC_PAGESIZE) + ") " + Os.sysconf(OsConstants._SC_PAGESIZE));
   }
+
+  static final class CountedMarker {}
 }

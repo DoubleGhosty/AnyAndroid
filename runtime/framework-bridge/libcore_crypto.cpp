@@ -1,6 +1,7 @@
 // Message digests of conscrypt (com.android.org.conscrypt.NativeCrypto's
 // EVP_MD / EVP_MD_CTX natives) on top of common/hash, behind
-// MessageDigest.getInstance("MD5"/"SHA-1"/"SHA-224"/"SHA-256"/"SHA-384"/"SHA-512").
+// MessageDigest.getInstance("MD5"/"SHA-1"/"SHA-224"/"SHA-256"/"SHA-384"/"SHA-512"),
+// and RAND_bytes behind SecureRandom (conscrypt's OpenSSLRandom, the default).
 //
 // Java never holds a pointer. An EVP_MD is a constant naming an algorithm,
 // tagged so that a context handle or a forged long is not taken for one. An
@@ -19,9 +20,11 @@
 // capped at kMaxContexts (about 300 bytes each): past it, after a collection,
 // EVP_MD_CTX_create throws OutOfMemoryError as conscrypt does when allocation
 // fails.
+#define _CRT_RAND_S  // rand_s(): the system's cryptographic generator
 #include "framework-bridge/internal.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <optional>
@@ -253,6 +256,19 @@ void register_libcore_crypto(rt::NativeRegistry& r) {
     return rt::ret_obj(string_array(rt, {}));
   }, S::kStub, "aucune suite TLS : TLS non pris en charge");
   r.bind(nc, "EVP_has_aes_hardware", "()I", [](Runtime&, NativeArgs&) -> uint64_t { return rt::ret_int(0); });
+
+  // OpenSSLRandom.engineNextBytes: BoringSSL's RAND_bytes reads the kernel's
+  // generator; here the system's (RtlGenRandom, as /dev/urandom). A null array
+  // is ScopedByteArrayRW's NullPointerException.
+  r.bind(nc, "RAND_bytes", "([B)V", [](Runtime& rt, NativeArgs& a) -> uint64_t {
+    rt::ArrayObject& arr = byte_array(rt, a.h(0), "output", "output == null");
+    for (size_t i = 0; i < arr.data.size();) {
+      unsigned int bits = 0;
+      if (rand_s(&bits) != 0) rt.throw_new("Ljava/lang/RuntimeException;", "NativeCrypto_RAND_bytes");
+      for (int k = 0; k < 4 && i < arr.data.size(); ++k, ++i) arr.data[i] = uint8_t(bits >> (8 * k));
+    }
+    return 0;
+  });
 
   // JNI GetDirectBufferAddress: Buffer.address, an emulated native address for
   // a direct buffer (0 otherwise, and conscrypt then copies the bytes).
