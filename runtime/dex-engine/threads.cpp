@@ -9,6 +9,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <csetjmp>
+#include <exception>
+#include <functional>
 
 #include "common/clock.h"
 #include "common/log.h"
@@ -170,6 +173,35 @@ void Runtime::yield_thread() {
   if (!t || gil_waiters_ == 0) return;
   uint64_t generation = gil_generation_;
   park(t, gil_handoff_, [&] { return gil_generation_ != generation || gil_waiters_ == 0; }, 0);
+}
+
+void Runtime::run_blocking(const std::function<void()>& fn) {
+  VmThread* t = running_;
+  if (!t) {
+    fn();
+    return;
+  }
+  // Spill callee-saved registers and record the stack top for the collector.
+  setjmp(t->parked_regs);
+  volatile char marker = 0;
+  t->parked_sp = const_cast<char*>(&marker);
+  running_ = nullptr;
+  t->gil.unlock();
+  std::exception_ptr error;
+  try {
+    fn();
+  } catch (...) {
+    error = std::current_exception();
+  }
+  gil_waiters_++;
+  t->gil.lock();
+  gil_waiters_--;
+  gil_generation_++;
+  gil_handoff_.notify_all();
+  running_ = t;
+  t->parked_sp = nullptr;
+  if (error) std::rethrow_exception(error);
+  if (shutting_down_ && !t->attached) throw ThreadKill{};
 }
 
 void Runtime::safepoint() {

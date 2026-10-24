@@ -139,6 +139,11 @@ if(AA_LIBCORE_DIR)
       aa_e2e(host-libcore CODE 0 GOLDEN host-libcore.txt
         ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
              ${S}/hello-dex.apk aa.host.LibcoreProbe)
+      # G2: libcore's sockets on Winsock (loopback only), for an application holding
+      # android.permission.INTERNET; host-libcore checks the refusal without it.
+      aa_e2e(host-net CODE 0 GOLDEN host-net.txt
+        ARGS exec --bootclasspath ${AA_LIBCORE_DIR} --system-image ${AA_SYSTEM_IMAGE} --host-dex ${AA_HOST_DEX}
+             ${S}/net-demo.apk aa.host.NetProbe)
       # J3: local system services ("package" through the framework's PackageParser), and the
       # trace of the framework's calls to them.
       aa_e2e(host-services CODE 0 GOLDEN host-services.txt

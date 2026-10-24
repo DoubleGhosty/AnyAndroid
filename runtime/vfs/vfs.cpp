@@ -1063,6 +1063,17 @@ int32_t Vfs::open(std::string_view path, int32_t flags, uint32_t mode) {
   return fd;
 }
 
+int32_t Vfs::install(std::shared_ptr<OpenFile> file, int32_t flags, std::string path) {
+  if (fds_.size() >= kMaxOpenFiles) throw VfsError{kEMFILE, path};
+  auto entry = std::make_shared<Fd>();
+  entry->file = std::move(file);
+  entry->flags = flags;
+  entry->path = std::move(path);
+  int32_t fd = lowest_free_fd();
+  fds_[fd] = std::move(entry);
+  return fd;
+}
+
 int32_t Vfs::lowest_free_fd() const {
   int32_t fd = 3;
   while (fds_.count(fd)) ++fd;
@@ -1129,7 +1140,10 @@ size_t Vfs::pwrite(int32_t fd, std::span<const uint8_t> data, uint64_t offset) {
 
 int64_t Vfs::lseek(int32_t fd, int64_t offset, int32_t whence) {
   Fd& e = fd_entry(fd);
-  if (!e.file->seekable()) return 0;
+  if (!e.file->seekable()) {
+    if (e.file->stat().type == NodeType::kSocket) throw VfsError{kESPIPE, e.path};
+    return 0;
+  }
   int64_t base = whence == 0 ? 0 : whence == 1 ? int64_t(e.pos) : whence == 2 ? int64_t(e.file->stat().size) : -1;
   if (base < 0) throw VfsError{kEINVAL, e.path};
   int64_t pos = base + offset;
@@ -1148,6 +1162,11 @@ void Vfs::ftruncate(int32_t fd, uint64_t size) {
 
 void Vfs::fsync(int32_t fd) { fd_entry(fd).file->sync(); }
 int32_t Vfs::open_flags(int32_t fd) { return fd_entry(fd).flags; }
+void Vfs::set_status_flags(int32_t fd, int32_t flags) {
+  Fd& e = fd_entry(fd);
+  constexpr int32_t kChangeable = kO_APPEND | kO_NONBLOCK;
+  e.flags = (e.flags & ~kChangeable) | (flags & kChangeable);
+}
 std::string Vfs::fd_path(int32_t fd) { return fd_entry(fd).path; }
 
 std::shared_ptr<OpenFile> Vfs::open_file(int32_t fd) { return fd_entry(fd).file; }

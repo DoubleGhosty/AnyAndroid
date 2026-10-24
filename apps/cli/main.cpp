@@ -603,7 +603,12 @@ int cmd_exec(const Args& a) {
         if (p.file) dex_files.push_back(p.file.get());
         else err(p.entry + " ignoré : " + p.error);
       }
-      if (apk->manifest) package = apk->manifest->package;
+      if (apk->manifest) {
+        package = apk->manifest->package;
+        const auto& perms = apk->manifest->permissions;
+        bridge::libcore_config().internet =
+            std::find(perms.begin(), perms.end(), "android.permission.INTERNET") != perms.end();
+      }
       if (!apk->native_libs.empty()) log::warn("compat", "bibliothèques natives présentes : elles ne seront pas chargées");
     }
   } catch (const std::exception& e) {

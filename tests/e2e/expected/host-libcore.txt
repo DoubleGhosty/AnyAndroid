@@ -65,4 +65,6 @@ java.time America/New_York : 2026-03-08 01:30 -05:00 puis 2026-03-08 03:30 -04:0
 zone inconnue : GMT
 dup, dup2, fcntl, ioctl : FIONREAD 7, FD_CLOEXEC de la copie false
 getpgid, umask : groupe true, umask rendu 22
+socket sans la permission INTERNET : socket failed: EACCES (Permission denied)
+nom sans la permission INTERNET : SecurityException: Permission denied (missing INTERNET permission?) (cause android_getaddrinfo failed: EAI_NODATA (No address associated with hostname))
 OsConstantsHolder et sysconf : AI_ADDRCONFIG 0x400, EAI_NONAME 8, SIGRTMIN 42, O_NOFOLLOW 0400000, sysconf(_SC_PAGESIZE = 0x27) 4096

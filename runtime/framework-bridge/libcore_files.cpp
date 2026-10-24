@@ -144,6 +144,8 @@ std::string path_arg(Runtime& rt, Handle h) {
   return rt.string_utf8(h);
 }
 
+}  // namespace
+
 Handle new_file_descriptor(Runtime& rt, int32_t fd) {
   Handle h = construct(rt, "Ljava/io/FileDescriptor;", "()V", {});
   rt::Field* f = find_field(rt.class_of(h), "descriptor", "I");
@@ -151,6 +153,8 @@ Handle new_file_descriptor(Runtime& rt, int32_t fd) {
   rt.object(h)->fields.at(f->slot) = uint32_t(fd);
   return h;
 }
+
+namespace {
 
 // byte[] buffer, bounds-checked. Direct ByteBuffers are not supported yet.
 std::span<uint8_t> byte_range(Runtime& rt, Handle buffer, int32_t offset, int32_t count) {
@@ -166,6 +170,8 @@ std::span<uint8_t> byte_range(Runtime& rt, Handle buffer, int32_t offset, int32_
   }
   return std::span<uint8_t>(arr->data.data() + offset, size_t(count));
 }
+
+}  // namespace
 
 // Buffer range from a byte[] or a Direct/Heap ByteBuffer.
 std::span<uint8_t> extract_io_buffer(Runtime& rt, Handle buffer, int32_t offset, int32_t count, bool write) {
@@ -189,6 +195,8 @@ std::span<uint8_t> extract_io_buffer(Runtime& rt, Handle buffer, int32_t offset,
   }
   rt.throw_unsupported(o.klass->descriptor + " comme tampon d'E/S", "seuls les byte[] et ByteBuffer sont pris en charge");
 }
+
+namespace {
 
 // Wide arguments for Java constructors.
 void push_long(std::vector<uint32_t>& v, int64_t x) {
@@ -228,7 +236,10 @@ void register_linux(rt::NativeRegistry& r) {
   // IoBridge.closeAndSignalBlockedThreads(): wakes threads blocked in I/O on
   // the descriptor. Virtual files never block, so there is nobody to wake.
   r.bind("Llibcore/io/AsynchronousCloseMonitor;", "signalBlockedThreads", "(Ljava/io/FileDescriptor;)V",
-         [](Runtime&, NativeArgs&) -> uint64_t { return 0; }, S::kPartial, "aucune E/S bloquante sur les fichiers virtuels");
+         [](Runtime& rt, NativeArgs& a) -> uint64_t {
+           signal_socket(fd_of(rt, a.h(0)));  // virtual files never block
+           return 0;
+         });
   const char* lx = "Llibcore/io/Linux;";  // instance methods: argument 0 is the Linux object
   r.bind(lx, "open", "(Ljava/lang/String;II)Ljava/io/FileDescriptor;", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     std::string path = path_arg(rt, a.h(1));
@@ -249,6 +260,7 @@ void register_linux(rt::NativeRegistry& r) {
     int32_t fd = fd_of(rt, a.h(1));
     auto buf = extract_io_buffer(rt, a.h(2), a.i32(3), a.i32(4), true);
     if (buf.empty()) return 0;
+    if (auto n = socket_read(rt, fd, buf)) return rt::ret_int(int32_t(*n));
     // 0 at the end, as read(2); IoBridge maps it to -1.
     return rt::ret_int(int32_t(guarded(rt, "read", [&] { return read_fd(fd, buf); })));
   }, S::kPartial, "système de fichiers virtuel");
@@ -264,8 +276,9 @@ void register_linux(rt::NativeRegistry& r) {
   r.bind(lx, "writeBytes", "(Ljava/io/FileDescriptor;Ljava/lang/Object;II)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(1));
     auto buf = extract_io_buffer(rt, a.h(2), a.i32(3), a.i32(4), false);
+    if (auto n = socket_write(rt, fd, buf)) return rt::ret_int(int32_t(*n));
     return rt::ret_int(int32_t(guarded(rt, "write", [&] { return write_fd(fd, buf); })));
-  }, S::kPartial, "sorties standard et système de fichiers virtuel");
+  }, S::kPartial, "sorties standard, système de fichiers virtuel et sockets");
   r.bind(lx, "preadBytes", "(Ljava/io/FileDescriptor;Ljava/lang/Object;IIJ)I", [](Runtime& rt, NativeArgs& a) -> uint64_t {
     int32_t fd = fd_of(rt, a.h(1));
     auto buf = extract_io_buffer(rt, a.h(2), a.i32(3), a.i32(4), true);
@@ -538,10 +551,15 @@ void register_linux(rt::NativeRegistry& r) {
     return fcntl_get(rt, fd_of(rt, a.h(1)), a.i32(2));
   }, S::kPartial, "F_GETFD et F_GETFL");
   r.bind(lx, "fcntlInt", "(Ljava/io/FileDescriptor;II)I", [fcntl_get](Runtime& rt, NativeArgs& a) -> uint64_t {
-    int32_t cmd = a.i32(2);
-    if (cmd == 2 || cmd == 4) return 0;  // F_SETFD, F_SETFL: accepted without effect
-    return fcntl_get(rt, fd_of(rt, a.h(1)), cmd);
-  }, S::kPartial, "F_GETFD et F_GETFL ; F_SETFD et F_SETFL sans effet");
+    int32_t fd = fd_of(rt, a.h(1)), cmd = a.i32(2);
+    if (cmd == 2) return 0;  // F_SETFD: no FD_CLOEXEC bookkeeping
+    if (cmd == 4) {          // F_SETFL: O_APPEND and O_NONBLOCK
+      if (fd > 2) guarded(rt, "fcntl", [&] { the_vfs().set_status_flags(fd, a.i32(3)); });
+      socket_status_flags(fd, a.i32(3));
+      return 0;
+    }
+    return fcntl_get(rt, fd, cmd);
+  }, S::kPartial, "F_GETFD, F_GETFL et F_SETFL ; F_SETFD sans effet");
 
   // ioctl(fd, cmd, &arg), the int argument returned (Linux_ioctlInt):
   // FIONREAD, the bytes left to read, is what IoBridge.available asks.
@@ -550,12 +568,13 @@ void register_linux(rt::NativeRegistry& r) {
     constexpr int32_t kFionread = 0x541B;
     if (a.i32(2) != kFionread) throw_errno(rt, "ioctl", vfs::kENOTTY);
     if (fd >= 0 && fd <= 2) return 0;  // nothing waiting on the standard streams
+    if (auto n = socket_available(rt, fd)) return rt::ret_int(*n);
     return rt::ret_int(guarded(rt, "ioctl", [&] {
       int64_t pos = the_vfs().lseek(fd, 0, 1);
       int64_t left = int64_t(the_vfs().fstat(fd).size) - pos;
       return int32_t(std::clamp<int64_t>(left, 0, INT32_MAX));
     }));
-  }, S::kPartial, "FIONREAD sur le VFS");
+  }, S::kPartial, "FIONREAD sur le VFS et les sockets");
 
   // Contrôle de processus
   r.bind(lx, "prctl", "(IJJJJ)I", [](Runtime&, NativeArgs&) -> uint64_t {

@@ -747,6 +747,23 @@ public final class LibcoreProbe {
       int back = Os.umask(old);
       return "groupe " + group + ", umask rendu " + Integer.toOctalString(back);
     });
+    // This application (hello-dex) lacks android.permission.INTERNET: Android keeps it out of
+    // the inet group, so Internet sockets and name lookups are refused.
+    check("socket sans la permission INTERNET", () -> {
+      try {
+        Os.close(Os.socket(OsConstants.AF_INET, OsConstants.SOCK_STREAM, 0));
+        return "créé";
+      } catch (android.system.ErrnoException e) {
+        return e.getMessage();
+      }
+    });
+    check("nom sans la permission INTERNET", () -> {
+      try {
+        return String.valueOf(java.net.InetAddress.getByName("localhost"));
+      } catch (SecurityException e) {
+        return e.getClass().getSimpleName() + ": " + e.getMessage() + " (cause " + e.getCause().getMessage() + ")";
+      }
+    });
     // Android 17: OsConstantsHolder.initConstants fills these from bionic's headers.
     check("OsConstantsHolder et sysconf", () -> "AI_ADDRCONFIG 0x" + Integer.toHexString(OsConstants.AI_ADDRCONFIG)
         + ", EAI_NONAME " + OsConstants.EAI_NONAME + ", SIGRTMIN " + OsConstants.SIGRTMIN

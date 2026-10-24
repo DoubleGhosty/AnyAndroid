@@ -33,6 +33,7 @@ aa_sample(basic-activity)
 aa_sample(two-screens)
 aa_sample(dialog-demo)
 aa_sample(resources-demo)
+aa_sample(net-demo)
 aa_sample(native-lib EXTRA_ARGS
   --stub-lib lib/arm64-v8a/libnative.so:aarch64
   --stub-lib lib/x86_64/libnative.so:x86_64)

@@ -600,6 +600,10 @@ class Runtime {
   // NEW or TERMINATED without a live thread, depending on `started`.
   int32_t thread_state(Handle thread_peer, bool started);
   void yield_thread();
+  // Runs fn() with the GIL released, for a blocking system call (sockets):
+  // other Java threads run meanwhile. fn must not touch Java objects, nor the
+  // runtime; the caller's stack stays visible to the collector, as in park().
+  void run_blocking(const std::function<void()>& fn);
   void interrupt(VmThread* t);
   bool join(VmThread* t, int64_t millis);  // false on timeout
   VmThread* thread_of_peer(Handle peer);

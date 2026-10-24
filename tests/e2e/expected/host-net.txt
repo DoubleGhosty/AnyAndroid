@@ -1,0 +1,8 @@
+localhost : localhost/127.0.0.1, 1 adresse, nom inverse localhost
+TCP en boucle locale : BONJOUR, 262143 octets en écho, fin -1, 2 lignes puis fin de flux, pair /127.0.0.1, ports true, local /127.0.0.1
+options de socket : TCP_NODELAY true, SO_KEEPALIVE true, SO_LINGER 5, SO_REUSEADDR true, SO_TIMEOUT 1500
+délai de lecture : SocketTimeoutException après au moins 200 ms : true
+connexion refusée : ConnectException, ECONNREFUSED true
+connexion avec délai : connecté true, pair true
+fermeture pendant accept : java.net.SocketException: Socket closed, fil terminé true
+UDP en boucle locale : datagramme de /127.0.0.1, port de l'émetteur true, tronqué à 4 : data

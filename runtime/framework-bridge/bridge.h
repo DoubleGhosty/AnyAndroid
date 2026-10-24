@@ -114,6 +114,10 @@ struct LibcoreConfig {
   std::string class_path;               // application class path
   std::vector<std::string> properties;  // VMRuntime.properties(): "key=value" (-D options)
   std::shared_ptr<vfs::Vfs> vfs;        // file system of the process (ADR-005); /dev only if unset
+  // Internet sockets allowed: android.permission.INTERNET, without which
+  // Android leaves the process out of the inet group and socket() fails
+  // with EACCES for AF_INET and AF_INET6.
+  bool internet = true;
 };
 LibcoreConfig& libcore_config();
 void register_libcore_natives(rt::NativeRegistry& registry);

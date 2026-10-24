@@ -38,11 +38,12 @@ struct VfsError {
   std::string context;
 };
 
-enum class NodeType { kFile, kDirectory, kSymlink, kCharDevice };
+enum class NodeType { kFile, kDirectory, kSymlink, kCharDevice, kSocket };
 
 // Linux open(2) flags (x86_64 values, as published by OsConstants).
 constexpr int32_t kO_ACCMODE = 03, kO_RDONLY = 0, kO_WRONLY = 01, kO_RDWR = 02, kO_CREAT = 0100, kO_EXCL = 0200,
-                  kO_TRUNC = 01000, kO_APPEND = 02000, kO_DIRECTORY = 0200000, kO_NOFOLLOW = 0400000;
+                  kO_TRUNC = 01000, kO_APPEND = 02000, kO_NONBLOCK = 04000, kO_DIRECTORY = 0200000,
+                  kO_NOFOLLOW = 0400000;
 
 struct VStat {
   NodeType type = NodeType::kFile;
@@ -131,6 +132,9 @@ class Vfs {
   // POSIX, descriptors made by dup and dup2 share one open file description:
   // the file, its offset and its status flags.
   int32_t open(std::string_view path, int32_t flags, uint32_t mode);
+  // A descriptor for an open file made outside the mount points (a socket):
+  // the lowest free one, EMFILE beyond the limit.
+  int32_t install(std::shared_ptr<OpenFile> file, int32_t flags, std::string path);
   int32_t dup(int32_t fd);
   // newfd (3 and above) refers to fd's open file description, closed first if open.
   void dup2(int32_t fd, int32_t newfd);
@@ -145,6 +149,8 @@ class Vfs {
   void ftruncate(int32_t fd, uint64_t size);
   void fsync(int32_t fd);
   int32_t open_flags(int32_t fd);
+  // fcntl(F_SETFL): only O_APPEND and O_NONBLOCK change, as in Linux.
+  void set_status_flags(int32_t fd, int32_t flags);
   std::string fd_path(int32_t fd);
   // The open file behind `fd`; stays usable after close (file mappings).
   std::shared_ptr<OpenFile> open_file(int32_t fd);

@@ -227,6 +227,23 @@ vfs::VStat fstat_fd(int32_t fd);
 // memory (mmap without MAP_SHARED); ENOMEM beyond 2 GiB, checked first. A
 // read-only mapping is read when first touched, as the pages of a real one.
 int64_t map_fd_copy(rt::Runtime& rt, int32_t fd, uint64_t offset, uint64_t length, bool writable);
+// A FileDescriptor object for `fd`, and the byte range of an I/O buffer
+// argument (byte[], or a direct or heap ByteBuffer), bounds-checked.
+rt::Handle new_file_descriptor(rt::Runtime& rt, int32_t fd);
+std::span<uint8_t> extract_io_buffer(rt::Runtime& rt, rt::Handle buffer, int32_t offset, int32_t count, bool write);
+
+// Sockets of the process (libcore_net.cpp), for the descriptor natives of
+// libcore_files.cpp; nullopt when `fd` is no socket. Reads and writes block
+// like read(2) and write(2) on a socket, the GIL released.
+std::optional<size_t> socket_read(rt::Runtime& rt, int32_t fd, std::span<uint8_t> out);
+std::optional<size_t> socket_write(rt::Runtime& rt, int32_t fd, std::span<const uint8_t> data);
+// ioctl(FIONREAD) of a socket.
+std::optional<int32_t> socket_available(rt::Runtime& rt, int32_t fd);
+// fcntl(F_SETFL) on a socket: its O_NONBLOCK.
+void socket_status_flags(int32_t fd, int32_t flags);
+// AsynchronousCloseMonitor.signalBlockedThreads: the threads blocked on the
+// socket stop waiting (SocketException "Socket closed").
+void signal_socket(int32_t fd);
 
 void register_libcore_nio(rt::NativeRegistry& r);
 void register_libcore_zip(rt::NativeRegistry& r);
@@ -236,6 +253,7 @@ void register_libcore_regex(rt::NativeRegistry& r);
 void register_libcore_lang(rt::NativeRegistry& r);
 void register_libcore_math(rt::NativeRegistry& r);
 void register_libcore_icu(rt::NativeRegistry& r);
+void register_libcore_net(rt::NativeRegistry& r);
 
 // Class loaders (libcore_dex.cpp, ADR-006 J2). The defining loader of a class
 // as Class.getClassLoader() reports it (boot space: BootClassLoader, or null

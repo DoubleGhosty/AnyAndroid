@@ -27,6 +27,10 @@ public final class Os {
     throw new RuntimeException("stub");
   }
 
+  public static FileDescriptor socket(int domain, int type, int protocol) throws ErrnoException {
+    throw new RuntimeException("stub");
+  }
+
   public static FileDescriptor dup(FileDescriptor oldFd) throws ErrnoException {
     throw new RuntimeException("stub");
   }

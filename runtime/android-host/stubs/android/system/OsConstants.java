@@ -15,6 +15,8 @@ public final class OsConstants {
   public static final int EAI_NONAME = Stubs.integer();
   public static final int SIGRTMIN = Stubs.integer();
   public static final int _SC_PAGESIZE = Stubs.integer();
+  public static final int AF_INET = Stubs.integer();
+  public static final int SOCK_STREAM = Stubs.integer();
 }
 
 final class Stubs {
