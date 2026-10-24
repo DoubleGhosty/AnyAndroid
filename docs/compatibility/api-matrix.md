@@ -5,10 +5,10 @@
 
 | Statut | Signification | Membres |
 |---|---|---|
-| Supportée | comportement testé et documenté pour le périmètre annoncé | 803 |
-| Partielle | chemin courant pris en charge, limites connues | 63 |
+| Supportée | comportement testé et documenté pour le périmètre annoncé | 879 |
+| Partielle | chemin courant pris en charge, limites connues | 57 |
 | Stub | API reconnue mais sans effet réel | 23 |
-| Non supportée | reconnue mais refusée avec une erreur explicite | 23 |
+| Non supportée | reconnue mais refusée avec une erreur explicite | 18 |
 
 ## `android.app.Activity`
 
@@ -445,6 +445,7 @@ Classe : **Partielle** — pas de défilement
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.io.PrintStream`
 
@@ -482,6 +483,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.ArithmeticException`
 
@@ -491,6 +493,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.ArrayIndexOutOfBoundsException`
 
@@ -500,6 +503,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.ArrayStoreException`
 
@@ -509,6 +513,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.AssertionError`
 
@@ -518,6 +523,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 | `<init>(Ljava/lang/Object;)V` | Supportée |  |
 
 ## `java.lang.AutoCloseable` (interface)
@@ -615,18 +621,23 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `getDeclaredField(Ljava/lang/String;)Ljava/lang/reflect/Field;` | Supportée |  |
 | `getField(Ljava/lang/String;)Ljava/lang/reflect/Field;` | Supportée |  |
 | `getInterfaces()[Ljava/lang/Class;` | Supportée |  |
-| `getModifiers()I` | Partielle | modificateurs des classes internes non lus (InnerClass) |
+| `getModifiers()I` | Supportée |  |
 | `isAssignableFrom(Ljava/lang/Class;)Z` | Supportée |  |
 | `getComponentType()Ljava/lang/Class;` | Supportée |  |
 | `isPrimitive()Z` | Supportée |  |
 | `isEnum()Z` | Supportée |  |
 | `cast(Ljava/lang/Object;)Ljava/lang/Object;` | Supportée |  |
 | `getClassLoader()Ljava/lang/ClassLoader;` | Supportée |  |
-| `getAnnotation(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;` | Non supportée | annotations DEX non lues dans cette version (prévu en G2) |
-| `getAnnotations()[Ljava/lang/annotation/Annotation;` | Non supportée | annotations DEX non lues dans cette version (prévu en G2) |
-| `isAnnotationPresent(Ljava/lang/Class;)Z` | Non supportée | annotations DEX non lues dans cette version (prévu en G2) |
+| `getAnnotation(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;` | Supportée |  |
+| `getDeclaredAnnotations()[Ljava/lang/annotation/Annotation;` | Supportée |  |
+| `getAnnotations()[Ljava/lang/annotation/Annotation;` | Supportée |  |
+| `isAnnotationPresent(Ljava/lang/Class;)Z` | Supportée |  |
 | `getEnclosingClass()Ljava/lang/Class;` | Supportée |  |
+| `isProxy()Z` | Supportée |  |
 | `getDeclaringClass()Ljava/lang/Class;` | Supportée |  |
+| `getSignatureAnnotation()[Ljava/lang/String;` | Supportée |  |
+| `getDeclaredAnnotation(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;` | Supportée |  |
+| `isDeclaredAnnotationPresent(Ljava/lang/Class;)Z` | Supportée |  |
 
 ## `java.lang.ClassCastException`
 
@@ -636,6 +647,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.ClassCircularityError`
 
@@ -645,6 +657,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.ClassFormatError`
 
@@ -654,6 +667,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.ClassLoader`
 
@@ -673,6 +687,7 @@ Classe : **Partielle** — un seul chargeur (classes de l'application) ; pas de 
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.CloneNotSupportedException`
 
@@ -682,6 +697,7 @@ Classe : **Partielle** — un seul chargeur (classes de l'application) ; pas de 
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.Cloneable` (interface)
 
@@ -730,6 +746,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.Exception`
 
@@ -739,6 +756,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.ExceptionInInitializerError`
 
@@ -748,6 +766,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.Float`
 
@@ -777,6 +796,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.IllegalMonitorStateException`
 
@@ -790,6 +810,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.IllegalThreadStateException`
 
@@ -803,6 +824,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.IndexOutOfBoundsException`
 
@@ -812,6 +834,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.InstantiationError`
 
@@ -821,6 +844,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.InstantiationException`
 
@@ -830,6 +854,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.Integer`
 
@@ -861,6 +886,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.InterruptedException`
 
@@ -870,6 +896,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.Iterable` (interface)
 
@@ -885,6 +912,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.Long`
 
@@ -950,6 +978,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.NoClassDefFoundError`
 
@@ -959,6 +988,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.NoSuchFieldError`
 
@@ -968,6 +998,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.NoSuchFieldException`
 
@@ -981,6 +1012,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.NoSuchMethodException`
 
@@ -994,6 +1026,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.Number`
 
@@ -1014,6 +1047,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.Object`
 
@@ -1041,6 +1075,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.ReflectiveOperationException`
 
@@ -1050,6 +1085,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.Runnable` (interface)
 
@@ -1065,6 +1101,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.SecurityException`
 
@@ -1074,6 +1111,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.Short`
 
@@ -1097,6 +1135,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.String`
 
@@ -1218,6 +1257,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.System`
 
@@ -1250,6 +1290,11 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/Runnable;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/Runnable;Ljava/lang/String;)V` | Supportée |  |
+| `<init>(Ljava/lang/ThreadGroup;Ljava/lang/Runnable;)V` | Supportée |  |
+| `<init>(Ljava/lang/ThreadGroup;Ljava/lang/String;)V` | Supportée |  |
+| `<init>(Ljava/lang/ThreadGroup;Ljava/lang/Runnable;Ljava/lang/String;)V` | Supportée |  |
+| `<init>(Ljava/lang/ThreadGroup;Ljava/lang/Runnable;Ljava/lang/String;J)V` | Supportée |  |
+| `<init>(Ljava/lang/ThreadGroup;Ljava/lang/Runnable;Ljava/lang/String;JZ)V` | Supportée |  |
 | `run()V` | Supportée |  |
 | `start()V` | Supportée |  |
 | `currentThread()Ljava/lang/Thread;` (statique) | Supportée |  |
@@ -1284,6 +1329,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 | `getMessage()Ljava/lang/String;` | Supportée |  |
 | `getLocalizedMessage()Ljava/lang/String;` | Supportée |  |
 | `getCause()Ljava/lang/Throwable;` | Supportée |  |
@@ -1305,6 +1351,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.UnsupportedOperationException`
 
@@ -1314,6 +1361,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.VerifyError`
 
@@ -1323,6 +1371,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.VirtualMachineError`
 
@@ -1332,6 +1381,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.lang.Void`
 
@@ -1339,19 +1389,29 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 |---|---|---|
 | `TYPE:Ljava/lang/Class;` (statique) | Supportée |  |
 
+## `java.lang.invoke.WrongMethodTypeException`
+
+| Membre | Statut | Note |
+|---|---|---|
+| `<init>()V` | Supportée |  |
+| `<init>(Ljava/lang/String;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
+
 ## `java.lang.ref.Reference`
 
 | Membre | Statut | Note |
 |---|---|---|
 | `<init>(Ljava/lang/Object;)V` | Supportée |  |
-| `<init>(Ljava/lang/Object;Ljava/lang/ref/ReferenceQueue;)V` | Partielle | jamais mise en file par le ramasse-miettes |
+| `<init>(Ljava/lang/Object;Ljava/lang/ref/ReferenceQueue;)V` | Supportée |  |
 | `get()Ljava/lang/Object;` | Supportée |  |
 | `clear()V` | Supportée |  |
 | `reachabilityFence(Ljava/lang/Object;)V` (statique) | Supportée |  |
 
 ## `java.lang.ref.ReferenceQueue`
 
-Classe : **Partielle** — les références ne sont jamais mises en file
+Classe : **Partielle** — les références ne sont jamais mises en file sans la libcore
 
 | Membre | Statut | Note |
 |---|---|---|
@@ -1364,23 +1424,24 @@ Classe : **Partielle** — conservée tant que le prototype n'a pas de notion de
 | Membre | Statut | Note |
 |---|---|---|
 | `<init>(Ljava/lang/Object;)V` | Supportée |  |
-| `<init>(Ljava/lang/Object;Ljava/lang/ref/ReferenceQueue;)V` | Partielle | jamais mise en file par le ramasse-miettes |
+| `<init>(Ljava/lang/Object;Ljava/lang/ref/ReferenceQueue;)V` | Supportée |  |
 
 ## `java.lang.ref.WeakReference`
 
 | Membre | Statut | Note |
 |---|---|---|
 | `<init>(Ljava/lang/Object;)V` | Supportée |  |
-| `<init>(Ljava/lang/Object;Ljava/lang/ref/ReferenceQueue;)V` | Partielle | jamais mise en file par le ramasse-miettes |
+| `<init>(Ljava/lang/Object;Ljava/lang/ref/ReferenceQueue;)V` | Supportée |  |
 
 ## `java.lang.reflect.AccessibleObject`
 
 | Membre | Statut | Note |
 |---|---|---|
 | `setAccessible(Z)V` | Partielle | aucun contrôle d'accès n'est appliqué par le prototype |
-| `isAccessible()Z` | Supportée |  |
-| `getAnnotation(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;` | Non supportée | annotations DEX non lues dans cette version (prévu en G2) |
-| `isAnnotationPresent(Ljava/lang/Class;)Z` | Non supportée | annotations DEX non lues dans cette version (prévu en G2) |
+| `getAnnotation(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;` | Supportée |  |
+| `isAnnotationPresent(Ljava/lang/Class;)Z` | Supportée |  |
+| `getDeclaredAnnotations()[Ljava/lang/annotation/Annotation;` | Supportée |  |
+| `getAnnotations()[Ljava/lang/annotation/Annotation;` | Supportée |  |
 
 ## `java.lang.reflect.Array`
 
@@ -1398,9 +1459,12 @@ Classe : **Partielle** — conservée tant que le prototype n'a pas de notion de
 | `getName()Ljava/lang/String;` | Supportée |  |
 | `getModifiers()I` | Supportée |  |
 | `getDeclaringClass()Ljava/lang/Class;` | Supportée |  |
+| `getArtMethod()J` | Supportée |  |
 | `getParameterTypes()[Ljava/lang/Class;` | Supportée |  |
 | `getParameterCount()I` | Supportée |  |
-| `getExceptionTypes()[Ljava/lang/Class;` | Partielle | clause throws non lue (annotations) |
+| `getExceptionTypes()[Ljava/lang/Class;` | Supportée |  |
+| `getParameterAnnotations()[[Ljava/lang/annotation/Annotation;` | Supportée |  |
+| `getSignatureAnnotation()[Ljava/lang/String;` | Supportée |  |
 | `isVarArgs()Z` | Supportée |  |
 | `isSynthetic()Z` | Supportée |  |
 | `equals(Ljava/lang/Object;)Z` | Supportée |  |
@@ -1416,6 +1480,7 @@ Classe : **Partielle** — conservée tant que le prototype n'a pas de notion de
 | `getType()Ljava/lang/Class;` | Supportée |  |
 | `getModifiers()I` | Supportée |  |
 | `getDeclaringClass()Ljava/lang/Class;` | Supportée |  |
+| `getSignatureAnnotation()[Ljava/lang/String;` | Supportée |  |
 | `getArtField()J` | Partielle | identifiant opaque, valable pour les VarHandle |
 | `getOffset()I` | Partielle | décalage opaque, valable uniquement pour sun.misc.Unsafe |
 | `get(Ljava/lang/Object;)Ljava/lang/Object;` | Supportée |  |
@@ -1453,9 +1518,12 @@ Classe : **Partielle** — conservée tant que le prototype n'a pas de notion de
 | `getName()Ljava/lang/String;` | Supportée |  |
 | `getModifiers()I` | Supportée |  |
 | `getDeclaringClass()Ljava/lang/Class;` | Supportée |  |
+| `getArtMethod()J` | Supportée |  |
 | `getParameterTypes()[Ljava/lang/Class;` | Supportée |  |
 | `getParameterCount()I` | Supportée |  |
-| `getExceptionTypes()[Ljava/lang/Class;` | Partielle | clause throws non lue (annotations) |
+| `getExceptionTypes()[Ljava/lang/Class;` | Supportée |  |
+| `getParameterAnnotations()[[Ljava/lang/annotation/Annotation;` | Supportée |  |
+| `getSignatureAnnotation()[Ljava/lang/String;` | Supportée |  |
 | `isVarArgs()Z` | Supportée |  |
 | `isSynthetic()Z` | Supportée |  |
 | `isBridge()Z` | Supportée |  |
@@ -1532,6 +1600,7 @@ Classe : **Partielle** — conservée tant que le prototype n'a pas de notion de
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.util.HashMap`
 
@@ -1600,6 +1669,7 @@ _Aucun membre propre (type déclaré pour la résolution des classes)._
 | `<init>(Ljava/lang/String;)V` | Supportée |  |
 | `<init>(Ljava/lang/String;Ljava/lang/Throwable;)V` | Supportée |  |
 | `<init>(Ljava/lang/Throwable;)V` | Supportée |  |
+| `<init>(Ljava/lang/String;Ljava/lang/Throwable;ZZ)V` | Supportée |  |
 
 ## `java.util.RandomAccess` (interface)
 

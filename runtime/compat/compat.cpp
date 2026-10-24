@@ -21,7 +21,10 @@ bool feature_supported(const std::string& name) {
 }
 
 std::string permission_note(const std::string& p) {
-  if (p == "android.permission.INTERNET" || p == "android.permission.ACCESS_NETWORK_STATE") return "réseau non disponible dans le prototype";
+  // The verdict is the bridge mode's (`run`): the real libcore's sockets
+  // (`exec --bootclasspath`) are not reachable from it.
+  if (p == "android.permission.INTERNET") return "réseau absent du mode pont ; seule la vraie libcore (exec --bootclasspath) a des sockets";
+  if (p == "android.permission.ACCESS_NETWORK_STATE") return "aucun service connectivity";
   if (p.find("LOCATION") != std::string::npos) return "localisation non disponible";
   if (p.find("CAMERA") != std::string::npos) return "caméra non disponible";
   if (p.find("STORAGE") != std::string::npos) return "stockage partagé non disponible";
